@@ -147,16 +147,128 @@
   }
 
   // ── Context tab: full conversation from message+part ──
+  // Left mini-rail (one node per turn) + right conversation body.
+  // Each rail node shows: status-color dot + user question summary + tool/tok/dur.
   async function renderContext(id, body) {
-    const data = await getJSON(`/api/sessions/${id}/conversation?max=800`);
-    if (!data.messages.length) { body.innerHTML = '<div class="empty">无对话记录</div>'; return; }
-    body.innerHTML = `<div class="conv">${data.messages.map(renderMessage).join('')}</div>`;
+    const [data, turnsData] = await Promise.all([
+      getJSON(`/api/sessions/${id}/conversation?max=800`),
+      getJSON(`/api/sessions/${id}/turns`).catch(() => ({ turns: [] })),
+    ]);
+    const messages = data.messages || [];
+    if (!messages.length) { body.innerHTML = '<div class="empty">无对话记录</div>'; return; }
+
+    // Group messages into turns. Messages with no turn_id (lifecycle events:
+    // model_change / compaction) are attached to the NEXT real turn, so the
+    // rail has one node per actual turn rather than one per stray event.
+    const turnOrder = [];              // turn_id[] in first-seen order
+    const turnUser = new Map();        // turn_id → first user text-part text
+    const turnFallback = new Map();    // turn_id → first assistant text-part text
+    const msgTurnIdx = new Array(messages.length).fill(-1); // msg i → index into turnOrder
+    let pending = [];                  // orphan msg indices awaiting a turn
+    const firstText = (m) => (m.parts || []).map(p => (p.data||{}).type === 'text' && (p.data||{}).text)
+      .filter(Boolean).join(' ').trim();
+    messages.forEach((m, i) => {
+      const tid = m.turn_id;
+      if (!tid) { pending.push(i); return; }       // defer; fold into next real turn
+      if (!turnUser.has(tid)) {
+        turnOrder.push(tid);
+        turnUser.set(tid, '');
+        turnFallback.set(tid, '');
+      }
+      const ix = turnOrder.indexOf(tid);
+      msgTurnIdx[i] = ix;
+      // fold deferred orphans into this turn (they precede it)
+      for (const pi of pending) msgTurnIdx[pi] = ix;
+      pending = [];
+      const txt = firstText(m);
+      if (!txt) return;
+      if (m.role === 'user' && !turnUser.get(tid)) turnUser.set(tid, txt);
+      else if (m.role === 'assistant' && !turnFallback.get(tid)) turnFallback.set(tid, txt);
+    });
+
+    // Pick a clean one-line summary for a turn. Strips agent-injected XML
+    // wrappers (<system-reminder>, <untrusted_objective>, …) that some turns
+    // carry as the "user" message; falls back to the assistant's first text.
+    const cleanText = (s) => (s || '')
+      .replace(/<[a-zA-Z][^>]*>/g, ' ')        // drop XML-ish tags & their content
+      .replace(/<\/[a-zA-Z][^>]*>/g, ' ')
+      .replace(/\s+/g, ' ').trim();
+    const pickSummary = (tid, idx) => {
+      const u = cleanText(turnUser.get(tid));
+      if (u && u.length >= 2) return u;
+      const a = cleanText(turnFallback.get(tid));
+      if (a && a.length >= 2) return a;
+      return idx > 0 ? `Turn ${idx + 1}` : 'Turn 1';
+    };
+    // trailing orphans (lifecycle after the last turn) → attach to last turn
+    if (pending.length && turnOrder.length) {
+      const lastIx = turnOrder.length - 1;
+      for (const pi of pending) msgTurnIdx[pi] = lastIx;
+    }
+    // turn metadata from /turns (status / dur / tokens / tools) by turn_id
+    const turnMeta = new Map((turnsData.turns || []).map(t => [t.turn_id, t]));
+
+    // build rail nodes, one per turn in order
+    const railNodes = turnOrder.map((tid, idx) => {
+      const meta = turnMeta.get(tid) || {};
+      const stColor = meta.status === 'error' ? 'err'
+                    : meta.status === 'cancelled' ? 'warn' : 'ok';
+      const summary = pickSummary(tid, idx);
+      const short = summary.length > 40 ? summary.slice(0, 40) + '…' : summary;
+      const dur = meta.duration_ms ? fmtDur(meta.duration_ms / 1000) : '';
+      const tok = meta.computed_total_tokens ? fmtNum(meta.computed_total_tokens) + ' tok' : '';
+      const tools = meta.tool_call_count ? '⚙×' + meta.tool_call_count : '';
+      const sub = [tools, tok, dur].filter(Boolean).join(' · ');
+      return `<div class="ctx-node" data-turnidx="${idx}" title="${escapeHtml(summary)}">
+        <span class="ctx-dot ${stColor}"></span>
+        <div class="ctx-text">
+          <div class="ctx-sum">${escapeHtml(short)}</div>
+          ${sub ? `<div class="ctx-sub mono">${sub}</div>` : ''}
+        </div>
+      </div>`;
+    }).join('');
+
+    // build conversation body — tag each message with id for scroll-to + turn mapping
+    const msgsHtml = messages.map((m, i) => {
+      const html = renderMessage(m, i);
+      const idx = msgTurnIdx[i];
+      if (idx < 0) {
+        return html.replace('<div class="msg"', `<div class="msg" id="msg-${i}"`);
+      }
+      // inject id + data-turnidx into the .msg wrapper (first attr after class)
+      return html.replace('<div class="msg"',
+        `<div class="msg" id="msg-${i}" data-turnidx="${idx}"`);
+    }).join('');
+
+    body.innerHTML = `<div class="ctx-grid">
+      <aside class="ctx-rail" id="ctx-rail">
+        <div class="ctx-rail-tools" id="ctx-rail-tools">
+          <button type="button" class="ctx-tool-btn" data-act="expand">展开全部</button>
+          <button type="button" class="ctx-tool-btn" data-act="collapse">收拢全部</button>
+        </div>
+        ${railNodes}
+      </aside>
+      <div class="conv">${msgsHtml}</div>
+    </div>`;
+
     // wire tool-part toggles
     $$('.part.tool .plabel', body).forEach(el => el.onclick = () => {
       el.nextElementSibling.classList.toggle('collapsed');
     });
     $$('.part.reasoning .plabel', body).forEach(el => el.onclick = () => {
       el.parentElement.classList.toggle('collapsed');
+    });
+
+    // expand-all / collapse-all for the collapsible blocks.
+    // tool:     toggle the `.body` sibling (.collapsed hides it)
+    // reasoning:toggle the `.part.reasoning` itself (.collapsed hides .ptext)
+    const setAll = (expand) => {
+      $$('.part.tool .body', body).forEach(el => el.classList.toggle('collapsed', !expand));
+      $$('.part.reasoning', body).forEach(el => el.classList.toggle('collapsed', !expand));
+    };
+    $('#ctx-rail-tools', body).addEventListener('click', e => {
+      const btn = e.target.closest('.ctx-tool-btn'); if (!btn) return;
+      setAll(btn.dataset.act === 'expand');
     });
     // load tool outputs lazily where they're referenced
     $$('.part.tool[data-callid]', body).forEach(async (el) => {
@@ -170,17 +282,53 @@
         }
       } catch {}
     });
+
+    // rail node click → scroll the .tab-body (the real scroll container) so the
+    // turn's first message sits near the top. We compute the offset manually
+    // instead of scrollIntoView, which would also scroll ancestor containers.
+    const scroller = body;  // #tab-body
+    const railEl = $('#ctx-rail', body);
+    railEl.addEventListener('click', e => {
+      const node = e.target.closest('.ctx-node'); if (!node) return;
+      const idx = +node.dataset.turnidx;
+      const msg = body.querySelector(`.msg[data-turnidx="${idx}"]`);
+      if (!msg) return;
+      const delta = msg.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+      scroller.scrollBy({ top: delta, behavior: 'smooth' });
+    });
+
+    // highlight current turn in the rail as you scroll
+    const nodes = $$('.ctx-node', body);
+    const msgEls = $$('.msg[data-turnidx]', body);
+    if ('IntersectionObserver' in window) {
+      const activeFor = new Map();   // turnIdx → ratio
+      const io = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          const idx = +en.target.dataset.turnidx;
+          activeFor.set(idx, (activeFor.get(idx) || 0) + (en.isIntersecting ? en.intersectionRatio : 0));
+        });
+        // pick turn with highest visibility; ties → lowest idx (earliest)
+        let best = -1, bestR = 0;
+        for (const [idx, r] of activeFor) {
+          if (r > bestR || (r === bestR && (best < 0 || idx < best))) { best = idx; bestR = r; }
+        }
+        if (best >= 0) nodes.forEach(n => n.classList.toggle('active', +n.dataset.turnidx === best));
+      }, { root: scroller, rootMargin: '0px 0px -60% 0px', threshold: [0, 0.25, 0.5, 1] });
+      msgEls.forEach(el => io.observe(el));
+    }
   }
 
-  function renderMessage(m) {
+  function renderMessage(m, idx) {
     const role = m.role || '?';
     const meta = [
       m.model, m.variant && `variant=${m.variant}`, m.mode, m.agent,
       m.turn_id && 'turn ' + shortId(m.turn_id, 10),
       m.tokens && `in ${fmtNum(m.tokens.input)} / out ${fmtNum(m.tokens.output)}${m.tokens.reasoning?` / think ${fmtNum(m.tokens.reasoning)}`:''}`,
     ].filter(Boolean).join(' · ');
+    const num = idx != null ? `<span class="msg-num mono" title="消息序号">#${idx + 1}</span>` : '';
     return `<div class="msg">
       <div class="msg-head">
+        ${num}
         <span class="role ${role}">${role}</span>
         <span class="meta">${escapeHtml(meta)}</span>
         <span class="meta right">${fmtTime(m.time_created)}</span>
