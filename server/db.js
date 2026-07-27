@@ -275,6 +275,79 @@ function breakdownByTool(sinceMs) {
   `).all({ since: sinceMs });
 }
 
+// ───────────────────────── Token speed ─────────────────────────
+// Token generation speed (tokens/sec) for completed model requests.
+// Mirrors the token-speed-monitor project's metric, computed from the
+// same model_usage table. We aggregate raw sums and do the division in
+// JS to avoid floating-point drift inside SQLite, and to keep the
+// weighted average (= Σtokens / Σseconds) instead of mean(per-request tps).
+//
+// Caliber decisions (see design.md D1–D3):
+//   - numerator: output_tokens + reasoning_tokens (reasoning counts as
+//     generated throughput, same caliber as token-speed-monitor).
+//   - denominator: duration_ms total (incl. TTFT). Per-request TTFT is
+//     only available at turn_usage granularity, not per model call.
+//   - weighted average = Σtokens / Σseconds (token-weighted), NOT
+//     mean(tok/s) — long requests dominate, reflecting real throughput.
+
+function overviewSpeed(sinceMs) {
+  const m = db().prepare(`
+    SELECT SUM(output_tokens + COALESCE(reasoning_tokens, 0)) AS total_tokens,
+           SUM(duration_ms)                                    AS total_ms,
+           COUNT(*)                                            AS request_count,
+           SUM(CASE WHEN query_source='main_turn' THEN 1 END) AS main_count,
+           SUM(CASE WHEN query_source='subagent'  THEN 1 END) AS subagent_count
+    FROM model_usage
+    WHERE status = 'completed'
+      AND duration_ms > 0
+      AND started_at >= @since
+  `).get({ since: sinceMs });
+
+  const totalTokens = m.total_tokens || 0;
+  const totalSeconds = m.total_ms ? m.total_ms / 1000 : 0;
+  return {
+    weighted_tps: totalSeconds > 0 ? +(totalTokens / totalSeconds).toFixed(1) : null,
+    total_tokens: totalTokens,
+    total_seconds: +totalSeconds.toFixed(1),
+    request_count: m.request_count || 0,
+    main_count: m.main_count || 0,
+    subagent_count: m.subagent_count || 0,
+  };
+}
+
+// Per-request speed detail for the recent-speed table + scatter/line chart.
+// Returns newest first. tps is null when duration_ms <= 0 (not shown).
+function recentSpeed(sinceMs, limit = 50) {
+  const rows = db().prepare(`
+    SELECT started_at,
+           model_id,
+           output_tokens,
+           COALESCE(reasoning_tokens, 0) AS reasoning_tokens,
+           duration_ms,
+           query_source
+    FROM model_usage
+    WHERE status = 'completed'
+      AND duration_ms > 0
+      AND started_at >= @since
+    ORDER BY started_at DESC
+    LIMIT @limit
+  `).all({ since: sinceMs, limit });
+  return rows.map(r => {
+    const tps = r.duration_ms > 0
+      ? +((r.output_tokens + r.reasoning_tokens) / (r.duration_ms / 1000)).toFixed(1)
+      : null;
+    return {
+      time: ts(r.started_at),
+      model: r.model_id,
+      output: r.output_tokens || 0,
+      reasoning: r.reasoning_tokens || 0,
+      duration_ms: r.duration_ms,
+      tps,
+      query_source: r.query_source,
+    };
+  });
+}
+
 // ───────────────────────── Sessions ─────────────────────────
 
 function sessionList({ limit = 100, offset = 0, q = '', taskType = '', status = '' } = {}) {
@@ -572,6 +645,7 @@ module.exports = {
   db, warmDb, invalidateDb,
   ts, j, startOfDayMs,
   overviewKpis, timeseries, breakdownByModel, breakdownByTool,
+  overviewSpeed, recentSpeed,
   sessionList, sessionGet, sessionTurns, sessionConversation,
   sessionActivity, sessionChildren, sessionReasoning,
   errorsList, errorSummary, slowTools,

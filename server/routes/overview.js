@@ -25,6 +25,8 @@ router.get('/', (req, res) => {
     series,
     by_model: dbq.breakdownByModel(sinceMs),
     by_tool: dbq.breakdownByTool(sinceMs),
+    speed: dbq.overviewSpeed(sinceMs),
+    recent_speed: dbq.recentSpeed(sinceMs, 50),
   });
 });
 

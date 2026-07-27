@@ -229,6 +229,33 @@ input[type=search] { width: 100%; }
 .v-green { color: var(--sev-ok) !important; }
 .v-red { color: var(--sev-err) !important; }
 
+/* ── token speed tiers (red <30 / yellow 30–80 / green >80 t/s) ── */
+/* Color is text-only so it reads on both themes; cells/badges stay subtle. */
+.spd-red    { color: var(--sev-err)  !important; font-variant-numeric: tabular-nums; }
+.spd-yellow { color: var(--sev-warn) !important; font-variant-numeric: tabular-nums; }
+.spd-green  { color: var(--sev-ok)   !important; font-variant-numeric: tabular-nums; }
+/* compact speed chip for the live feed + table cells */
+.spd-chip {
+  display: inline-block; padding: 0 6px; border-radius: 10px;
+  font-size: 11px; font-weight: 600; font-family: var(--font-mono);
+  border: 1px solid transparent; white-space: nowrap;
+}
+.spd-chip.spd-red    { border-color: color-mix(in srgb, var(--sev-err)  35%, transparent); background: color-mix(in srgb, var(--sev-err)  10%, transparent); }
+.spd-chip.spd-yellow { border-color: color-mix(in srgb, var(--sev-warn) 35%, transparent); background: color-mix(in srgb, var(--sev-warn) 10%, transparent); }
+.spd-chip.spd-green  { border-color: color-mix(in srgb, var(--sev-ok)   35%, transparent); background: color-mix(in srgb, var(--sev-ok)   10%, transparent); }
+
+/* speed table — scrolls within a bounded height so the section doesn't
+   dominate the overview. Shares the global table styles. */
+.speed-wrap { max-height: 320px; overflow-y: auto; }
+.speed-foot {
+  display: flex; gap: 16px; flex-wrap: wrap; align-items: baseline;
+  padding: 9px 12px; font-size: 11.5px; color: var(--fg-3);
+  border-top: 1px solid var(--border-soft); background: var(--surface-2);
+  font-variant-numeric: tabular-nums;
+}
+.speed-foot b { color: var(--fg-1); font-weight: 600; font-family: var(--font-mono); }
+.speed-foot .lbl { color: var(--fg-4); text-transform: uppercase; letter-spacing: .4px; font-size: 10px; }
+
 /* ── grid + card ───────────────────────────────────────── */
 .grid { display: grid; gap: 12px; }
 .grid.cols-2 { grid-template-columns: 1fr 1fr; }

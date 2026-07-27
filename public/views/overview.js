@@ -3,7 +3,7 @@
 (function () {
   const { registerView, $, fmtInt, fmtNum, fmtMs, fmtTime,
           escapeHtml, statusBadge, getJSON, pct, loading, Chart,
-          chartPalette, registerChart } = window.ZC;
+          chartPalette, registerChart, cssVar } = window.ZC;
 
   let charts = {};
   let liveEs = null;
@@ -39,11 +39,22 @@
         </div>
 
         <div class="kpis" id="kpis">${loading()}</div>
+        <div class="kpis" id="kpi-speed" style="margin-top:10px">${loading()}</div>
 
         <h2>趋势 <span class="sub" id="series-range"></span></h2>
         <div class="grid cols-2">
           <div class="card"><h3>模型调用 / 小时</h3><div class="chart-wrap"><canvas id="ch-calls"></canvas></div></div>
           <div class="card"><h3>Token 构成（输入 / 输出 / 推理）</h3><div class="chart-wrap"><canvas id="ch-tokens"></canvas></div></div>
+        </div>
+
+        <h2>Token 速度 <span class="sub">tokens/sec · 每次完成请求</span></h2>
+        <div class="grid cols-2">
+          <div class="card"><h3>速度随时间</h3><div class="chart-wrap"><canvas id="ch-speed"></canvas></div></div>
+          <div class="card tight" style="display:flex;flex-direction:column">
+            <h3 style="padding:12px 14px 0">最近请求速度</h3>
+            <div class="speed-wrap" id="speed-table-wrap">${loading()}</div>
+            <div class="speed-foot" id="speed-foot" hidden></div>
+          </div>
         </div>
 
         <h2>实时活动 <span class="sub">SSE 推送新发生的模型/工具调用</span> <span id="live-status" class="badge dim">连接中…</span></h2>
@@ -74,8 +85,11 @@
     lastWindow = w;
     const data = await getJSON(`/api/overview?window=${w}`);
     renderKpis(data.kpis, w);
+    renderSpeedKpi(data.speed);
     renderSeries(data.series, w);
     renderBreakdown(data.by_model, data.by_tool);
+    renderSpeedChart(data.recent_speed || []);
+    renderSpeedTable(data.recent_speed || []);
   }
 
   function renderKpis(k, w) {
@@ -102,6 +116,28 @@
       <div class="kpi"><div class="label">错误率</div><div class="value ${errRate > 5 ? 'v-red' : ''}">${errRate.toFixed(1)}%</div>
         <div class="delta">${fmtInt(k.model.errors)} / ${fmtInt(k.model.calls)}</div></div>
     `;
+  }
+
+  // ── token speed ──
+  // Tier: red <30 / yellow 30–80 / green >80 t/s (design.md D4).
+  // Null/undefined/non-finite → no tier (empty string).
+  function speedClass(tps) {
+    if (tps == null || !isFinite(tps)) return '';
+    if (tps < 30) return 'spd-red';
+    if (tps <= 80) return 'spd-yellow';
+    return 'spd-green';
+  }
+
+  function renderSpeedKpi(s) {
+    const host = $('#kpi-speed');
+    if (!host) return;
+    const cls = speedClass(s && s.weighted_tps);
+    host.innerHTML = `
+      <div class="kpi">
+        <div class="label">平均 Token 速度 (${lastWindow})</div>
+        <div class="value ${cls}">${s && s.weighted_tps != null ? s.weighted_tps + ' <span class="faint" style="font-size:13px;font-weight:400">t/s</span>' : '—'}</div>
+        <div class="delta">加权:总 token ÷ 总秒数 · 主 ${fmtInt(s && s.main_count)} · 子agent ${fmtInt(s && s.subagent_count)}</div>
+      </div>`;
   }
 
   function renderSeries(series, w) {
@@ -152,6 +188,104 @@
     };
   }
 
+  // tier color from CSS variables, resolved at render time so theme flips
+  // recolor points on the next render.
+  function tierVar(cls) {
+    if (cls === 'spd-red') return '--sev-err';
+    if (cls === 'spd-yellow') return '--sev-warn';
+    if (cls === 'spd-green') return '--sev-ok';
+    return '--fg-4';
+  }
+
+  function renderSpeedChart(recent) {
+    const host = $('#ch-speed');
+    charts.speed && charts.speed.destroy();
+    // chronological order (oldest → newest) for a left→-right line
+    const rows = [...recent].reverse().filter(r => r.tps != null);
+    if (!rows.length) {
+      if (host) {
+        const ctx = host.getContext('2d');
+        ctx && ctx.clearRect(0, 0, host.width, host.height);
+      }
+      // overlay an empty-state note inside the chart card
+      const card = host && host.closest('.card');
+      if (card) card.querySelector('.empty-speed')?.remove();
+      if (card) card.insertAdjacentHTML('beforeend', '<div class="empty empty-speed">窗口内无完成请求</div>');
+      return;
+    }
+    // clear any prior empty-state note
+    const card = host && host.closest('.card');
+    if (card) card.querySelector('.empty-speed')?.remove();
+
+    const P = chartPalette();
+    const colors = rows.map(r => cssVar(tierVar(speedClass(r.tps))));
+    charts.speed = registerChart(new Chart(host, {
+      type: 'line',
+      data: {
+        labels: rows.map(r => fmtTime(r.time)),
+        datasets: [{
+          label: 'tok/s',
+          data: rows.map(r => r.tps),
+          borderColor: P.accent,
+          backgroundColor: hexA(P.accent, .08),
+          fill: false, tension: .25, borderWidth: 1.5,
+          pointRadius: 3, pointHoverRadius: 5,
+          pointBackgroundColor: colors,
+          pointBorderColor: colors,
+        }],
+      },
+      options: chartOpts({ y: { title: 'tok/s' } }),
+    }));
+  }
+
+  function renderSpeedTable(recent) {
+    const wrap = $('#speed-table-wrap');
+    const foot = $('#speed-foot');
+    if (!wrap) return;
+    if (!recent.length) {
+      wrap.innerHTML = `<div class="empty">窗口内无完成请求</div>`;
+      if (foot) foot.hidden = true;
+      return;
+    }
+    wrap.innerHTML = `
+      <table id="tbl-speed">
+        <thead><tr>
+          <th>Time</th><th>Model</th><th class="num">Output</th><th class="num">Reason</th>
+          <th class="num">Duration</th><th class="num">Speed</th><th>Source</th>
+        </tr></thead>
+        <tbody>${
+          recent.map(r => {
+            const cls = speedClass(r.tps);
+            return `<tr>
+              <td class="ts-cell">${fmtTime(r.time)}</td>
+              <td><span class="mono">${escapeHtml(r.model || '?')}</span></td>
+              <td class="num">${fmtInt(r.output)}</td>
+              <td class="num">${r.reasoning ? fmtInt(r.reasoning) : '<span class="faint">0</span>'}</td>
+              <td class="num">${fmtMs(r.duration_ms)}</td>
+              <td class="num">${r.tps != null ? `<span class="spd-chip ${cls}">${r.tps} t/s</span>` : '<span class="faint">—</span>'}</td>
+              <td><span class="badge ${r.query_source==='main_turn'?'blue':r.query_source==='subagent'?'teal':'dim'}">${escapeHtml(r.query_source||'')}</span></td>
+            </tr>`;
+          }).join('')
+        }</tbody>
+      </table>`;
+
+    // footer summary: window weighted avg + totals, recomputed from the same
+    // caliber (Σtokens / Σseconds). recent_speed is capped at 50 rows, but the
+    // footer should reflect those visible rows (consistent with the table).
+    if (foot) {
+      const totTok = recent.reduce((a, r) => a + (r.output + r.reasoning), 0);
+      const totSec = recent.reduce((a, r) => a + (r.duration_ms || 0), 0) / 1000;
+      const wTps = totSec > 0 ? (totTok / totSec).toFixed(1) : null;
+      const subs = recent.filter(r => r.query_source === 'subagent').length;
+      foot.hidden = false;
+      foot.innerHTML = `
+        <span><span class="lbl">均速</span> <b class="${speedClass(wTps != null ? +wTps : null)}">${wTps != null ? wTps + ' t/s' : '—'}</b></span>
+        <span><span class="lbl">总 token</span> <b>${fmtInt(totTok)}</b></span>
+        <span><span class="lbl">请求</span> <b>${fmtInt(recent.length)}</b></span>
+        <span><span class="lbl">subagent</span> <b>${fmtInt(subs)}</b></span>`;
+    }
+  }
+
   function renderBreakdown(byModel, byTool) {
     $('#tbl-model').querySelector('thead').innerHTML = `<tr><th>provider / model</th><th>来源</th><th class="num">调用</th><th class="num">输入</th><th class="num">输出</th><th class="num">推理</th><th class="num">均时延</th></tr>`;
     $('#tbl-model').querySelector('tbody').innerHTML = byModel.map(m => `<tr>
@@ -178,16 +312,21 @@
   }
 
   function pushRow(kind, r) {
-    let cat, label, summary;
+    let cat, label, summary, spd = null;
     if (kind === 'model') {
       cat = 'llm'; label = 'llm→';
       summary = `${r.query_source} · ${r.model_id||'?'} ${r.variant||''} · in ${fmtNum(r.input_tokens)} / out ${fmtNum(r.output_tokens)}`;
       if (r.reasoning_tokens) summary += ` / think ${fmtNum(r.reasoning_tokens)}`;
+      // token speed — only for completed calls with a real duration
+      if (r.status === 'completed' && r.duration_ms > 0) {
+        const out = (r.output_tokens || 0) + (r.reasoning_tokens || 0);
+        spd = +(out / (r.duration_ms / 1000)).toFixed(1);
+      }
     } else {
       cat = 'tool'; label = 'tool.call';
       summary = `${r.tool_name} · ${r.status}${r.exit_code!=null?' exit='+r.exit_code:''}`;
     }
-    liveRows.unshift({ seq: liveRows.length, t: r.started_at, cat, label, summary, status: r.status, sid: r.session_id, dur: r.duration_ms });
+    liveRows.unshift({ seq: liveRows.length, t: r.started_at, cat, label, summary, status: r.status, sid: r.session_id, dur: r.duration_ms, spd });
     liveRows = liveRows.slice(0, 60);
     renderFeed();
   }
@@ -199,7 +338,7 @@
         <span class="ts">${fmtTime(row.t)}</span>
         <span class="cat cat-dot ${row.cat}"></span>
         <span class="desc"><span class="k ${row.cat}">${row.label}</span> <span class="m">${escapeHtml(row.summary)}</span> <span class="faint">${shortId(row.sid,8)}</span> ${statusBadge(row.status)}</span>
-        <span class="right">${row.dur?fmtMs(row.dur):''}</span>
+        <span class="right">${row.dur?fmtMs(row.dur):''}${row.spd!=null?` <span class="spd-chip ${speedClass(row.spd)}">${row.spd} t/s</span>`:''}</span>
       </div>`).join('') || `<div class="empty">等待新事件…</div>`;
   }
 
