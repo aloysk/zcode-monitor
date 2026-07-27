@@ -80,9 +80,13 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
 
 此刻的运行状态：模型调用数、token（输入/输出/推理/缓存）、工具调用、错误率、活跃会话；按小时的趋势图；按模型/请求来源/工具的算力分布；**SSE 实时推送**新发生的模型/工具调用。
 
+![实时监控 Overview](public/assets/monitor.png)
+
 ### 2. 会话深挖 (Sessions) — 核心
 
-左栏会话列表（搜索/筛选/排序），右栏 7 个标签：
+左栏会话列表（搜索/筛选/排序），右栏 7 个标签（下图展示 **Context** 标签：完整对话历史，推理思考用紫色侧边块单独呈现，点击展开看全文）：
+
+![会话深挖 Sessions - Context](public/assets/context.png)
 
 - **Timeline** — 事件时间线（子 agent 的 transcript.jsonl 事件流）。
   把 `turn_started → model_request → model_network_status → model_streaming → model_complete → tool.call/result → turn_complete`
