@@ -2,24 +2,16 @@
 // routes/live.js — Server-Sent Events stream of newly observed model/tool rows.
 // Polls the SQLite DB every second for rows newer than the last-seen
 // started_at, and forwards them to connected clients.
+// Each connection owns its watermark: a module-level shared one made
+// concurrent clients split the stream (each poll consumed rows the other
+// never saw), and initializing it must use MAX(started_at) — an
+// ASC/LIMIT-1 lookup seeded the oldest row and replayed the entire table
+// (~269k rows, ~1h at the 100-rows/1.5s poll cap) after every server boot.
 const express = require('express');
 const dbq = require('../db');
 const log = require('../log-tail');
 
 const router = express.Router();
-
-let lastModelStartedAt = Date.now();
-let lastToolStartedAt = Date.now();
-
-// refresh the watermark so we only stream rows created after server start
-(function init() {
-  try {
-    const m = dbq.recentModelRows(0, 1)[0];
-    const t = dbq.recentToolRows(0, 1)[0];
-    if (m && m.started_at) lastModelStartedAt = new Date(m.started_at).getTime();
-    if (t && t.started_at) lastToolStartedAt = new Date(t.started_at).getTime();
-  } catch {}
-})();
 
 // track last log size so we can tail forward
 let lastLogSize = 0;
@@ -33,6 +25,11 @@ router.get('/events', (req, res) => {
     'X-Accel-Buffering': 'no',
   });
   res.write(': connected\n\n');
+
+  // per-connection watermarks, starting at the newest observed row so only
+  // traffic after THIS connect streams
+  let lastModelStartedAt = dbq.latestModelStartedAt();
+  let lastToolStartedAt = dbq.latestToolStartedAt();
 
   const heartbeat = setInterval(() => res.write(': hb\n\n'), 25000);
 

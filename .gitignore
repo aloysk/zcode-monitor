@@ -19,3 +19,6 @@ tools/**/obj/
 widget-settings.json
 widget-run.log
 wdiag-*.png
+shell/publish/
+sse-capture*.txt
+tools/wdiag/*.txt

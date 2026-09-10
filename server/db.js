@@ -316,10 +316,12 @@ function overviewSpeed(sinceMs) {
 }
 
 // Per-request speed detail for the recent-speed table + scatter/line chart.
+// id is exposed so the widget can dedup its SSE stream against seed re-fetches.
 // Returns newest first. tps is null when duration_ms <= 0 (not shown).
 function recentSpeed(sinceMs, limit = 50) {
   const rows = db().prepare(`
-    SELECT started_at,
+    SELECT id,
+           started_at,
            model_id,
            output_tokens,
            COALESCE(reasoning_tokens, 0) AS reasoning_tokens,
@@ -337,6 +339,7 @@ function recentSpeed(sinceMs, limit = 50) {
       ? +((r.output_tokens + r.reasoning_tokens) / (r.duration_ms / 1000)).toFixed(1)
       : null;
     return {
+      id: r.id,
       time: ts(r.started_at),
       model: r.model_id,
       output: r.output_tokens || 0,
@@ -346,6 +349,43 @@ function recentSpeed(sinceMs, limit = 50) {
       query_source: r.query_source,
     };
   });
+}
+
+// Exact rolling-window population for the floating widget: completed requests
+// whose COMPLETION time (started_at + duration_ms) falls inside the window.
+// No LIMIT cap — recentSpeed's 50-row cap under-seeds busy windows (65+
+// completions per 5 min observed under parallel subagents), which skews the
+// widget's weighted aggregate. Payload stays tiny (window-sized).
+function completedSince(sinceMs) {
+  return db().prepare(`
+    SELECT id,
+           started_at,
+           duration_ms,
+           output_tokens,
+           COALESCE(reasoning_tokens, 0) AS reasoning_tokens
+    FROM model_usage
+    WHERE status = 'completed'
+      AND duration_ms > 0
+      AND started_at + duration_ms >= @since
+    ORDER BY started_at ASC
+  `).all({ since: sinceMs }).map(r => ({
+    id: r.id,
+    time: ts(r.started_at),
+    output: r.output_tokens || 0,
+    reasoning: r.reasoning_tokens || 0,
+    duration_ms: r.duration_ms,
+  }));
+}
+
+// Newest started_at per table — SSE watermark init. recentModelRows orders
+// ASC, so an "ORDER BY ... LIMIT 1" init picks the OLDEST row and replays the
+// whole table on every server boot; MAX() must be explicit.
+function latestModelStartedAt() {
+  return db().prepare('SELECT MAX(started_at) AS m FROM model_usage').get().m || 0;
+}
+
+function latestToolStartedAt() {
+  return db().prepare('SELECT MAX(started_at) AS m FROM tool_usage').get().m || 0;
 }
 
 // ───────────────────────── Sessions ─────────────────────────
@@ -645,10 +685,10 @@ module.exports = {
   db, warmDb, invalidateDb,
   ts, j, startOfDayMs,
   overviewKpis, timeseries, breakdownByModel, breakdownByTool,
-  overviewSpeed, recentSpeed,
+  overviewSpeed, recentSpeed, completedSince,
   sessionList, sessionGet, sessionTurns, sessionConversation,
   sessionActivity, sessionChildren, sessionReasoning,
   errorsList, errorSummary, slowTools,
-  recentModelRows, recentToolRows,
+  recentModelRows, recentToolRows, latestModelStartedAt, latestToolStartedAt,
   agentsForest,
 };

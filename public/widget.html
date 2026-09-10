@@ -1,9 +1,10 @@
 <!DOCTYPE html>
 <!-- token-speed floating widget — pill edition.
      One line: brand · tier-colored mono number · unit. Nothing else.
-     Number = rolling weighted tps over the last 5 minutes (real-time):
-     seeded from /api/overview?hours=1 (recent_speed), then every completed
-     request via SSE /api/live/events 'model'. Idle → "—".
+     Number = rolling weighted tps over requests COMPLETED in the last 5
+     minutes: seeded from /api/widget/recent (the exact window population),
+     then live completed requests via SSE /api/live/events 'model'.
+     Idle → "—". One decimal always shown (56.0, not 56).
      States: ok (number, tier color) · idle (—, dim) · error (—, red brand).
      The shell window is 160×36 with a transparent WebView2 background; this
      page paints the pill itself (full radius + hairline border).
@@ -58,6 +59,7 @@ body {
 .spd-red    { color: var(--negative); }
 .spd-yellow { color: var(--notice); }
 .spd-green  { color: var(--positive); }
+.tps.err    { color: var(--negative); } /* server unreachable — distinct from idle gray */
 .unit {
   font-family: var(--font-sans);
   font-size: 11px;
@@ -83,39 +85,70 @@ function speedClass(tps) {
   return 'spd-green';
 }
 
-// rolling request buffer: {t: epoch ms, tok, durMs}
+// Rolling request buffer, keyed by COMPLETION time (started_at + duration_ms):
+// rows land in db.sqlite only when a request finishes, so started_at-keying
+// evicted a request longer than the window before it ever arrived, and a long
+// request whose start predates the window legitimately belongs in "recent".
+// Entries: {end: epoch ms, tok, durMs, id}. `seen` dedups the seed (60s re-fetch
+// of the same rows) against already-buffered SSE events; ids leave with their
+// entry so the set stays window-sized.
 const buf = [];
-function pushReq(t, tok, durMs) {
-  if (!(t > 0) || !(tok >= 0) || !(durMs > 0)) return;
-  buf.push({ t, tok, durMs });
+const seen = new Set();
+function pushReq(id, endMs, tok, durMs) {
+  if (!(endMs > 0) || !(tok >= 0) || !(durMs > 0)) return;
+  if (endMs <= Date.now() - ROLL_MS) return; // completed before the window opened
+  if (id != null) {
+    if (seen.has(id)) return;
+    seen.add(id);
+  }
+  buf.push({ end: endMs, tok, durMs, id });
 }
 function render() {
   const now = Date.now();
-  while (buf.length && buf[0].t < now - ROLL_MS) buf.shift();
+  const cutoff = now - ROLL_MS;
+  // full pass, NOT a front-only loop: buf is appended in started_at order
+  // (seed) / arrival order (SSE), which is not completion-time order — a
+  // front-only evict let short rows linger behind a long row for minutes
+  for (let i = 0; i < buf.length; )
+  {
+    if (buf[i].end < cutoff)
+    {
+      const [gone] = buf.splice(i, 1);
+      if (gone.id != null) seen.delete(gone.id);
+    }
+    else i++;
+  }
   if (!buf.length) {
     $('tps').textContent = '—';
     $('tps').className = 'tps';
     $('unit').hidden = true;
     return;
   }
-  const tok = buf.reduce((s, r) => s + r.tok, 0);
-  const sec = buf.reduce((s, r) => s + r.durMs, 0) / 1000;
-  const tps = sec > 0 ? +(tok / sec).toFixed(1) : null;
-  $('tps').textContent = tps != null ? tps : '—';
-  $('tps').className = 'tps ' + speedClass(tps);
-  $('unit').hidden = tps == null;
+  let tok = 0, ms = 0;
+  for (const r of buf) { tok += r.tok; ms += r.durMs; }
+  // weighted aggregate over the window — same caliber as the dashboard KPI:
+  // Σ(output+reasoning) ÷ Σduration (completed only, TTFT included)
+  const text = ms > 0 ? (tok / (ms / 1000)).toFixed(1) : null;
+  $('tps').textContent = text != null ? text : '—';
+  $('tps').className = 'tps ' + speedClass(text != null ? parseFloat(text) : null);
+  $('unit').hidden = text == null;
 }
 
-// seed history (last hour's recent requests), then keep rolling
+// seed = the exact rolling-window population (completed in the last 5 min,
+// uncapped), then keep rolling via SSE; re-fetch also self-heals SSE gaps
 async function seed() {
   try {
-    const r = await fetch('/api/overview?hours=1', { cache: 'no-store' });
+    const r = await fetch('/api/widget/recent', { cache: 'no-store' });
     if (!r.ok) throw new Error('http ' + r.status);
     const d = await r.json();
-    for (const q of (d.recent_speed || []))
-      pushReq(new Date(q.time).getTime(), (q.output || 0) + (q.reasoning || 0), q.duration_ms);
+    for (const q of d) // bare array of window rows — see server completedSince
+      pushReq(q.id,
+              new Date(q.time).getTime() + q.duration_ms,
+              (q.output || 0) + (q.reasoning || 0),
+              q.duration_ms);
     render();
   } catch (e) {
+    if (buf.length) return; // keep the last good number; the 15s retry owns recovery
     $('tps').textContent = '—';
     $('tps').className = 'tps err';
     $('unit').hidden = true;
@@ -127,7 +160,11 @@ try {
   const es = new EventSource('/api/live/events');
   es.addEventListener('model', e => {
     const m = JSON.parse(e.data);
-    pushReq(new Date(m.started_at).getTime(),
+    // completed only — error/cancelled rows carry duration but no real output
+    // and would drag the weighted aggregate down (matches server recentSpeed)
+    if (m.status !== 'completed' || !(m.duration_ms > 0)) return;
+    pushReq(m.id,
+            new Date(m.started_at).getTime() + m.duration_ms,
             (m.output_tokens || 0) + (m.reasoning_tokens || 0),
             m.duration_ms);
     clearTimeout(bump);
@@ -137,7 +174,8 @@ try {
 
 seed();
 setInterval(render, 10000);   // window slides even without new events
-setInterval(seed, 60000);     // safety net if SSE is down
+setInterval(seed, 15000);     // self-heal: SSE watermark misses rows that were
+                              // in-flight when the server booted; 15s bounds it
 document.addEventListener('visibilitychange', () => { if (!document.hidden) seed(); });
 
 // ── frameless-window affordances (only meaningful inside the WebView2 shell) ──

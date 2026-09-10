@@ -181,8 +181,28 @@ app.use((err, _req, res, next) => {
 // static frontend
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+// companion mode (spawned by the widget shell with ZCODE_WIDGET_CHILD=1):
+// if the shell is force-killed the server can be orphaned; with no requests
+// for 5 minutes it exits by itself. The widget page seeds every 15s, so a
+// live widget keeps it alive; plain `npm start` never enters this mode.
+// NOTE: /api/widget/recent below is the keep-alive — keep it mounted AFTER
+// this tracker (Express runs in registration order; routes claimed earlier,
+// e.g. /api/live/events in the API router, do not refresh lastSeen).
+if (process.env.ZCODE_WIDGET_CHILD === '1') {
+  let lastSeen = Date.now();
+  app.use((req, res, next) => { lastSeen = Date.now(); next(); });
+  setInterval(() => {
+    if (Date.now() - lastSeen > 5 * 60 * 1000) {
+      console.log('companion: no requests for 5min — exiting');
+      process.exit(0);
+    }
+  }, 30 * 1000).unref();
+}
+
 // token-speed floating widget page (loaded by the frameless WebView2 shell)
 app.get('/widget', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'widget.html')));
+// exact rolling-window seed for the widget page (no LIMIT cap — see db.js completedSince)
+app.get('/api/widget/recent', (_req, res) => res.json(dbq.completedSince(Date.now() - 5 * 60 * 1000)));
 
 // SPA fallback: any non-api route → index.html
 app.get(/^\/(?!api).*/, (_req, res) => {

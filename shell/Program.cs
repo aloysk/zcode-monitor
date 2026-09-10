@@ -1,5 +1,5 @@
-// ZcodeWidget — frameless always-on-top shell for the zcode-monitor token-speed
-// widget page (../public/widget.html, served by the node server at /widget).
+// ZcodeWidget — frameless shell for the zcode-monitor token-speed widget page
+// (../public/widget.html, served by the node server at /widget).
 // Same host pattern as ELaserFocus OperatorHost: WinForms + WebView2.
 //
 // Docking: the pill anchors to the ZCode main window, floating just above the
@@ -10,9 +10,18 @@
 // while docked adjusts a persistent (dx, dy) fine-tune offset instead of
 // breaking the anchor. The context menu can toggle docking off entirely.
 //
-// Window rules: borderless, topmost, no taskbar entry, transparent WebView2 so
+// Lifecycle: bound to ZCode, not to login. ZCode's SessionStart hook
+// (~/.zcode/cli/config.json hooks.events) launches this exe whenever ZCode
+// starts a session; the single-instance mutex makes repeat fires no-ops. When
+// no ZCode process exists for a grace period the shell exits (and kills the
+// node server it owns) — the pill's lifetime mirrors ZCode's. Until a ZCode
+// main window exists the pill stays hidden (SetVisibleCore suppresses the
+// first show; the watch timer reveals it). If the node server isn't up, the
+// shell spawns it as a hidden child so the whole stack comes up with the pill.
+//
+// Window rules: borderless, no taskbar entry, transparent WebView2 so
 // the page paints its own pill shape. WebView2 init recreates the native
-// window and drops property-based styles — WS_EX_TOPMOST|WS_EX_TOOLWINDOW are
+// window and drops property-based styles — WS_EX_TOOLWINDOW is
 // baked into CreateParams and re-asserted via SetWindowPos after init.
 // The page drives the shell via window.chrome.webview.postMessage:
 //   {type:'drag'}            — drag (docked: adjusts offset; free: absolute)
@@ -47,6 +56,12 @@ internal static class Program
         // (observed: same window reporting 3200×1904 and 1600×952)
         _ = SetProcessDpiAwarenessContext(new IntPtr(-4));
         Log("boot");
+        using var singleton = new Mutex(true, "ZcodeWidget_SingleInstance", out bool first);
+        if (!first)
+        {
+            Log("another instance is already running — exiting");
+            return;
+        }
         ApplicationConfiguration.Initialize();
         Application.ThreadException += (s, e) => Log("ThreadException: " + e.Exception);
         AppDomain.CurrentDomain.UnhandledException += (s, e) =>
@@ -109,6 +124,47 @@ internal sealed class WidgetForm : Form
     [DllImport("user32.dll")]
     private static extern bool IsIconic(IntPtr h);
 
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr h);
+
+    // job object ties the spawned node server's lifetime to ours — it dies even
+    // when THIS process is force-killed (FormClosing never runs on TerminateProcess)
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr CreateJobObject(IntPtr attrs, string? name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(IntPtr job, int infoClass,
+        ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, int size);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize; // SIZE_T
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;                                      // ULONG_PTR
+        public uint PriorityClass, SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount,
+                     ReadTransferCount, WriteTransferCount, OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+    }
+
     [DllImport("gdi32.dll")]
     private static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int w, int h);
 
@@ -127,6 +183,7 @@ internal sealed class WidgetForm : Form
     private readonly ToolStripMenuItem _dockItem = new("吸附 ZCode 窗口") { Checked = true };
     private readonly string _settingsPath = Path.Combine(AppContext.BaseDirectory, "widget-settings.json");
     private readonly System.Windows.Forms.Timer _watch = new() { Interval = 500 };
+    private static readonly System.Net.Http.HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(2) };
 
     private IntPtr _zcodeHwnd;
     private uint _zcodePid;
@@ -134,6 +191,11 @@ internal sealed class WidgetForm : Form
     private WinEventProc? _winProc; // rooted so the hook delegate survives GC
     private bool _docked = true;
     private int _dx, _dy; // drag fine-tune offsets applied on top of the dock anchor
+    private bool _shownOnce;
+    private int _zcodeGoneTicks; // consecutive 500ms ticks with no ZCode process
+    private System.Diagnostics.Process? _serverProc;
+    private bool _ownsServer;
+    private IntPtr _serverJob; // KILL_ON_JOB_CLOSE: child node dies with us, always
 
     public WidgetForm()
     {
@@ -166,19 +228,58 @@ internal sealed class WidgetForm : Form
         _menu.Items.Add("退出", null, (s, e) => Close());
         ContextMenuStrip = _menu;
 
-        Shown += async (s, e) => await InitWebAsync();
-        FormClosing += (s, e) => { Program.Log("closing"); SaveSettings(); if (_winHook != IntPtr.Zero) UnhookWinEvent(_winHook); };
+        Shown += async (s, e) =>
+        {
+            // slow path (autostart at login): bring the node server up BEFORE
+            // navigating, or WebView2 would paint its own error page
+            if (!await ServerUpAsync()) await EnsureServerAsync();
+            await InitWebAsync();
+        };
+        FormClosing += (s, e) =>
+        {
+            Program.Log("closing");
+            SaveSettings();
+            if (_winHook != IntPtr.Zero) UnhookWinEvent(_winHook);
+            if (_ownsServer && _serverProc is { HasExited: false })
+            {
+                try { _serverProc.Kill(); Program.Log("server: killed owned node"); }
+                catch { /* already dying */ }
+            }
+        };
 
         // re-acquire/re-dock safety net (hook misses restarts and some transitions)
         _watch.Tick += (s, e) =>
         {
-            if (_zcodeHwnd == IntPtr.Zero || !GetWindowRect(_zcodeHwnd, out _)) AcquireZcodeWindow();
+            if (_zcodeHwnd == IntPtr.Zero || !IsWindow(_zcodeHwnd))
+            {
+                AcquireZcodeWindow();
+                if (_zcodeHwnd == IntPtr.Zero)
+                {
+                    // lifecycle mirrors ZCode: after a grace period with no
+                    // ZCode process at all, exit (kills the owned node server);
+                    // brief gaps (app restart, window recreation) are bridged
+                    if (System.Diagnostics.Process.GetProcessesByName("ZCode").Length == 0)
+                    {
+                        if (++_zcodeGoneTicks >= 30)
+                        {
+                            Program.Log("zcode process gone 15s — exiting");
+                            Close();
+                            return;
+                        }
+                    }
+                    else _zcodeGoneTicks = 0;
+                    // no window yet (or CLI-only sessions) → hidden, not gone
+                    if (Visible) { Hide(); Program.Log("hidden: no zcode window"); }
+                    return;
+                }
+                _zcodeGoneTicks = 0;
+                Program.Log($"zcode window (re)acquired: 0x{_zcodeHwnd:X} pid={_zcodePid}");
+            }
             if (_docked) BindZOrder();
-            // bound to ZCode's visibility too: no pill floating over the desktop
-            // or other apps while ZCode is minimized
-            bool zcodeUp = _zcodeHwnd != IntPtr.Zero && !IsIconic(_zcodeHwnd);
-            if (_docked && !zcodeUp) Hide();
-            else if (_docked && zcodeUp && !Visible) Show();
+            // bound to ZCode's visibility too: no pill floating over the
+            // desktop or other apps while ZCode is away or minimized
+            if (IsIconic(_zcodeHwnd)) { if (Visible) Hide(); }
+            else if (!Visible) Show();
             ApplyDock();
         };
         _watch.Start();
@@ -211,6 +312,112 @@ internal sealed class WidgetForm : Form
             return cp;
         }
     }
+
+    // Autostart lands before ZCode opens: suppress the very first show while
+    // no ZCode window exists. The watch timer's Show() (when ZCode appears)
+    // passes through normally — Shown and WebView2 init ride on that reveal.
+    protected override void SetVisibleCore(bool value)
+    {
+        if (!_shownOnce && value && _zcodeHwnd == IntPtr.Zero)
+        {
+            _shownOnce = true;
+            Program.Log("first show suppressed (no zcode window yet)");
+            value = false;
+        }
+        else if (value) _shownOnce = true;
+        base.SetVisibleCore(value);
+    }
+
+    // ── node server companion ────────────────────────────────────────
+
+    private static async Task<bool> ServerUpAsync()
+    {
+        try
+        {
+            using var r = await Http.GetAsync("http://127.0.0.1:7331/api/overview?hours=1");
+            return r.IsSuccessStatusCode;
+        }
+        catch { return false; }
+    }
+
+    // The widget page is served by the repo's node server. At login it usually
+    // isn't running: probe a few times, then spawn it hidden as our child so
+    // the whole stack comes up with the pill. The owned server dies with our
+    // clean exit (menu 退出); hiding with ZCode gone keeps both alive.
+    private async Task EnsureServerAsync()
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            if (await ServerUpAsync()) { Program.Log("server: already up"); return; }
+            await Task.Delay(600);
+        }
+        var repo = FindRepoRoot();
+        var node = FindNodeExe();
+        if (repo == null || node == null)
+        {
+            Program.Log($"server: cannot spawn (repo={repo ?? "null"} node={node ?? "null"}) — start node manually");
+            return;
+        }
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = node,
+                Arguments = "server/index.js",
+                WorkingDirectory = repo,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            psi.EnvironmentVariables["OPEN_BROWSER"] = "0";
+            psi.EnvironmentVariables["ZCODE_WIDGET_CHILD"] = "1"; // companion mode: idle self-exit
+            _serverProc = System.Diagnostics.Process.Start(psi);
+            _ownsServer = true;
+            _serverJob = CreateJobObject(IntPtr.Zero, null);
+            var jobInfo = default(JOBOBJECT_EXTENDED_LIMIT_INFORMATION);
+            jobInfo.BasicLimitInformation.LimitFlags = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            bool okInfo = SetInformationJobObject(_serverJob, 9 /*ExtendedLimitInformation*/,
+                ref jobInfo, System.Runtime.InteropServices.Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>());
+            bool okAssign = _serverProc is not null && AssignProcessToJobObject(_serverJob, _serverProc.Handle);
+            // log the raw results: a silent false here leaves an orphan server on
+            // force-kill (observed once), and the idle self-exit is the backstop
+            if (!okInfo)
+                Program.Log($"job SetInformationJobObject FAILED err={System.Runtime.InteropServices.Marshal.GetLastWin32Error()} size={System.Runtime.InteropServices.Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()}");
+            Program.Log($"server: spawned node pid={_serverProc?.Id} job: create=0x{_serverJob:X} setInfo={okInfo} assign={okAssign}");
+        }
+        catch (Exception ex)
+        {
+            Program.Log("server spawn failed: " + ex.Message);
+            return;
+        }
+        for (int i = 0; i < 24; i++)
+        {
+            if (await ServerUpAsync()) { Program.Log("server: up after spawn"); return; }
+            await Task.Delay(500);
+        }
+        Program.Log("server: not up after 12s (page seed retries every 60s)");
+    }
+
+    private static string? FindRepoRoot()
+    {
+        for (var d = new DirectoryInfo(AppContext.BaseDirectory); d != null; d = d.Parent!)
+            if (File.Exists(Path.Combine(d.FullName, "server", "index.js"))) return d.FullName;
+        return null;
+    }
+
+    private static string? FindNodeExe()
+    {
+        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (var dir in path.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            try { var c = Path.Combine(dir, "node.exe"); if (File.Exists(c)) return c; }
+            catch { /* unreadable PATH entry */ }
+        }
+        var fallback = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe");
+        return File.Exists(fallback) ? fallback : null;
+    }
+
+    // ── login autostart was rejected: the pill is bound to ZCode's own
+    //    lifecycle via its SessionStart hook instead (see header comment) ──
 
     private async Task InitWebAsync()
     {
