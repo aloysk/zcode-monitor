@@ -120,7 +120,7 @@ internal sealed class WidgetForm : Form
 
     private readonly WebView2 _web = new();
     private readonly ContextMenuStrip _menu = new();
-    private readonly ToolStripMenuItem _topMostItem = new("置顶") { Checked = true };
+    private readonly ToolStripMenuItem _topMostItem = new("始终置顶(全局)") { Checked = false };
     private readonly ToolStripMenuItem _dockItem = new("吸附 ZCode 窗口") { Checked = true };
     private readonly string _settingsPath = Path.Combine(AppContext.BaseDirectory, "widget-settings.json");
     private readonly System.Windows.Forms.Timer _watch = new() { Interval = 500 };
@@ -150,7 +150,11 @@ internal sealed class WidgetForm : Form
         _web.DefaultBackgroundColor = Color.Transparent;
         Controls.Add(_web);
 
-        _topMostItem.Click += (s, e) => { TopMost = _topMostItem.Checked; };
+        _topMostItem.Click += (s, e) =>
+        {
+            TopMost = _topMostItem.Checked;
+            if (!_topMostItem.Checked) BindZOrder();
+        };
         _dockItem.Click += (s, e) => { _docked = _dockItem.Checked; if (_docked) ApplyDock(); };
         _menu.Items.Add(_topMostItem);
         _menu.Items.Add(_dockItem);
@@ -166,6 +170,12 @@ internal sealed class WidgetForm : Form
         _watch.Tick += (s, e) =>
         {
             if (_zcodeHwnd == IntPtr.Zero || !GetWindowRect(_zcodeHwnd, out _)) AcquireZcodeWindow();
+            if (_docked) BindZOrder();
+            // bound to ZCode's visibility too: no pill floating over the desktop
+            // or other apps while ZCode is minimized
+            bool zcodeUp = _zcodeHwnd != IntPtr.Zero && !IsIconic(_zcodeHwnd);
+            if (_docked && !zcodeUp) Hide();
+            else if (_docked && zcodeUp && !Visible) Show();
             ApplyDock();
         };
         _watch.Start();
@@ -194,7 +204,7 @@ internal sealed class WidgetForm : Form
         get
         {
             var cp = base.CreateParams;
-            cp.ExStyle |= 0x8 | 0x80; // WS_EX_TOPMOST | WS_EX_TOOLWINDOW
+            cp.ExStyle |= 0x80; // WS_EX_TOOLWINDOW (no WS_EX_TOPMOST: z-order is bound to ZCode)
             return cp;
         }
     }
@@ -212,11 +222,10 @@ internal sealed class WidgetForm : Form
             _web.CoreWebView2.Navigate(WidgetUrl);
             Program.Log("navigated: " + WidgetUrl);
 
-            // WebView2 init churns the native window styles — re-assert the
-            // topmost band directly, bypassing the property cache.
-            const int SWP_NOSIZE = 0x0001, SWP_NOMOVE = 0x0002, SWP_NOACTIVATE = 0x0010;
-            bool sp = SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
-            Program.Log($"topmost re-assert ok={sp} exstyle=0x{GetWindowLong(Handle, -20):X}");
+            // WebView2 init churns the native window styles; re-bind z-order
+            // after init (the watch timer keeps re-asserting every 500ms)
+            BindZOrder();
+            Program.Log($"z-order bound exstyle=0x{GetWindowLong(Handle, -20):X}");
             ApplyDock();
         }
         catch (Exception ex)
@@ -274,6 +283,16 @@ internal sealed class WidgetForm : Form
 
     private int _dockLogs;
 
+    // Insert the pill one z-level ABOVE the ZCode window (not the topmost
+    // band): any app that covers ZCode covers the pill too, and activating
+    // ZCode raises the pill with it — the pill behaves like part of ZCode.
+    private void BindZOrder()
+    {
+        if (_zcodeHwnd == IntPtr.Zero || _topMostItem.Checked) return;
+        const int SWP_NOSIZE = 0x0001, SWP_NOMOVE = 0x0002, SWP_NOACTIVATE = 0x0010;
+        _ = SetWindowPos(Handle, _zcodeHwnd, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+    }
+
     private void ApplyDock()
     {
         if (!_docked) return;
@@ -309,6 +328,7 @@ internal sealed class WidgetForm : Form
                     _dx = Location.X - a.X;
                     _dy = Location.Y - a.Y;
                 }
+                BindZOrder();
                 SaveSettings();
                 break;
             case "menu":

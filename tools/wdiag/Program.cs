@@ -21,6 +21,16 @@ if (args.Length >= 2 && args[0] == "--hwnd")
     Win32.DwmGetWindowAttributeInt(h, 14, out int cl, 4);
     Win32.GetWindowRect(h, out var wr);
     Console.WriteLine($"hwnd=0x{h.ToInt64():X} visible={Win32.IsWindowVisible(h)} iconic={Win32.IsIconic(h)} cloaked={cl}");
+    var above = Win32.GetWindow(h, 3); // GW_HWNDPREV: window directly above in z-order
+    var sb2 = new StringBuilder(256);
+    _ = Win32.GetWindowText(above, sb2, 256);
+    _ = Win32.GetWindowThreadProcessId(above, out uint apid);
+    Console.WriteLine($"  above=0x{above.ToInt64():X} pid={apid} [{sb2}]");
+    var below = Win32.GetWindow(h, 2); // GW_HWNDNEXT: window directly below in z-order
+    var sb3 = new StringBuilder(256);
+    _ = Win32.GetWindowText(below, sb3, 256);
+    _ = Win32.GetWindowThreadProcessId(below, out uint bpid);
+    Console.WriteLine($"  below=0x{below.ToInt64():X} pid={bpid} [{sb3}]");
     Console.WriteLine($"  winrect=({wr.Left},{wr.Top})-({wr.Right},{wr.Bottom}) {wr.Right - wr.Left}x{wr.Bottom - wr.Top}");
     Console.WriteLine($"  frame=({fr.Left},{fr.Top})-({fr.Right},{fr.Bottom}) {fr.Right - fr.Left}x{fr.Bottom - fr.Top}");
     return;
@@ -80,6 +90,7 @@ internal static class Win32
     [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int a, out RECT r, int c);
     [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")] public static extern int DwmGetWindowAttributeInt(IntPtr h, int a, out int v, int c);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr v);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, int flags);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, int flags);
