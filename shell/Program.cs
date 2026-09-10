@@ -113,6 +113,9 @@ internal sealed class WidgetForm : Form
     private static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int w, int h);
 
     [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr h, int cmd); // 3 = GW_HWNDPREV
+
+    [DllImport("user32.dll")]
     private static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool redraw);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -283,14 +286,19 @@ internal sealed class WidgetForm : Form
 
     private int _dockLogs;
 
-    // Insert the pill one z-level ABOVE the ZCode window (not the topmost
+    // Keep the pill one z-level ABOVE the ZCode window (not the topmost
     // band): any app that covers ZCode covers the pill too, and activating
     // ZCode raises the pill with it — the pill behaves like part of ZCode.
+    // SetWindowPos places the window BELOW hWndInsertAfter, so to sit above
+    // ZCode we insert below whatever currently sits above ZCode (HWND_TOP
+    // when ZCode tops its band). Passing ZCode itself put the pill under it
+    // — the bug that hid the pill entirely.
     private void BindZOrder()
     {
         if (_zcodeHwnd == IntPtr.Zero || _topMostItem.Checked) return;
+        var aboveZcode = GetWindow(_zcodeHwnd, 3); // GW_HWNDPREV, may be IntPtr.Zero → HWND_TOP
         const int SWP_NOSIZE = 0x0001, SWP_NOMOVE = 0x0002, SWP_NOACTIVATE = 0x0010;
-        _ = SetWindowPos(Handle, _zcodeHwnd, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+        _ = SetWindowPos(Handle, aboveZcode, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
     }
 
     private void ApplyDock()

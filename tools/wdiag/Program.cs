@@ -31,6 +31,30 @@ if (args.Length >= 2 && args[0] == "--hwnd")
     _ = Win32.GetWindowText(below, sb3, 256);
     _ = Win32.GetWindowThreadProcessId(below, out uint bpid);
     Console.WriteLine($"  below=0x{below.ToInt64():X} pid={bpid} [{sb3}]");
+    Console.WriteLine("  --- z chain down ---");
+    var curd = h;
+    for (int i = 0; i < 6 && curd != IntPtr.Zero; i++)
+    {
+        curd = Win32.GetWindow(curd, 2); // GW_HWNDNEXT
+        if (curd == IntPtr.Zero) break;
+        var td = new StringBuilder(256);
+        _ = Win32.GetWindowText(curd, td, 256);
+        _ = Win32.GetWindowThreadProcessId(curd, out uint p3);
+        Win32.GetWindowRect(curd, out var rd);
+        Console.WriteLine($"   dn{i}: 0x{curd.ToInt64():X} pid={p3} [{td}] rect=({rd.Left},{rd.Top}) {rd.Right - rd.Left}x{rd.Bottom - rd.Top}");
+    }
+Console.WriteLine("  --- z chain (walking up from this window) ---");
+    var cur = h;
+    for (int i = 0; i < 6 && cur != IntPtr.Zero; i++)
+    {
+        cur = Win32.GetWindow(cur, 3); // GW_HWNDPREV
+        if (cur == IntPtr.Zero) break;
+        var t = new StringBuilder(256);
+        _ = Win32.GetWindowText(cur, t, 256);
+        _ = Win32.GetWindowThreadProcessId(cur, out uint p2);
+        Win32.GetWindowRect(cur, out var rr);
+        Console.WriteLine($"   up{i}: 0x{cur.ToInt64():X} pid={p2} [{t}] rect=({rr.Left},{rr.Top}) {rr.Right - rr.Left}x{rr.Bottom - rr.Top}");
+    }
     Console.WriteLine($"  winrect=({wr.Left},{wr.Top})-({wr.Right},{wr.Bottom}) {wr.Right - wr.Left}x{wr.Bottom - wr.Top}");
     Console.WriteLine($"  frame=({fr.Left},{fr.Top})-({fr.Right},{fr.Bottom}) {fr.Right - fr.Left}x{fr.Bottom - fr.Top}");
     return;
