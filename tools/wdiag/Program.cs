@@ -3,9 +3,32 @@
 using System.Runtime.InteropServices;
 using System.Text;
 
+if (args.Length >= 4 && args[0] == "--nudge")
+{
+    var h = new IntPtr(Convert.ToInt64(args[1], 16));
+    Win32.GetWindowRect(h, out var nr);
+    Win32.SetWindowPos(h, IntPtr.Zero, nr.Left + int.Parse(args[2]), nr.Top + int.Parse(args[3]),
+                       0, 0, 0x0001 | 0x0002 | 0x0010); // NOSIZE|NOZORDER|NOACTIVATE
+    Win32.GetWindowRect(h, out var ar);
+    Console.WriteLine($"nudged to ({ar.Left},{ar.Top})-({ar.Right},{ar.Bottom})");
+    return;
+}
+
+if (args.Length >= 2 && args[0] == "--hwnd")
+{
+    var h = new IntPtr(Convert.ToInt64(args[1], 16));
+    Win32.DwmGetWindowAttribute(h, 9, out var fr, 16);
+    Win32.DwmGetWindowAttributeInt(h, 14, out int cl, 4);
+    Win32.GetWindowRect(h, out var wr);
+    Console.WriteLine($"hwnd=0x{h.ToInt64():X} visible={Win32.IsWindowVisible(h)} iconic={Win32.IsIconic(h)} cloaked={cl}");
+    Console.WriteLine($"  winrect=({wr.Left},{wr.Top})-({wr.Right},{wr.Bottom}) {wr.Right - wr.Left}x{wr.Bottom - wr.Top}");
+    Console.WriteLine($"  frame=({fr.Left},{fr.Top})-({fr.Right},{fr.Bottom}) {fr.Right - fr.Left}x{fr.Bottom - fr.Top}");
+    return;
+}
+
 if (args.Length < 1 || !int.TryParse(args[0], out int pid))
 {
-    Console.WriteLine("usage: wdiag <pid>");
+    Console.WriteLine("usage: wdiag <pid> | wdiag --hwnd <hex>");
     return;
 }
 
@@ -59,5 +82,7 @@ internal static class Win32
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr v);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, int flags);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, int flags);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 }

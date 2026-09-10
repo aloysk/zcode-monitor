@@ -36,9 +36,16 @@ internal static class Program
         catch { /* logging is best-effort */ }
     }
 
+    [DllImport("user32.dll")]
+    private static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+
     [STAThread]
     private static void Main()
     {
+        // pin PMv2 before anything else: process-launch DPI-context inheritance
+        // races otherwise, and rect reads flip between physical/virtualized
+        // (observed: same window reporting 3200×1904 and 1600×952)
+        _ = SetProcessDpiAwarenessContext(new IntPtr(-4));
         Log("boot");
         ApplicationConfiguration.Initialize();
         Application.ThreadException += (s, e) => Log("ThreadException: " + e.Exception);
@@ -53,17 +60,20 @@ internal sealed class WidgetForm : Form
 {
     private const string WidgetUrl = "http://127.0.0.1:7331/widget";
     private const string DashboardUrl = "http://127.0.0.1:7331/";
-    private static readonly Size WidgetSize = new(200, 36);
+    private static readonly Size WidgetSize = new(170, 56);
 
-    // dock anchor, measured against the ZCode main window (physical px):
-    // composer card left edge + card-top gap above window bottom, pill height included
-    private const int DockLeft = 1085;
-    private const int DockBottomUp = 292;
+    // dock anchor, calibrated against the ZCode window's visible frame bounds
+    // (DWM EXTENDED_FRAME_BOUNDS = 3200×1904 when maximized): the pill sits in
+    // the free margin RIGHT of the composer card (card right ≈2820 → pill left
+    // 2836 = 194+Width inside the right edge), vertically centered on the
+    // bottom toolbar row (row y1787-1844 → pill top 1787 = 117 above bottom)
+    private const int DockFromRight = 194;
+    private const int DockBottomUp = 117;
 
     private const int WM_NCLBUTTONDOWN = 0xA1;
     private const int HTCAPTION = 0x2;
-    private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
-    private const int DWMWCP_ROUND = 2;
+    // pill corner radius (physical px) — matches the ZCode composer card's ≈17px
+    private const int PillRadius = 20;
     private const int EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
     private const int WINEVENT_OUTOFCONTEXT = 0;
 
@@ -71,6 +81,9 @@ internal sealed class WidgetForm : Form
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int cb);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out RECT r, int cb);
 
     [DllImport("user32.dll")]
     private static extern bool ReleaseCapture();
@@ -96,6 +109,12 @@ internal sealed class WidgetForm : Form
     [DllImport("user32.dll")]
     private static extern bool IsIconic(IntPtr h);
 
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int w, int h);
+
+    [DllImport("user32.dll")]
+    private static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool redraw);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
 
@@ -120,7 +139,7 @@ internal sealed class WidgetForm : Form
         TopMost = true;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
-        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleMode = AutoScaleMode.None; // sizes stay in physical px (200% desktop: WebView2 renders CSS at 2x)
         Size = WidgetSize;
         LoadSettings();
         Program.Log($"bounds set: {Location} {Size} docked={_docked} d={_dx},{_dy}");
@@ -152,6 +171,17 @@ internal sealed class WidgetForm : Form
         _watch.Start();
         AcquireZcodeWindow();
         Program.Log($"zcode window: hwnd=0x{_zcodeHwnd:X} pid={_zcodePid}");
+
+        // the window region is THE pill: one layer, radius sized to read
+        // clearly at 200% DPI. WebView2 transparency doesn't work on plain
+        // WinForms windows, so the page paints full-bleed and the shell clips.
+        // HandleCreated fires again on every WebView2-driven handle recreation.
+        HandleCreated += (s, e) =>
+        {
+            IntPtr rgn = CreateRoundRectRgn(0, 0, Width + 1, Height + 1, PillRadius * 2, PillRadius * 2); // w/h = ellipse diameter → true radius = PillRadius
+            _ = SetWindowRgn(Handle, rgn, true);
+            Program.Log($"region applied r={PillRadius} {Width}x{Height}");
+        };
     }
 
     // WebView2 init recreates the form's native window (multiple IME ghost
@@ -174,9 +204,6 @@ internal sealed class WidgetForm : Form
         try
         {
             Program.Log("InitWebAsync start");
-            int round = DWMWCP_ROUND;
-            DwmSetWindowAttribute(Handle, DWMWA_WINDOW_CORNER_PREFERENCE, ref round, sizeof(int));
-            Program.Log("dwm attrs set");
 
             await _web.EnsureCoreWebView2Async();
             Program.Log("core webview2 ready");
@@ -234,16 +261,34 @@ internal sealed class WidgetForm : Form
 
     private (int X, int Y)? DockAnchor()
     {
-        if (_zcodeHwnd == IntPtr.Zero || !GetWindowRect(_zcodeHwnd, out var r) || IsIconic(_zcodeHwnd))
+        if (_zcodeHwnd == IntPtr.Zero || IsIconic(_zcodeHwnd)) return null;
+        // EXTENDED_FRAME_BOUNDS = the visible window rect. GetWindowRect of a
+        // maximized window includes an invisible frame that appears and
+        // disappears across states (observed 3200 vs 3261 wide), which would
+        // make the anchor drift; DWM bounds stay pinned to what's on screen.
+        if (DwmGetWindowAttribute(_zcodeHwnd, 9, out var r, 16) != 0
+            && !GetWindowRect(_zcodeHwnd, out r))
             return null;
-        return (r.Left + DockLeft, r.Bottom - DockBottomUp);
+        return (r.Right - DockFromRight - Width, r.Bottom - DockBottomUp);
     }
+
+    private int _dockLogs;
 
     private void ApplyDock()
     {
         if (!_docked) return;
+        bool ok = DwmGetWindowAttribute(_zcodeHwnd, 9, out var fr, 16) == 0;
+        GetWindowRect(_zcodeHwnd, out var wr);
+        if (_dockLogs < 6)
+        {
+            _dockLogs++;
+            Program.Log($"dockcalc#{_dockLogs} hwnd=0x{_zcodeHwnd:X} dwmOk={ok} frame=({fr.Left},{fr.Top})-({fr.Right},{fr.Bottom}) winrect=({wr.Left},{wr.Top})-({wr.Right},{wr.Bottom}) loc={Location}");
+        }
         if (DockAnchor() is not { } a) return;
         var target = new Point(a.X + _dx, a.Y + _dy);
+        // never jump to a target outside a visible screen (guards against
+        // virtualized/garbage rects); stay put and wait for the next tick
+        if (!Screen.FromPoint(target).WorkingArea.Contains(target)) return;
         if (Location != target) Location = target;
     }
 

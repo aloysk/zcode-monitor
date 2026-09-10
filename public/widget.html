@@ -21,7 +21,6 @@
   --font-code: "Source Code Pro", ui-monospace, Consolas, monospace;
 
   --surface-card: light-dark(#ffffff, #222222);
-  --border-hairline: light-dark(#d6d6d6, #3c3c3c);
   --text-heading: light-dark(#131313, #f2f2f2);
   --text-secondary: light-dark(#505050, #afafaf);
   --text-disabled: light-dark(#8f8f8f, #6d6d6d);
@@ -29,14 +28,12 @@
   --notice: light-dark(#fc7d00, #e06400);
   --positive: light-dark(#05834e, #068850);
 }
-@import url('https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@500;600&family=Source+Sans+3:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&display=swap');
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { height: 100%; overflow: hidden; }
 body {
-  background: var(--surface-card);       /* transparent corners come from the shell */
-  border-radius: 999px;
-  border: 1px solid var(--border-hairline);
+  background: var(--surface-card); /* full-bleed: the shell's window region shapes the pill */
   font-family: var(--font-sans);
   user-select: none;
   -webkit-user-select: none;
@@ -44,22 +41,16 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
   padding: 0 14px;
   white-space: nowrap;
 }
-.brand {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  color: var(--text-secondary);
-}
-.brand.err { color: var(--negative); }
+/* one baseline for all three parts — mixed font sizes otherwise drift apart */
+.row { display: inline-flex; align-items: baseline; gap: 9px; }
 .tps {
-  font-family: var(--font-code);
+  font-family: var(--font-sans);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1;
   color: var(--text-disabled); /* idle baseline; tiers below override */
 }
@@ -68,17 +59,16 @@ body {
 .spd-yellow { color: var(--notice); }
 .spd-green  { color: var(--positive); }
 .unit {
-  font-family: var(--font-code);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-size: 11px;
   font-weight: 500;
   color: var(--text-disabled);
-  margin-left: 2px;
+  margin-left: 4px;
 }
 </style>
 </head>
 <body>
-  <span class="brand" id="brand">ZCode</span>
-  <span><span class="tps" id="tps">—</span><span class="unit" id="unit" hidden>t/s</span></span>
+  <span class="row"><span class="tps" id="tps">—</span><span class="unit" id="unit" hidden>t/s</span></span>
 
 <script>
 'use strict';
@@ -124,12 +114,10 @@ async function seed() {
     const d = await r.json();
     for (const q of (d.recent_speed || []))
       pushReq(new Date(q.time).getTime(), (q.output || 0) + (q.reasoning || 0), q.duration_ms);
-    $('brand').className = 'brand';
     render();
   } catch (e) {
-    $('brand').className = 'brand err';
     $('tps').textContent = '—';
-    $('tps').className = 'tps';
+    $('tps').className = 'tps err';
     $('unit').hidden = true;
   }
 }
