@@ -10,3 +10,12 @@ node_modules
 
 README.dev.md
 
+
+# widget shell + tools build output
+shell/bin/
+shell/obj/
+tools/**/bin/
+tools/**/obj/
+widget-settings.json
+widget-run.log
+wdiag-*.png

@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<!-- token-speed floating widget — pill edition.
+     One line: brand · tier-colored mono number · unit. Nothing else.
+     Number = rolling weighted tps over the last 5 minutes (real-time):
+     seeded from /api/overview?hours=1 (recent_speed), then every completed
+     request via SSE /api/live/events 'model'. Idle → "—".
+     States: ok (number, tier color) · idle (—, dim) · error (—, red brand).
+     The shell window is 160×36 with a transparent WebView2 background; this
+     page paints the pill itself (full radius + hairline border).
+     Affordances: drag anywhere · right-click menu · double-click dashboard. -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token 速度</title>
+<style>
+/* Spectrum 2 tokens (subset, from Ke-Spectrum-2-Design-System/tokens/) */
+:root {
+  color-scheme: light dark;
+  --font-sans: "Source Sans 3", "Noto Sans SC", ui-sans-serif, system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+  --font-code: "Source Code Pro", ui-monospace, Consolas, monospace;
+
+  --surface-card: light-dark(#ffffff, #222222);
+  --border-hairline: light-dark(#d6d6d6, #3c3c3c);
+  --text-heading: light-dark(#131313, #f2f2f2);
+  --text-secondary: light-dark(#505050, #afafaf);
+  --text-disabled: light-dark(#8f8f8f, #6d6d6d);
+  --negative: light-dark(#d73220, #df3422);
+  --notice: light-dark(#fc7d00, #e06400);
+  --positive: light-dark(#05834e, #068850);
+}
+@import url('https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@500;600&family=Source+Sans+3:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&display=swap');
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  background: var(--surface-card);       /* transparent corners come from the shell */
+  border-radius: 999px;
+  border: 1px solid var(--border-hairline);
+  font-family: var(--font-sans);
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 14px;
+  white-space: nowrap;
+}
+.brand {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-secondary);
+}
+.brand.err { color: var(--negative); }
+.tps {
+  font-family: var(--font-code);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--text-disabled); /* idle baseline; tiers below override */
+}
+/* speed tiers mirror the dashboard KPI (design.md D4): <30 red / 30-80 notice / >80 green */
+.spd-red    { color: var(--negative); }
+.spd-yellow { color: var(--notice); }
+.spd-green  { color: var(--positive); }
+.unit {
+  font-family: var(--font-code);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-disabled);
+  margin-left: 2px;
+}
+</style>
+</head>
+<body>
+  <span class="brand" id="brand">ZCode</span>
+  <span><span class="tps" id="tps">—</span><span class="unit" id="unit" hidden>t/s</span></span>
+
+<script>
+'use strict';
+const IN_WEBVIEW = !!(window.chrome && window.chrome.webview);
+const ROLL_MS = 5 * 60 * 1000;   // rolling window for the real-time number
+
+const $ = id => document.getElementById(id);
+function speedClass(tps) {
+  if (tps == null || !isFinite(tps)) return '';
+  if (tps < 30) return 'spd-red';
+  if (tps <= 80) return 'spd-yellow';
+  return 'spd-green';
+}
+
+// rolling request buffer: {t: epoch ms, tok, durMs}
+const buf = [];
+function pushReq(t, tok, durMs) {
+  if (!(t > 0) || !(tok >= 0) || !(durMs > 0)) return;
+  buf.push({ t, tok, durMs });
+}
+function render() {
+  const now = Date.now();
+  while (buf.length && buf[0].t < now - ROLL_MS) buf.shift();
+  if (!buf.length) {
+    $('tps').textContent = '—';
+    $('tps').className = 'tps';
+    $('unit').hidden = true;
+    return;
+  }
+  const tok = buf.reduce((s, r) => s + r.tok, 0);
+  const sec = buf.reduce((s, r) => s + r.durMs, 0) / 1000;
+  const tps = sec > 0 ? +(tok / sec).toFixed(1) : null;
+  $('tps').textContent = tps != null ? tps : '—';
+  $('tps').className = 'tps ' + speedClass(tps);
+  $('unit').hidden = tps == null;
+}
+
+// seed history (last hour's recent requests), then keep rolling
+async function seed() {
+  try {
+    const r = await fetch('/api/overview?hours=1', { cache: 'no-store' });
+    if (!r.ok) throw new Error('http ' + r.status);
+    const d = await r.json();
+    for (const q of (d.recent_speed || []))
+      pushReq(new Date(q.time).getTime(), (q.output || 0) + (q.reasoning || 0), q.duration_ms);
+    $('brand').className = 'brand';
+    render();
+  } catch (e) {
+    $('brand').className = 'brand err';
+    $('tps').textContent = '—';
+    $('tps').className = 'tps';
+    $('unit').hidden = true;
+  }
+}
+
+let bump = null;
+try {
+  const es = new EventSource('/api/live/events');
+  es.addEventListener('model', e => {
+    const m = JSON.parse(e.data);
+    pushReq(new Date(m.started_at).getTime(),
+            (m.output_tokens || 0) + (m.reasoning_tokens || 0),
+            m.duration_ms);
+    clearTimeout(bump);
+    bump = setTimeout(render, 200); // coalesce bursts
+  });
+} catch {}
+
+seed();
+setInterval(render, 10000);   // window slides even without new events
+setInterval(seed, 60000);     // safety net if SSE is down
+document.addEventListener('visibilitychange', () => { if (!document.hidden) seed(); });
+
+// ── frameless-window affordances (only meaningful inside the WebView2 shell) ──
+if (IN_WEBVIEW) {
+  document.addEventListener('pointerdown', e => {
+    if (e.button === 0) window.chrome.webview.postMessage({ type: 'drag' });
+  });
+  document.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    window.chrome.webview.postMessage({ type: 'menu', x: e.screenX, y: e.screenY });
+  });
+  document.addEventListener('dblclick', () => {
+    window.chrome.webview.postMessage({ type: 'open-dashboard' });
+  });
+}
+</script>
+</body>
+</html>

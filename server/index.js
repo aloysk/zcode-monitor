@@ -181,6 +181,9 @@ app.use((err, _req, res, next) => {
 // static frontend
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+// token-speed floating widget page (loaded by the frameless WebView2 shell)
+app.get('/widget', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'widget.html')));
+
 // SPA fallback: any non-api route → index.html
 app.get(/^\/(?!api).*/, (_req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
