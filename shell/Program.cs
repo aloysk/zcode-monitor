@@ -2,10 +2,20 @@
 // widget page (../public/widget.html, served by the node server at /widget).
 // Same host pattern as ELaserFocus OperatorHost: WinForms + WebView2.
 //
-// Window rules: borderless, topmost, no taskbar entry, Win11 rounded corners +
-// a 1px DWM border so the card stays visible on light and dark desktops.
+// Docking: the pill anchors to the ZCode main window, floating just above the
+// composer card's rounded top edge (position measured via UI Automation on the
+// maximized window: card left ≈ +1085px, card top ≈ 250px above window bottom).
+// A WinEvent hook (EVENT_OBJECT_LOCATIONCHANGE) follows moves/resizes live; a
+// slow timer re-acquires the ZCode window if it restarts. Dragging the pill
+// while docked adjusts a persistent (dx, dy) fine-tune offset instead of
+// breaking the anchor. The context menu can toggle docking off entirely.
+//
+// Window rules: borderless, topmost, no taskbar entry, transparent WebView2 so
+// the page paints its own pill shape. WebView2 init recreates the native
+// window and drops property-based styles — WS_EX_TOPMOST|WS_EX_TOOLWINDOW are
+// baked into CreateParams and re-asserted via SetWindowPos after init.
 // The page drives the shell via window.chrome.webview.postMessage:
-//   {type:'drag'}            — drag anywhere
+//   {type:'drag'}            — drag (docked: adjusts offset; free: absolute)
 //   {type:'menu', x, y}      — context menu at screen coords
 //   {type:'open-dashboard'}  — open the full dashboard
 
@@ -45,10 +55,19 @@ internal sealed class WidgetForm : Form
     private const string DashboardUrl = "http://127.0.0.1:7331/";
     private static readonly Size WidgetSize = new(200, 36);
 
+    // dock anchor, measured against the ZCode main window (physical px):
+    // composer card left edge + card-top gap above window bottom, pill height included
+    private const int DockLeft = 1085;
+    private const int DockBottomUp = 292;
+
     private const int WM_NCLBUTTONDOWN = 0xA1;
     private const int HTCAPTION = 0x2;
     private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
     private const int DWMWCP_ROUND = 2;
+    private const int EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
+    private const int WINEVENT_OUTOFCONTEXT = 0;
+
+    private delegate void WinEventProc(IntPtr hook, uint evt, IntPtr hwnd, int idObject, int idChild, uint thread, uint time);
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int cb);
@@ -65,10 +84,34 @@ internal sealed class WidgetForm : Form
     [DllImport("user32.dll")]
     private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetWinEventHook(int evtMin, int evtMax, IntPtr mod, WinEventProc proc, uint pid, uint tid, int flags);
+
+    [DllImport("user32.dll")]
+    private static extern bool UnhookWinEvent(IntPtr hook);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr h, out RECT r);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr h);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+
     private readonly WebView2 _web = new();
     private readonly ContextMenuStrip _menu = new();
     private readonly ToolStripMenuItem _topMostItem = new("置顶") { Checked = true };
+    private readonly ToolStripMenuItem _dockItem = new("吸附 ZCode 窗口") { Checked = true };
     private readonly string _settingsPath = Path.Combine(AppContext.BaseDirectory, "widget-settings.json");
+    private readonly System.Windows.Forms.Timer _watch = new() { Interval = 500 };
+
+    private IntPtr _zcodeHwnd;
+    private uint _zcodePid;
+    private IntPtr _winHook;
+    private WinEventProc? _winProc; // rooted so the hook delegate survives GC
+    private bool _docked = true;
+    private int _dx, _dy; // drag fine-tune offsets applied on top of the dock anchor
 
     public WidgetForm()
     {
@@ -79,8 +122,8 @@ internal sealed class WidgetForm : Form
         StartPosition = FormStartPosition.Manual;
         AutoScaleMode = AutoScaleMode.Dpi;
         Size = WidgetSize;
-        LoadSavedBounds();
-        Program.Log($"bounds set: {Location} {Size}");
+        LoadSettings();
+        Program.Log($"bounds set: {Location} {Size} docked={_docked} d={_dx},{_dy}");
 
         _web.Dock = DockStyle.Fill;
         // transparent so the page's own pill (full-radius + hairline border)
@@ -89,26 +132,26 @@ internal sealed class WidgetForm : Form
         Controls.Add(_web);
 
         _topMostItem.Click += (s, e) => { TopMost = _topMostItem.Checked; };
+        _dockItem.Click += (s, e) => { _docked = _dockItem.Checked; if (_docked) ApplyDock(); };
         _menu.Items.Add(_topMostItem);
+        _menu.Items.Add(_dockItem);
         _menu.Items.Add("打开完整面板", null, (s, e) => OpenUrl(DashboardUrl));
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("退出", null, (s, e) => Close());
         ContextMenuStrip = _menu;
 
         Shown += async (s, e) => await InitWebAsync();
-        FormClosing += (s, e) => { Program.Log("closing"); SaveBounds(); };
-        // self-report heartbeat: settles "where is the window / is it visible" disputes
-        var beats = 0;
-        var heartbeat = new System.Windows.Forms.Timer { Interval = 2000 };
-        heartbeat.Tick += (s, e) =>
+        FormClosing += (s, e) => { Program.Log("closing"); SaveSettings(); if (_winHook != IntPtr.Zero) UnhookWinEvent(_winHook); };
+
+        // re-acquire/re-dock safety net (hook misses restarts and some transitions)
+        _watch.Tick += (s, e) =>
         {
-            if (beats++ < 8)
-                Program.Log($"heartbeat loc={Location} size={Size} visible={Visible} exstyle=0x{GetWindowLong(Handle, -20):X}");
+            if (_zcodeHwnd == IntPtr.Zero || !GetWindowRect(_zcodeHwnd, out _)) AcquireZcodeWindow();
+            ApplyDock();
         };
-        heartbeat.Start();
-        HandleCreated += (s, e) => Program.Log($"handle created: 0x{Handle:X} exstyle=0x{GetWindowLong(Handle, -20):X}");
-        HandleDestroyed += (s, e) => Program.Log("handle destroyed");
-        Program.Log("form ctor end");
+        _watch.Start();
+        AcquireZcodeWindow();
+        Program.Log($"zcode window: hwnd=0x{_zcodeHwnd:X} pid={_zcodePid}");
     }
 
     // WebView2 init recreates the form's native window (multiple IME ghost
@@ -142,19 +185,66 @@ internal sealed class WidgetForm : Form
             _web.CoreWebView2.Navigate(WidgetUrl);
             Program.Log("navigated: " + WidgetUrl);
 
-            // WebView2 init churns the native window styles — the constructor's
-            // TopMost is gone from the actual exstyle by now (verified: exstyle
-            // lacks WS_EX_TOPMOST while the Form property still says true).
-            // Re-assert HWND_TOPMOST directly, bypassing the property cache.
+            // WebView2 init churns the native window styles — re-assert the
+            // topmost band directly, bypassing the property cache.
             const int SWP_NOSIZE = 0x0001, SWP_NOMOVE = 0x0002, SWP_NOACTIVATE = 0x0010;
             bool sp = SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
             Program.Log($"topmost re-assert ok={sp} exstyle=0x{GetWindowLong(Handle, -20):X}");
+            ApplyDock();
         }
         catch (Exception ex)
         {
             Program.Log("InitWebAsync FAILED: " + ex);
             throw;
         }
+    }
+
+    // ── ZCode window docking ─────────────────────────────────────────
+
+    private void AcquireZcodeWindow()
+    {
+        foreach (var p in System.Diagnostics.Process.GetProcessesByName("ZCode"))
+        {
+            try
+            {
+                if (p.MainWindowHandle != IntPtr.Zero)
+                {
+                    _zcodeHwnd = p.MainWindowHandle;
+                    _zcodePid = (uint)p.Id;
+                    HookZcodeWindow();
+                    return;
+                }
+            }
+            catch { /* process may exit between enumerate and read */ }
+        }
+    }
+
+    private void HookZcodeWindow()
+    {
+        if (_winHook != IntPtr.Zero) UnhookWinEvent(_winHook);
+        _winProc = (hook, evt, hwnd, idObject, idChild, thread, time) =>
+        {
+            // idObject OBJID_WINDOW == 0; ignore sub-object moves (scrollbars etc.)
+            if (hwnd == _zcodeHwnd && idObject == 0) ApplyDock();
+        };
+        _winHook = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
+                                   IntPtr.Zero, _winProc, _zcodePid, 0, WINEVENT_OUTOFCONTEXT);
+        Program.Log($"winevent hook: 0x{_winHook:X}");
+    }
+
+    private (int X, int Y)? DockAnchor()
+    {
+        if (_zcodeHwnd == IntPtr.Zero || !GetWindowRect(_zcodeHwnd, out var r) || IsIconic(_zcodeHwnd))
+            return null;
+        return (r.Left + DockLeft, r.Bottom - DockBottomUp);
+    }
+
+    private void ApplyDock()
+    {
+        if (!_docked) return;
+        if (DockAnchor() is not { } a) return;
+        var target = new Point(a.X + _dx, a.Y + _dy);
+        if (Location != target) Location = target;
     }
 
     private void OnWebMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
@@ -164,8 +254,17 @@ internal sealed class WidgetForm : Form
         switch (root.GetProperty("type").GetString())
         {
             case "drag":
+                var anchorBefore = DockAnchor();
                 ReleaseCapture();
                 SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
+                // SendMessage returns when the user releases the move loop:
+                // whatever they did becomes the new fine-tune offset
+                if (_docked && anchorBefore is { } a)
+                {
+                    _dx = Location.X - a.X;
+                    _dy = Location.Y - a.Y;
+                }
+                SaveSettings();
                 break;
             case "menu":
                 var x = root.GetProperty("x").GetInt32();
@@ -181,28 +280,40 @@ internal sealed class WidgetForm : Form
     private static void OpenUrl(string url) =>
         System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
 
-    private void LoadSavedBounds()
+    // ── settings (best-effort json beside the exe) ───────────────────
+
+    private void LoadSettings()
     {
         try
         {
-            if (!File.Exists(_settingsPath)) { PlaceDefault(); return; }
-            using var doc = JsonDocument.Parse(File.ReadAllText(_settingsPath));
-            var b = doc.RootElement;
-            var pt = new Point(b.GetProperty("x").GetInt32(), b.GetProperty("y").GetInt32());
-            // clamp onto a visible monitor (display layout may have changed since last run)
-            var screen = Screen.FromPoint(pt).WorkingArea;
-            Location = new Point(Math.Clamp(pt.X, screen.Left, screen.Right - Width), Math.Clamp(pt.Y, screen.Top, screen.Bottom - Height));
+            if (File.Exists(_settingsPath))
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(_settingsPath));
+                var b = doc.RootElement;
+                Location = new Point(b.GetProperty("x").GetInt32(), b.GetProperty("y").GetInt32());
+                if (b.TryGetProperty("docked", out var d)) _docked = d.GetBoolean();
+                if (b.TryGetProperty("dx", out var dx)) _dx = dx.GetInt32();
+                if (b.TryGetProperty("dy", out var dy)) _dy = dy.GetInt32();
+                return;
+            }
         }
-        catch { PlaceDefault(); }
+        catch { /* fall through to default placement */ }
+        PlaceDefault();
     }
 
-    private void PlaceDefault() =>
-        Location = new Point(Screen.PrimaryScreen!.WorkingArea.Right - Width - 24,
-                             Screen.PrimaryScreen.WorkingArea.Top + 24);
-
-    private void SaveBounds()
+    private void PlaceDefault()
     {
-        try { File.WriteAllText(_settingsPath, JsonSerializer.Serialize(new { x = Location.X, y = Location.Y })); }
+        var wa = Screen.PrimaryScreen!.WorkingArea;
+        Location = new Point(wa.Right - Width - 24, wa.Bottom - 300);
+    }
+
+    private void SaveSettings()
+    {
+        try
+        {
+            File.WriteAllText(_settingsPath, JsonSerializer.Serialize(
+                new { x = Location.X, y = Location.Y, docked = _docked, dx = _dx, dy = _dy }));
+        }
         catch { /* position persistence is best-effort */ }
     }
 }
