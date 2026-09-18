@@ -9,10 +9,12 @@
      ═══════════════════════════════════════════════════════════════════════
 
      token-speed desktop pet — sprite edition (Codex Pet pack format).
-     One file: a <canvas> draws the cat from the local spritesheet with the
-     same approach as upstream's PetWidget (rAF + drawImage per frame), a
-     small S2 speech bubble above carries the live number, and three body
-     states drive which row of the sheet plays:
+     One file, TWO window sizes (mini companion 80×100 CSS / normal card
+     160×190 CSS — typography scales via container queries): a <canvas>
+     draws the cat from the local spritesheet with the same approach as
+     upstream's PetWidget (rAF + drawImage per frame), a small S2 speech
+     bubble above carries the live number + unit permanently (the pet's
+     only speed readout), and three body states drive which row plays:
        idle    (no completed traffic ≥ 2 min)  → row0 idle loop
        cruise  (recent traffic, not generating) → row8 review loop
        gen     (SSE /api/gen/events phase)      → tier-picked run group:
@@ -28,7 +30,7 @@
      Shell: frameless WebView2 rounded card (transparency impossible); the
      page paints full-bleed --surface-card and the window region owns the
      radius. Affordances mirror widget.html exactly: drag anywhere ·
-     right-click menu · double-click dashboard. -->
+     right-click menu · double-click next pet · wheel cycles forms. -->
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -76,6 +78,9 @@ body {
   -webkit-user-select: none;
   cursor: default;
   position: relative;
+  /* ONE page serves TWO window sizes (mini companion + normal pet card);
+     bubble typography scales off the card width instead of fixed px */
+  container-type: inline-size;
 }
 
 /* cat canvas: bottom-anchored, ~80% of card height, sheet cell aspect */
@@ -103,13 +108,16 @@ body {
 .bubble {
   background: var(--bubble-bg);
   border: 1px solid var(--bubble-line);
-  border-radius: 7px;
+  border-radius: 0.55em;
   box-shadow: 0 1px 4px light-dark(rgb(0 0 0 / .12), rgb(0 0 0 / .5));
-  padding: 1px 8px 2px;
+  padding: 0.12em 0.55em 0.2em;
   font-family: var(--font-sans);
   font-weight: 600;
-  font-size: 12px;
-  line-height: 1.3;
+  /* number scales with the card: ~8px on the mini companion, 13.5px on the
+     normal card — em-based paddings/radius follow, so the whole bubble
+     scales as one object instead of fixed px breaking the mini size */
+  font-size: clamp(8px, 8.5cqw, 13.5px);
+  line-height: 1.25;
   font-variant-numeric: tabular-nums;
   color: var(--tier);       /* tier color with a number, neutral gray for "…" */
   white-space: nowrap;
@@ -118,13 +126,19 @@ body {
   transform: translateY(3px);
   transition: opacity .18s ease, transform .18s ease;
 }
+.bunit { /* "t/s" — quieter than the number, same family/weight */
+  font-size: 0.72em;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-left: 0.25em;
+}
 .bubble::after { /* little tail: rotated square with two exposed borders */
   content: "";
   position: absolute;
   left: 50%;
-  bottom: -3.4px;
-  width: 6px;
-  height: 6px;
+  bottom: -0.26em;
+  width: 0.48em;
+  height: 0.48em;
   background: var(--bubble-bg);
   border-right: 1px solid var(--bubble-line);
   border-bottom: 1px solid var(--bubble-line);
@@ -142,7 +156,7 @@ body {
 <body class="state-idle">
 <canvas id="pet" role="img" aria-label="Token 桌宠：打盹中"></canvas>
 <div class="bubble-zone">
-  <div class="bubble" id="bubble"><span id="bnum">…</span></div>
+  <div class="bubble" id="bubble"><span id="bnum">…</span><span class="bunit" id="bunit">t/s</span></div>
 </div>
 
 <script>
@@ -152,7 +166,7 @@ const IDLE_AFTER = 2 * 60 * 1000;  // no completed traffic for 2 min → idle ca
 const GEN_STALE  = 10 * 60 * 1000; // see staleness guard in poll()
 
 const $ = id => document.getElementById(id);
-const petEl = $('pet'), bubbleEl = $('bubble'), bnumEl = $('bnum');
+const petEl = $('pet'), bubbleEl = $('bubble'), bnumEl = $('bnum'), bunitEl = $('bunit');
 const reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 // ── sprite packs: Codex Pet format (verified from upstream dsh-desk renderer;
@@ -204,10 +218,8 @@ let pending = 'idle';  // queued row; applied only at a full-cycle boundary
 let frame = 0;         // index within the current row
 let rafId = 0, lastTs = 0;
 
+// sheet loads/restarts are owned by applyPack() below
 const sheet = new Image();
-sheet.onload = () => { sheetOk = true; fitCanvas(); startAnim(); };
-sheet.onerror = () => { /* silent: card + bubble still work, cat is absent */ };
-sheet.src = pack.sheet; // begin decoding while the data logic warms up
 
 // Backing store at physical pixels (devicePixelRatio is 2 at the shell's
 // 200% DPI) so the 192×208 cells stay crisp; CSS layout owns the size.
@@ -279,17 +291,37 @@ function startAnim() {
   }
 }
 
-// double-click cycles to the next pack; the sheet's onload restarts the loop
-function cyclePack() {
-  packIdx = (packIdx + 1) % PACKS.length;
+// Apply a pack: swap the anim table + sheet, restart the loop on load.
+// A failed sheet load used to leave the canvas blank forever (onerror was
+// silent) — the exact "切换宠物后空白" bug. Now: retry once with a
+// cache-buster (stalled/partial cache entries heal), and if it still fails
+// REVERT to the pack that was on screen, so the pet never disappears.
+// prevIdx=null (boot, or a revert already in flight) means no revert hop.
+function applyPack(idx, prevIdx) {
+  packIdx = idx;
   pack = PACKS[packIdx];
   ANIMS = pack.anims;
   try { localStorage.setItem('petPack', pack.id); } catch { /* private mode */ }
   sheetOk = false;
   anim = pending = 'idle';
   frame = 0;
+  let retried = false;
+  sheet.onload = () => { sheetOk = true; fitCanvas(); startAnim(); };
+  sheet.onerror = () => {
+    if (!retried) {
+      retried = true;
+      sheet.src = pack.sheet + '?r=' + Date.now();
+      return;
+    }
+    console.error('[pet] spritesheet failed twice, reverting: ' + pack.sheet);
+    if (prevIdx != null && prevIdx !== packIdx) applyPack(prevIdx, null);
+  };
   sheet.src = pack.sheet;
 }
+function cyclePack() {
+  applyPack((packIdx + 1) % PACKS.length, packIdx);
+}
+applyPack(packIdx, null); // boot: begin decoding while the data logic warms up
 function stopAnim() { if (rafId) { cancelAnimationFrame(rafId); rafId = 0; } }
 // honor the OS setting toggling at runtime, not just at load
 reduceMQ.addEventListener('change', () => {
@@ -346,9 +378,12 @@ function render() {
   }
   pending = desiredAnim(); // queued; the loop applies it at the cycle boundary
   if (reduceMQ.matches && sheetOk) draw(desiredAnim(), 0); // static face, no loop
-  // bubble ONLY while generating: the live number, or "…" until one exists
-  bnumEl.textContent = (tps != null && isFinite(tps)) ? tps.toFixed(1) : '…';
-  bubbleEl.classList.toggle('on', s === 'gen');
+  // the bubble is the pet's only speed readout (mini form has nothing else),
+  // so it stays up permanently: live number + unit, or "…" until one exists
+  const hasNum = tps != null && isFinite(tps);
+  bnumEl.textContent = hasNum ? tps.toFixed(1) : '…';
+  bunitEl.style.display = hasNum ? '' : 'none';
+  bubbleEl.classList.add('on');
 }
 
 // ── data: poll /api/widget/recent every 5 s ────────────────────────────────
@@ -431,6 +466,11 @@ if (IN_WEBVIEW) {
   document.addEventListener('dblclick', () => {
     cyclePack(); // double-click switches to the next pet (dashboard: menus)
   });
+  // wheel cycles the shell's three forms (胶囊/迷你/正常) — fastest switcher
+  document.addEventListener('wheel', e => {
+    e.preventDefault();
+    window.chrome.webview.postMessage({ type: 'form-cycle', up: e.deltaY < 0 });
+  }, { passive: false });
 }
 </script>
 </body>

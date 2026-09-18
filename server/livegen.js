@@ -34,11 +34,21 @@ const ERROR_LOG_INTERVAL_MS = 30 * 1000;
 // connection on damage (invalidateDb), which would orphan a cached statement —
 // so we key the cache on the raw handle's identity and re-prepare only when
 // the facade swapped it. Steady state keeps a single prepared statement.
+//
+// The rowid tail bound is LOAD-BEARING: message has NO index on time_created
+// (only session_id-led composites), so the time filters alone full-scan the
+// 14.6GB / 635k-row table at ~2.4s per poll — at 1 Hz that permanently
+// blocked node's event loop (observed: static sprite downloads stalling
+// mid-stream, /api/gen/state answering in 2.8s, pack switches rendering
+// blank). Rows are appended chronologically, and the hygiene windows above
+// mean only the newest rows can possibly qualify, so scanning the last 8000
+// rowids (MAX(rowid) is O(1)) yields identical counts in ~18ms.
 const SQL = `
   SELECT COUNT(*)                   AS inflight,
          COUNT(DISTINCT session_id) AS sessions
   FROM message
-  WHERE json_extract(data, '$.role') = 'assistant'
+  WHERE rowid > (SELECT MAX(rowid) FROM message) - 8000
+    AND json_extract(data, '$.role') = 'assistant'
     AND json_extract(data, '$.time.completed') IS NULL
     AND time_created > ?
     AND time_updated > ?

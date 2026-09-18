@@ -357,6 +357,14 @@ function recentSpeed(sinceMs, limit = 50) {
 // completions per 5 min observed under parallel subagents), which skews the
 // widget's weighted aggregate. Payload stays tiny (window-sized).
 function completedSince(sinceMs) {
+  // started_at + duration_ms can't use the started_at index (expression),
+  // and a bare expression scan cost ~430ms on the 14.6GB db — the pet page
+  // polls this every 5s, so that alone starved the event loop. Pre-filter
+  // on the INDEXED started_at first: a request still inside the window must
+  // have started no earlier than the window start minus its duration; the
+  // 2h pad covers any real request (anything longer only lands in the
+  // rolling average it belongs to anyway). The exact completion filter
+  // still runs on the small candidate set, so results are identical.
   return db().prepare(`
     SELECT id,
            started_at,
@@ -366,6 +374,7 @@ function completedSince(sinceMs) {
     FROM model_usage
     WHERE status = 'completed'
       AND duration_ms > 0
+      AND started_at >= @since - 7200000
       AND started_at + duration_ms >= @since
     ORDER BY started_at ASC
   `).all({ since: sinceMs }).map(r => ({

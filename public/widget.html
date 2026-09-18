@@ -42,6 +42,7 @@ body {
   position: relative; /* containing block for the absolutely-placed sparkline */
   background: var(--surface-card); /* full-bleed: the shell's window region shapes the pill */
   font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased; /* kills ClearType color fringing on the small gray unit */
   user-select: none;
   -webkit-user-select: none;
   cursor: default;
@@ -54,8 +55,10 @@ body {
   padding: 0 58px 0 14px;
   white-space: nowrap;
 }
-/* one baseline for all three parts — mixed font sizes otherwise drift apart */
-.row { display: inline-flex; align-items: baseline; gap: 9px; }
+/* one baseline for both text parts — mixed font sizes otherwise drift apart.
+   gap 0 + .unit margin keeps the unit 4px off its number: a 9-13px gap read
+   as a break and visually re-grouped "t/s" with the sparkline instead */
+.row { display: inline-flex; align-items: baseline; gap: 0; }
 .tps {
   font-family: var(--font-sans);
   font-variant-numeric: tabular-nums;
@@ -71,16 +74,18 @@ body {
 .tps.err    { color: var(--negative); } /* server unreachable — distinct from idle gray */
 .unit {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 10px; /* ~67% of the number — a quiet qualifier, not a co-headline */
   font-weight: 500;
   color: var(--text-disabled);
   margin-left: 4px;
 }
 
-/* micro-sparkline: pure texture behind the number's trailing half. The tier
-   classes above supply its color via currentColor; the 45% stroke opacity
-   keeps it subordinate to the digits. 48×12 drawn 1:1 with its viewBox so
-   the 1.5px stroke never distorts or exceeds 2px at any DPI. */
+/* micro-sparkline: pure texture beside the number. The tier classes above
+   supply its color via currentColor. The old 45% stroke read as washed-out
+   peach next to the 600-weight number — 70% keeps it subordinate but alive.
+   The svg BOX centers on the text ink line (the visible polyline wanders
+   inside it with the data — that's shape, not misalignment).
+   44×12 drawn 1:1 with its viewBox so the 1.5px stroke never distorts. */
 .spark {
   position: absolute;
   right: 12px;
@@ -95,11 +100,12 @@ body {
   fill: none;
   stroke: currentColor;
   stroke-width: 1.5;
-  stroke-opacity: 0.45;
+  stroke-opacity: 0.7;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.spark circle { fill: currentColor; fill-opacity: 0.6; } /* 2px live-end dot, a hair stronger than the stroke */
+/* live-end dot: solid r=2 — a deliberate current-value marker, not a smear */
+.spark circle { fill: currentColor; fill-opacity: 1; }
 
 /* generation in flight: ONE indicator — the number's color breathes
    (±12% lightness, 2s ease cycle). Chosen over a 4px status dot: at 28px
@@ -143,7 +149,7 @@ body.gen .tps { animation: gen-breathe 2s ease-in-out infinite alternate; }
   <span class="row"><span class="tps" id="tps">—</span><span class="unit" id="unit" hidden>t/s</span></span>
   <svg class="spark off" id="spark" width="44" height="12" viewBox="0 0 44 12" aria-hidden="true" focusable="false">
     <polyline id="sparkLine"></polyline>
-    <circle id="sparkDot" r="1.5"></circle>
+    <circle id="sparkDot" r="2"></circle>
   </svg>
   <div class="tip" id="tip" hidden></div>
 
@@ -383,6 +389,12 @@ if (IN_WEBVIEW) {
   document.addEventListener('dblclick', () => {
     window.chrome.webview.postMessage({ type: 'open-dashboard' });
   });
+  // wheel cycles the shell's three forms (胶囊/迷你/正常) — same contract
+  // as pet.html, so the gesture works identically on every form
+  document.addEventListener('wheel', e => {
+    e.preventDefault();
+    window.chrome.webview.postMessage({ type: 'form-cycle', up: e.deltaY < 0 });
+  }, { passive: false });
 }
 </script>
 </body>

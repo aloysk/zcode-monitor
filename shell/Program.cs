@@ -1,11 +1,14 @@
 // ZcodeWidget — frameless shell for the zcode-monitor token-speed widget.
-// ONE window, TWO forms (a single WebView2 navigated between two pages):
-//   pill (default)  /widget  280×56  number + sparkline, docks to ZCode
-//   pet             /pet     320×380 sprite cat, free position
-// The right-click menu carries everything: form toggle (桌宠形态), next pet
-// pack (下一只宠物 — also double-click the cat), docking, global topmost,
-// dashboard, exit. Served by the repo's node server on 127.0.0.1:7331.
-// Same host pattern as ELaserFocus OperatorHost: WinForms + WebView2.
+// ONE window, THREE forms (a single WebView2, two pages):
+//   pill (default)  /widget  280×56   number + sparkline, docks to ZCode
+//   mini pet        /pet     160×200  mini sprite + speed bubble, docks to ZCode
+//   normal pet      /pet     320×380  sprite card + speed bubble, free position
+// Switching forms: right-click menu (radio items 胶囊/迷你宠物/正常桌宠) or
+// scrolling the wheel anywhere on the widget (pill → mini → pet → pill).
+// The menu also carries: next pet pack (下一只宠物 — or double-click the
+// pet), docking, global topmost, dashboard, exit. Served by the repo's node
+// server on 127.0.0.1:7331. Same host pattern as ELaserFocus OperatorHost:
+// WinForms + WebView2.
 //
 // Docking (pill form only): the pill anchors to the ZCode main window,
 // floating just above the composer card's rounded top edge (position measured
@@ -148,7 +151,9 @@ internal sealed class WidgetForm : Form
     // 280 physical = 140 CSS px at 200% DPI: number + unit + reserved
     // 44px sparkline zone, no collisions (vision-review measured the fit)
     private static readonly Size WidgetSize = new(280, 56);
-    // 160×190 CSS px at 200% DPI; cat canvas ~80% height + bubble headroom
+    // mini pet companion: 80×100 CSS at 200% DPI — mini sprite + bubble
+    private static readonly Size MiniSize = new(160, 200);
+    // normal pet card: 160×190 CSS; cat canvas ~80% height + bubble headroom
     private static readonly Size PetSize = new(320, 380);
 
     // dock anchor, calibrated against the ZCode window's visible frame bounds
@@ -158,6 +163,9 @@ internal sealed class WidgetForm : Form
     // bottom toolbar row (row y1787-1844 → pill top 1787 = 117 above bottom)
     private const int DockFromRight = 194;
     private const int DockBottomUp = 117;
+    // mini pet dock: vertically centered on the old pill spot (its 200px height
+    // spans the same optical band the 56px pill occupied)
+    private const int DockBottomUpMini = 245;
 
     private const int WM_NCLBUTTONDOWN = 0xA1;
     private const int HTCAPTION = 0x2;
@@ -165,6 +173,8 @@ internal sealed class WidgetForm : Form
     private const int PillRadius = 20;
     // pet card corner radius (physical px) — matches the card face in pet.html
     private const int PetRadius = 36;
+    // mini pet card radius — pill-lineage radius on a pet-sized card
+    private const int MiniRadius = 20;
     private const int EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
     private const int WINEVENT_OUTOFCONTEXT = 0;
 
@@ -260,12 +270,13 @@ internal sealed class WidgetForm : Form
 
     private readonly WebView2 _web = new();
     private readonly ContextMenuStrip _menu = new();
-    // CheckOnClick is load-bearing: without it a click never flips Checked,
-    // so toggle handlers keep reading the stale value (the old 桌宠模式 item
-    // looked dead for exactly this reason)
+    // form selection: three mutually-exclusive radio items (CheckOnClick);
+    // the click handler clears the other two so the menu reads as one choice
     private readonly ToolStripMenuItem _topMostItem = new("始终置顶(全局)") { CheckOnClick = true, Checked = false };
     private readonly ToolStripMenuItem _dockItem = new("吸附 ZCode 窗口") { CheckOnClick = true, Checked = true };
-    private readonly ToolStripMenuItem _petItem = new("桌宠形态") { CheckOnClick = true };
+    private readonly ToolStripMenuItem _pillFormItem = new("胶囊") { CheckOnClick = true };
+    private readonly ToolStripMenuItem _miniFormItem = new("迷你宠物") { CheckOnClick = true };
+    private readonly ToolStripMenuItem _petFormItem = new("正常桌宠") { CheckOnClick = true };
     private readonly ToolStripMenuItem _nextPetItem = new("下一只宠物");
     private readonly string _settingsPath = Path.Combine(AppContext.BaseDirectory, "widget-settings.json");
     private readonly System.Windows.Forms.Timer _watch = new() { Interval = 500 };
@@ -288,11 +299,13 @@ internal sealed class WidgetForm : Form
     private System.Diagnostics.Process? _serverProc;
     private bool _ownsServer;
     private IntPtr _serverJob; // KILL_ON_JOB_CLOSE: child node dies with us, always
-    private string _mode = "pill"; // "pill" | "pet" — which form the window wears
+    private string _mode = "pill"; // "pill" | "mini" | "pet" — the form the window wears
     private Point? _pillLoc;       // last free pill position (docking overrides it)
-    private Point? _petLoc;        // last pet-form position
+    private Point? _miniLoc;       // last free mini-pet position (docking overrides it)
+    private Point? _petLoc;        // last normal-pet position
+    private string? _navUrl;       // page currently loaded (skip no-op navigations)
     private bool _webReady;        // CoreWebView2 initialized (Navigate/ExecuteScript safe)
-    private bool _cycleOnNav;      // run cyclePack() once the /pet document lands
+    private bool _cycleOnNav;      // run cyclePack() once a NEW /pet document lands
 
     public WidgetForm()
     {
@@ -303,12 +316,12 @@ internal sealed class WidgetForm : Form
         StartPosition = FormStartPosition.Manual;
         AutoScaleMode = AutoScaleMode.None; // sizes stay in physical px (200% desktop: WebView2 renders CSS at 2x)
         LoadSettings();
-        Size = _mode == "pet" ? PetSize : WidgetSize;
+        Size = _mode switch { "mini" => MiniSize, "pet" => PetSize, _ => WidgetSize };
         if (_mode == "pet") { _petLoc ??= DefaultPetLocation(); Location = _petLoc.Value; }
+        else if (_mode == "mini") { _miniLoc ??= DefaultPetLocation(); Location = _miniLoc.Value; }
         else if (_pillLoc is { } p) Location = p;
-        // reflect the restored form in the menu before any click can race it
-        _petItem.Checked = _mode == "pet";
-        _dockItem.Enabled = _mode != "pet"; // docking is a pill-form concept
+        SyncFormMenu();
+        _dockItem.Enabled = _mode != "pet"; // docking is a companion-form concept (pill + mini)
         Program.Log($"bounds set: {Location} {Size} mode={_mode} docked={_docked} d={_dx},{_dy}");
 
         _web.Dock = DockStyle.Fill;
@@ -323,9 +336,15 @@ internal sealed class WidgetForm : Form
             if (!_topMostItem.Checked) BindZOrder();
         };
         _dockItem.Click += (s, e) => { _docked = _dockItem.Checked; if (_docked) ApplyDock(); };
-        _petItem.Click += (s, e) => ApplyMode(_petItem.Checked ? "pet" : "pill");
+        // radio semantics: each click selects one form and clears the others;
+        // CheckOnClick already flipped the clicked item before Click runs
+        _pillFormItem.Click += (s, e) => ApplyMode("pill");
+        _miniFormItem.Click += (s, e) => ApplyMode("mini");
+        _petFormItem.Click += (s, e) => ApplyMode("pet");
         _nextPetItem.Click += (s, e) => NextPetAsync();
-        _menu.Items.Add(_petItem);
+        _menu.Items.Add(_pillFormItem);
+        _menu.Items.Add(_miniFormItem);
+        _menu.Items.Add(_petFormItem);
         _menu.Items.Add(_nextPetItem);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(_dockItem);
@@ -383,10 +402,10 @@ internal sealed class WidgetForm : Form
                 _zcodeGoneTicks = 0;
                 Program.Log($"zcode window (re)acquired: 0x{_zcodeHwnd:X} pid={_zcodePid}");
             }
-            // pet form z-binds too (covered with ZCode, never floats over
-            // unrelated apps); pill form only while docked — a freed pill
-            // floats in its own band until global topmost is toggled on
-            if (_docked || _mode == "pet") BindZOrder();
+            // pet forms (mini + normal) z-bind too (covered with ZCode, never
+            // floats over unrelated apps); pill only while docked — a freed
+            // pill floats in its own band until global topmost is toggled on
+            if (_docked || _mode != "pill") BindZOrder();
             // bound to ZCode's visibility too: no widget floating over the
             // desktop or other apps while ZCode is away or minimized
             bool zcodeUp = !IsIconic(_zcodeHwnd);
@@ -398,13 +417,13 @@ internal sealed class WidgetForm : Form
         AcquireZcodeWindow();
         Program.Log($"zcode window: hwnd=0x{_zcodeHwnd:X} pid={_zcodePid}");
 
-        // the window region IS the visible shape (pill or pet card, radius
-        // per form). WebView2 transparency doesn't work on plain WinForms
-        // windows, so the page paints full-bleed and the shell clips.
+        // the window region IS the visible shape (pill / mini pet / pet card,
+        // radius per form). WebView2 transparency doesn't work on plain
+        // WinForms windows, so the page paints full-bleed and the shell clips.
         // HandleCreated fires again on every WebView2-driven handle recreation.
         HandleCreated += (s, e) =>
         {
-            int r = _mode == "pet" ? PetRadius : PillRadius;
+            int r = _mode switch { "pet" => PetRadius, "mini" => MiniRadius, _ => PillRadius };
             _ = SetWindowRgn(Handle, MakeRoundRgn(Width, Height, r), true);
             Program.Log($"region applied r={r} {Width}x{Height}");
         };
@@ -556,7 +575,8 @@ internal sealed class WidgetForm : Form
                 _cycleOnNav = false;
                 _ = _web.CoreWebView2.ExecuteScriptAsync("typeof cyclePack==='function'&&cyclePack()");
             };
-            string url = _mode == "pet" ? PetUrl : WidgetUrl;
+            string url = _mode == "pill" ? WidgetUrl : PetUrl;
+            _navUrl = url;
             _web.CoreWebView2.Navigate(url);
             Program.Log("navigated: " + url);
 
@@ -573,55 +593,102 @@ internal sealed class WidgetForm : Form
         }
     }
 
-    // ── form machinery: one window, two faces ───────────────────────
+    // ── form machinery: one window, three faces ──────────────────────
 
-    // Swap the window between the pill and the pet card: size, clip region,
-    // position policy (dock anchor vs free spot) and the hosted page. All
-    // shared machinery (z-binding, ZCode visibility, lifecycle, server)
-    // is untouched — this is purely the shell's shape.
+    private static Size SizeOf(string mode) =>
+        mode switch { "mini" => MiniSize, "pet" => PetSize, _ => WidgetSize };
+    private static int RadiusOf(string mode) =>
+        mode switch { "pet" => PetRadius, "mini" => MiniRadius, _ => PillRadius };
+    private static string UrlOf(string mode) =>
+        mode == "pill" ? WidgetUrl : PetUrl;
+
+    private void SyncFormMenu()
+    {
+        _pillFormItem.Checked = _mode == "pill";
+        _miniFormItem.Checked = _mode == "mini";
+        _petFormItem.Checked = _mode == "pet";
+    }
+
+    // Swap the window between the three forms: size, clip region, position
+    // policy (dock anchor vs free spot) and — only across the pill↔pet page
+    // boundary — the hosted page. Shared machinery (z-binding, ZCode
+    // visibility, lifecycle, server) is untouched; this is the shell's shape.
     private void ApplyMode(string mode)
     {
         if (_mode == mode) return;
         _mode = mode;
-        bool pet = mode == "pet";
-        _petItem.Checked = pet;
-        _dockItem.Enabled = !pet;
-        Size = pet ? PetSize : WidgetSize;
+        SyncFormMenu();
+        _dockItem.Enabled = mode != "pet";
+        Size = SizeOf(mode);
         if (IsHandleCreated)
-            _ = SetWindowRgn(Handle, MakeRoundRgn(Width, Height, pet ? PetRadius : PillRadius), true);
-        if (pet)
+            _ = SetWindowRgn(Handle, MakeRoundRgn(Width, Height, RadiusOf(mode)), true);
+        switch (mode)
         {
-            _petLoc ??= DefaultPetLocation();
-            Location = _petLoc.Value;
+            case "pet":
+                Location = _petLoc ??= DefaultPetLocation();
+                break;
+            case "mini":
+                if (_docked) ApplyDock();
+                else Location = _miniLoc ??= DefaultPetLocation();
+                break;
+            default: // pill
+                if (_docked) ApplyDock(); // anchor recomputed with the pill's width
+                else if (_pillLoc is { } p) Location = p;
+                break;
         }
-        else if (_docked)
+        // same-URL swaps (mini↔pet share the page) must NOT navigate: a reload
+        // would reset the sprite/pack state mid-display
+        string url = UrlOf(mode);
+        if (_webReady && url != _navUrl)
         {
-            ApplyDock(); // anchor recomputed with the pill's width
+            _navUrl = url;
+            _web.CoreWebView2.Navigate(url);
         }
-        else if (_pillLoc is { } p)
-        {
-            Location = p;
-        }
-        if (_webReady) _web.CoreWebView2.Navigate(pet ? PetUrl : WidgetUrl);
         BindZOrder();
         SaveSettings();
         Program.Log($"form → {mode} at {Location} {Size}");
     }
 
-    // menu 下一只宠物: cycle the sprite pack on the pet page. If the window
-    // is currently the pill, swap forms first and let NavigationCompleted
-    // deliver the cycle to the freshly loaded /pet document.
+    // wheel on the widget cycles pill → mini → pet → pill (reverse when
+    // scrolling down); the pages forward their wheel events as messages
+    private void CycleForm(bool up)
+    {
+        string next = (_mode, up) switch
+        {
+            ("pill", true) => "mini",
+            ("mini", true) => "pet",
+            ("pet", true) => "pill",
+            ("pill", false) => "pet",
+            ("pet", false) => "mini",
+            _ => "pill",
+        };
+        ApplyMode(next);
+    }
+
+    // menu 下一只宠物: cycle the sprite pack on the pet page. From a pet form
+    // it runs directly; from the pill it swaps to the normal pet first and
+    // lets NavigationCompleted deliver the cycle to the freshly loaded /pet
+    // document (ExecuteScript targets the CURRENT document, so firing it
+    // right after Navigate would hit the outgoing page's script context).
     private async void NextPetAsync()
     {
         if (!_webReady) return;
-        if (_mode != "pet")
+        if (_mode == "pill")
         {
             _cycleOnNav = true;
             ApplyMode("pet");
             return;
         }
-        try { await _web.CoreWebView2.ExecuteScriptAsync("typeof cyclePack==='function'&&cyclePack()"); }
-        catch (Exception ex) { Program.Log("cyclePack failed: " + ex.Message); }
+        try
+        {
+            // returns diagnostics so a dead cycle is visible in widget-run.log
+            var r = await _web.CoreWebView2.ExecuteScriptAsync(
+                "(function(){var r={t:typeof cyclePack,p:typeof pack!=='undefined'?pack.id:null};" +
+                "try{if(r.t==='function'){cyclePack();r.ok=true;r.p2=pack.id}}catch(e){r.err=String(e)}" +
+                "return JSON.stringify(r)})()");
+            Program.Log("next-pet: " + r);
+        }
+        catch (Exception ex) { Program.Log("next-pet FAILED: " + ex.Message); }
     }
 
     // ── ZCode window docking ─────────────────────────────────────────
@@ -667,7 +734,8 @@ internal sealed class WidgetForm : Form
         if (DwmGetWindowAttribute(_zcodeHwnd, 9, out var r, 16) != 0
             && !GetWindowRect(_zcodeHwnd, out r))
             return null;
-        return (r.Right - DockFromRight - Width, r.Bottom - DockBottomUp);
+        int bottomUp = _mode == "mini" ? DockBottomUpMini : DockBottomUp;
+        return (r.Right - DockFromRight - Width, r.Bottom - bottomUp);
     }
 
     private int _dockLogs;
@@ -689,7 +757,7 @@ internal sealed class WidgetForm : Form
 
     private void ApplyDock()
     {
-        if (!_docked || _mode != "pill") return; // docking is a pill-form concept
+        if (!_docked || _mode == "pet") return; // docking is a companion-form concept (pill + mini)
         bool ok = DwmGetWindowAttribute(_zcodeHwnd, 9, out var fr, 16) == 0;
         GetWindowRect(_zcodeHwnd, out var wr);
         if (_dockLogs < 6)
@@ -716,11 +784,16 @@ internal sealed class WidgetForm : Form
                 ReleaseCapture();
                 SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
                 // SendMessage returns when the user releases the move loop:
-                // record what they did — pet keeps its position, docked pill
-                // keeps a fine-tune offset vs the anchor, free pill its position
+                // record what they did — pets keep their positions, a docked
+                // companion keeps a fine-tune offset vs the anchor, a freed
+                // companion keeps its position
                 if (_mode == "pet")
                 {
                     _petLoc = Location;
+                }
+                else if (_mode == "mini" && !_docked)
+                {
+                    _miniLoc = Location;
                 }
                 else if (_docked && anchorBefore is { } a)
                 {
@@ -733,6 +806,9 @@ internal sealed class WidgetForm : Form
                 }
                 BindZOrder();
                 SaveSettings();
+                break;
+            case "form-cycle":
+                CycleForm(root.GetProperty("up").GetBoolean());
                 break;
             case "menu":
                 var x = root.GetProperty("x").GetInt32();
@@ -764,10 +840,16 @@ internal sealed class WidgetForm : Form
                 if (b.TryGetProperty("dy", out var dy)) _dy = dy.GetInt32();
                 // migrate the two-window era: petVisible meant a separate pet
                 // card was open — carry that into the single-window form state
-                if (b.TryGetProperty("mode", out var m)) _mode = m.GetString() == "pet" ? "pet" : "pill";
+                if (b.TryGetProperty("mode", out var m))
+                {
+                    var s = m.GetString();
+                    _mode = s is "pet" or "mini" ? s! : "pill";
+                }
                 else if (b.TryGetProperty("petVisible", out var pv) && pv.GetBoolean()) _mode = "pet";
                 if (b.TryGetProperty("petX", out var px) && b.TryGetProperty("petY", out var py))
                     _petLoc = new Point(px.GetInt32(), py.GetInt32());
+                if (b.TryGetProperty("miniX", out var mx) && b.TryGetProperty("miniY", out var my))
+                    _miniLoc = new Point(mx.GetInt32(), my.GetInt32());
                 return;
             }
         }
@@ -776,8 +858,8 @@ internal sealed class WidgetForm : Form
     }
 
     // default pet rest spot: right edge, vertically MIDDLE of the work area —
-    // the bottom-right corner belongs to the docked pill and would z-fight
-    // with it every watch tick
+    // the bottom-right corner belongs to the docked companions and would
+    // z-fight with them every watch tick
     private static Point DefaultPetLocation()
     {
         var wa = Screen.PrimaryScreen!.WorkingArea;
@@ -795,10 +877,12 @@ internal sealed class WidgetForm : Form
         try
         {
             Point pill = _mode == "pill" ? Location : _pillLoc ?? Location;
+            Point mini = _mode == "mini" ? Location : _miniLoc ?? DefaultPetLocation();
             Point pet = _mode == "pet" ? Location : _petLoc ?? DefaultPetLocation();
             File.WriteAllText(_settingsPath, JsonSerializer.Serialize(
                 new { x = pill.X, y = pill.Y, docked = _docked, dx = _dx, dy = _dy,
-                      mode = _mode, petX = pet.X, petY = pet.Y }));
+                      mode = _mode,
+                      miniX = mini.X, miniY = mini.Y, petX = pet.X, petY = pet.Y }));
         }
         catch { /* position persistence is best-effort */ }
     }
