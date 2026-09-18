@@ -377,6 +377,21 @@ function completedSince(sinceMs) {
   }));
 }
 
+// Today's usage totals for the widget's daily budget readout. Same day-window
+// convention as the dashboard's ?window=today (startOfDayMs = LOCAL midnight),
+// and same token caliber as overviewSpeed: output + reasoning count as
+// generated tokens; reasoning_tokens is nullable so COALESCE to 0.
+function todayUsage() {
+  const r = db().prepare(`
+    SELECT SUM(output_tokens + COALESCE(reasoning_tokens, 0)) AS tokens,
+           COUNT(*)                                            AS requests
+    FROM model_usage
+    WHERE status = 'completed'
+      AND started_at >= @since
+  `).get({ since: startOfDayMs(Date.now()) });
+  return { tokens: r.tokens || 0, requests: r.requests || 0 };
+}
+
 // Newest started_at per table — SSE watermark init. recentModelRows orders
 // ASC, so an "ORDER BY ... LIMIT 1" init picks the OLDEST row and replays the
 // whole table on every server boot; MAX() must be explicit.
@@ -685,7 +700,7 @@ module.exports = {
   db, warmDb, invalidateDb,
   ts, j, startOfDayMs,
   overviewKpis, timeseries, breakdownByModel, breakdownByTool,
-  overviewSpeed, recentSpeed, completedSince,
+  overviewSpeed, recentSpeed, completedSince, todayUsage,
   sessionList, sessionGet, sessionTurns, sessionConversation,
   sessionActivity, sessionChildren, sessionReasoning,
   errorsList, errorSummary, slowTools,

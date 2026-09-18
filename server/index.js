@@ -7,6 +7,7 @@ const { exec } = require('child_process');
 const express = require('express');
 
 const dbq = require('./db');
+const { createGenWatcher } = require('./livegen');
 const runtime = require('./zcode-runtime');
 const overview = require('./routes/overview');
 const sessions = require('./routes/sessions');
@@ -199,8 +200,57 @@ if (process.env.ZCODE_WIDGET_CHILD === '1') {
   }, 30 * 1000).unref();
 }
 
+// ── generation-state engine (livegen) ─────────────────────────
+// One watcher for the whole process; drives the token-speed pill's breathing
+// animation while official tps is frozen between request completions.
+const genWatcher = createGenWatcher(dbq);
+
+app.get('/api/gen/state', (_req, res) => res.json(genWatcher.state()));
+
+// today's official token total + request count for the pill's hover tooltip
+// (kept below the companion tracker so it refreshes lastSeen as a keep-alive)
+app.get('/api/widget/today', (_req, res) => res.json(dbq.todayUsage()));
+
+// SSE stream of generation start/end edges. NOTE: this long-lived connection
+// passes the companion tracker above only ONCE at connect and then never
+// heartbeats it — that's fine, the widget page's 15s /api/widget/recent seed
+// keeps companion mode alive on its own.
+app.get('/api/gen/events', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.write(': connected\n\n');
+
+  // Send the CURRENT state immediately: edges only fire on transitions, so a
+  // page that connects MID-generation would otherwise wait until the next
+  // edge (possibly the generation's end, minutes away) with the animation
+  // stuck off. The snapshot closes that gap.
+  const cur = genWatcher.state();
+  res.write(`event: gen\ndata: ${JSON.stringify({ phase: cur.generating ? 'start' : 'end', sessions: cur.sessions })}\n\n`);
+
+  const heartbeat = setInterval(() => res.write(': hb\n\n'), 25000);
+  const off = genWatcher.onEvent(ev => {
+    res.write(`event: gen\ndata: ${JSON.stringify(ev)}\n\n`);
+  });
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    off();
+  });
+});
+
+// Stop the watcher on shutdown signals (its timer is already unref'd and
+// never blocks exit; this makes the teardown explicit and immediate).
+process.on('SIGINT', () => { genWatcher.stop(); process.exit(0); });
+process.on('SIGTERM', () => { genWatcher.stop(); process.exit(0); });
+
 // token-speed floating widget page (loaded by the frameless WebView2 shell)
 app.get('/widget', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'widget.html')));
+// desktop pet card page — WITHOUT this the SPA fallback serves the dashboard
+app.get('/pet', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'pet.html')));
 // exact rolling-window seed for the widget page (no LIMIT cap — see db.js completedSince)
 app.get('/api/widget/recent', (_req, res) => res.json(dbq.completedSince(Date.now() - 5 * 60 * 1000)));
 

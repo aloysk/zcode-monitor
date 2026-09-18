@@ -22,3 +22,6 @@ wdiag-*.png
 shell/publish/
 sse-capture*.txt
 tools/wdiag/*.txt
+genprobe-out.txt
+msgprobe-out.txt
+msgprobe.js

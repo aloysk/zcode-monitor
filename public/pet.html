@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     SPRITE ATTRIBUTION
+     Pet sprite pack "月薪喵" (yuexinmiao):
+       Source:  github.com/Renakoni/dsh-desk, via Masterchiefm/zcode-speed-panel
+       License: MIT License, Copyright (c) 2026 Renakoni
+     Sprites are served locally from /pets/yuexinmiao/spritesheet.webp —
+     this page makes no external requests for them.
+     ═══════════════════════════════════════════════════════════════════════
+
+     token-speed desktop pet — sprite edition (Codex Pet pack format).
+     One file: a <canvas> draws the cat from the local spritesheet with the
+     same approach as upstream's PetWidget (rAF + drawImage per frame), a
+     small S2 speech bubble above carries the live number, and three body
+     states drive which row of the sheet plays:
+       idle    (no completed traffic ≥ 2 min)  → row0 idle loop
+       cruise  (recent traffic, not generating) → row8 review loop
+       gen     (SSE /api/gen/events phase)      → tier-picked run group:
+              < 30 t/s  → row7 running
+             30-80 t/s  → row4 jumping
+             > 80 t/s   → row1/row2 alternating each full cycle
+     Upstream rule kept verbatim: switch animations only at the END of a full
+     row cycle, so the cat never pops mid-motion.
+     Data: poll GET /api/widget/recent every 5 s → rolling tps over the
+     returned 5-minute population (Σ(output+reasoning) ÷ Σduration_ms/1000).
+     All endpoints are optional: with everything dead this page is an idle
+     cat, which IS the product's default face.
+     Shell: frameless WebView2 rounded card (transparency impossible); the
+     page paints full-bleed --surface-card and the window region owns the
+     radius. Affordances mirror widget.html exactly: drag anywhere ·
+     right-click menu · double-click dashboard. -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token 桌宠</title>
+<style>
+/* Font import matches widget.html (Source Sans 3 is the family face) and is
+   the page's only network dependency besides same-origin APIs/sprites.
+   Placed first so the @import is valid CSS. */
+@import url('https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&display=swap');
+
+/* Spectrum 2 tokens (subset, from Ke-Spectrum-2-Design-System/tokens/) —
+   identical to widget.html so pill and pet read as one product */
+:root {
+  color-scheme: light dark;
+  --font-sans: "Source Sans 3", "Noto Sans SC", ui-sans-serif, system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+
+  --surface-card: light-dark(#ffffff, #222222);
+  --text-heading: light-dark(#131313, #f2f2f2);
+  --text-secondary: light-dark(#505050, #afafaf);
+  --text-disabled: light-dark(#8f8f8f, #6d6d6d);
+  --negative: light-dark(#d73220, #df3422);
+  --notice: light-dark(#fc7d00, #e06400);
+  --positive: light-dark(#05834e, #068850);
+
+  --bubble-bg: light-dark(#ffffff, #303030);
+  --bubble-line: light-dark(#d0d0d0, #4d4d4d);
+  --tier: var(--text-disabled); /* neutral until data assigns a tier */
+}
+
+/* same tier boundaries as widget.html speedClass(): <30 red / 30-80 amber /
+   >80 green — the bubble number color (and the gen run animation pick) are
+   the only tier carriers on this page */
+body.tier-red   { --tier: var(--negative); }
+body.tier-amber { --tier: var(--notice); }
+body.tier-green { --tier: var(--positive); }
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  background: var(--surface-card); /* full-bleed: the window region owns the card radius */
+  border-radius: 16px;             /* cosmetic in a plain browser only; no-op inside the shell */
+  font-family: var(--font-sans);
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+  position: relative;
+}
+
+/* cat canvas: bottom-anchored, ~80% of card height, sheet cell aspect */
+#pet {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  height: 80%;
+  aspect-ratio: 192 / 208;
+  pointer-events: none; /* document-level drag/menu handlers stay authoritative */
+}
+
+/* bubble zone: the ~20% band above the cat; the bubble hovers at its bottom
+   edge so the tail points at the cat's head */
+.bubble-zone {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 20%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  pointer-events: none;
+}
+.bubble {
+  background: var(--bubble-bg);
+  border: 1px solid var(--bubble-line);
+  border-radius: 7px;
+  box-shadow: 0 1px 4px light-dark(rgb(0 0 0 / .12), rgb(0 0 0 / .5));
+  padding: 1px 8px 2px;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 12px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  color: var(--tier);       /* tier color with a number, neutral gray for "…" */
+  white-space: nowrap;
+  position: relative;
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity .18s ease, transform .18s ease;
+}
+.bubble::after { /* little tail: rotated square with two exposed borders */
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -3.4px;
+  width: 6px;
+  height: 6px;
+  background: var(--bubble-bg);
+  border-right: 1px solid var(--bubble-line);
+  border-bottom: 1px solid var(--bubble-line);
+  transform: translateX(-50%) rotate(45deg);
+}
+.bubble.on { opacity: 1; transform: translateY(0); }
+
+/* reduced motion: the sprite loop stops (one static representative frame is
+   drawn per state instead) and the bubble crossfades without translation */
+@media (prefers-reduced-motion: reduce) {
+  .bubble { transition: opacity .18s ease; }
+}
+</style>
+</head>
+<body class="state-idle">
+<canvas id="pet" role="img" aria-label="Token 桌宠：打盹中"></canvas>
+<div class="bubble-zone">
+  <div class="bubble" id="bubble"><span id="bnum">…</span></div>
+</div>
+
+<script>
+'use strict';
+const IN_WEBVIEW = !!(window.chrome && window.chrome.webview);
+const IDLE_AFTER = 2 * 60 * 1000;  // no completed traffic for 2 min → idle cat
+const GEN_STALE  = 10 * 60 * 1000; // see staleness guard in poll()
+
+const $ = id => document.getElementById(id);
+const petEl = $('pet'), bubbleEl = $('bubble'), bnumEl = $('bnum');
+const reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+// ── sprite packs: Codex Pet format (verified from upstream dsh-desk renderer;
+//    pet.json beside each sheet carries metadata only, no frame table).
+//    Double-click the pet cycles packs; choice persists in localStorage. ──
+const PACKS = [
+  {
+    id: 'yuexinmiao', name: '月薪喵',
+    sheet: '/pets/yuexinmiao/spritesheet.webp',
+    anims: {
+      idle:               { row: 0, frames: 6 },
+      running_right:      { row: 1, frames: 8 },
+      running_left:       { row: 2, frames: 8 },
+      waving:             { row: 3, frames: 4 },
+      jumping:            { row: 4, frames: 5 },
+      failed:             { row: 5, frames: 8 },
+      waiting_permission: { row: 6, frames: 6 },
+      running:            { row: 7, frames: 6 },
+      review:             { row: 8, frames: 6 },
+    },
+  },
+  {
+    id: 'maid-deepseek-whale', name: '鲸鱼女仆',
+    sheet: '/pets/maid-deepseek-whale/spritesheet.webp',
+    anims: {
+      idle:               { row: 0, frames: 7 },
+      running_right:      { row: 1, frames: 8 },
+      running_left:       { row: 2, frames: 8 },
+      waving:             { row: 3, frames: 4 },
+      jumping:            { row: 4, frames: 5 },
+      failed:             { row: 5, frames: 8 },
+      waiting_permission: { row: 6, frames: 6 },
+      running:            { row: 7, frames: 6 },
+      // upstream skips a broken column 4 and an oversized 5 on this row
+      review:             { row: 8, frames: 6, play: [0, 1, 2, 3, 0] },
+    },
+  },
+];
+let packIdx = Math.max(0, PACKS.findIndex(p => p.id === localStorage.getItem('petPack')));
+let pack = PACKS[packIdx];
+let ANIMS = pack.anims;
+const CELL_W = 192, CELL_H = 208, COLS = 8, FRAME_MS = 160;
+
+// ── canvas rendering (same approach as upstream PetWidget) ────────────────
+const ctx = petEl.getContext('2d');
+let sheetOk = false;
+let anim = 'idle';     // row currently playing
+let pending = 'idle';  // queued row; applied only at a full-cycle boundary
+let frame = 0;         // index within the current row
+let rafId = 0, lastTs = 0;
+
+const sheet = new Image();
+sheet.onload = () => { sheetOk = true; fitCanvas(); startAnim(); };
+sheet.onerror = () => { /* silent: card + bubble still work, cat is absent */ };
+sheet.src = pack.sheet; // begin decoding while the data logic warms up
+
+// Backing store at physical pixels (devicePixelRatio is 2 at the shell's
+// 200% DPI) so the 192×208 cells stay crisp; CSS layout owns the size.
+function fitCanvas() {
+  const r = petEl.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  petEl.width  = Math.max(1, Math.round(r.width  * dpr));
+  petEl.height = Math.max(1, Math.round(r.height * dpr));
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  if (sheetOk) draw(anim, frame);
+}
+window.addEventListener('resize', fitCanvas);
+
+function draw(name, col) {
+  const a = ANIMS[name];
+  // clear first: cat frames sit at different offsets inside the cell, so
+  // drawing over the previous frame left ghost outlines behind (vision-caught)
+  ctx.clearRect(0, 0, petEl.width, petEl.height);
+  // 1px source inset: at ~6x upscaling with smoothing on, edge texels sample
+  // the NEIGHBOURING cell of the sheet and bleed its pixels (magenta specks)
+  // into this frame — cropping the outermost source pixel kills the bleed
+  ctx.drawImage(sheet, col * CELL_W + 1, a.row * CELL_H + 1, CELL_W - 2, CELL_H - 2,
+                0, 0, petEl.width, petEl.height);
+}
+
+// frame positions index the PLAY sequence (explicit col list, else 0..frames-1)
+function playCols(a) { return a.play || null; }
+
+function step() {
+  const a = ANIMS[anim];
+  const total = a.play ? a.play.length : a.frames;
+  if (++frame >= total) {
+    frame = 0;
+    // upstream rule: switch rows only after the last frame of a cycle, so
+    // the cat never pops mid-motion; high tier also alternates direction
+    // here, one full cycle each way
+    if (pending !== anim) anim = pending;
+    else if (anim === 'running_right') anim = pending = 'running_left';
+    else if (anim === 'running_left')  anim = pending = 'running_right';
+  }
+  draw(anim, (playCols(ANIMS[anim]) || [])[frame] ?? frame);
+}
+
+let lastBeat = 0;  // last advance (rAF or fallback) — watchdog input
+let fallbackId = 0;
+
+function loop(ts) {
+  rafId = requestAnimationFrame(loop);
+  if (ts - lastTs < FRAME_MS) return; // pace to 160ms/frame regardless of rAF rate
+  lastTs = ts;
+  lastBeat = performance.now();
+  step();
+}
+function startAnim() {
+  if (reduceMQ.matches) { if (sheetOk) draw(anim, 0); return; }
+  if (!rafId) {
+    lastTs = 0; lastBeat = performance.now();
+    rafId = requestAnimationFrame(loop);
+    // Chromium treats never-activated tool windows as occluded and stops rAF
+    // entirely (the cat froze solid in the WebView2 shell). This watchdog
+    // drives the frames instead whenever rAF starves, and is a no-op while
+    // rAF is alive.
+    if (!fallbackId) fallbackId = setInterval(() => {
+      if (reduceMQ.matches || performance.now() - lastBeat < 700) return;
+      lastBeat = performance.now();
+      step();
+    }, 250);
+  }
+}
+
+// double-click cycles to the next pack; the sheet's onload restarts the loop
+function cyclePack() {
+  packIdx = (packIdx + 1) % PACKS.length;
+  pack = PACKS[packIdx];
+  ANIMS = pack.anims;
+  try { localStorage.setItem('petPack', pack.id); } catch { /* private mode */ }
+  sheetOk = false;
+  anim = pending = 'idle';
+  frame = 0;
+  sheet.src = pack.sheet;
+}
+function stopAnim() { if (rafId) { cancelAnimationFrame(rafId); rafId = 0; } }
+// honor the OS setting toggling at runtime, not just at load
+reduceMQ.addEventListener('change', () => {
+  if (reduceMQ.matches) { stopAnim(); if (sheetOk) draw(anim, 0); }
+  else startAnim();
+});
+
+// ── rolling state ─────────────────────────────────────────────────────────
+let tps = null;          // rolling tps over the last-5-min population, or null
+let lastActivity = 0;    // epoch ms of the newest COMPLETED request (0 = never)
+let gen = false;         // true between SSE gen:start and gen:end
+let genLastAt = 0;       // time of the last gen event, for the staleness guard
+let sseSeenEvent = false;
+let es = null;
+let curState = '', curTier = '';
+
+function tierOf(t) { // same boundaries as widget.html speedClass()
+  if (t == null || !isFinite(t)) return '';
+  if (t < 30) return 'tier-red';
+  if (t <= 80) return 'tier-amber';
+  return 'tier-green';
+}
+
+function computeState() {
+  if (gen) return 'gen';
+  return (lastActivity > 0 && Date.now() - lastActivity < IDLE_AFTER) ? 'cruise' : 'idle';
+}
+
+// tier-picked run group while generating (upstream vocabulary, 3 tiers):
+// low → running, mid → jumping, high → running_right (the loop alternates
+// with running_left every full cycle). No number yet → neutral running.
+function desiredAnim() {
+  if (gen) {
+    if (tps == null || !isFinite(tps) || tps < 30) return 'running';
+    if (tps <= 80) return 'jumping';
+    return 'running_right';
+  }
+  return computeState() === 'cruise' ? 'review' : 'idle';
+}
+
+function ariaLabel(s) {
+  if (s === 'gen')  return tps != null ? 'Token 桌宠：生成中，速度 ' + tps.toFixed(1) + ' t/s'
+                                       : 'Token 桌宠：生成中';
+  if (s === 'cruise') return 'Token 桌宠：待命中';
+  return 'Token 桌宠：打盹中';
+}
+
+function render() {
+  const s = computeState(), tier = tierOf(tps);
+  if (s !== curState || tier !== curTier) {
+    curState = s; curTier = tier;
+    document.body.className = ('state-' + s + ' ' + tier).trim();
+    petEl.setAttribute('aria-label', ariaLabel(s));
+  }
+  pending = desiredAnim(); // queued; the loop applies it at the cycle boundary
+  if (reduceMQ.matches && sheetOk) draw(desiredAnim(), 0); // static face, no loop
+  // bubble ONLY while generating: the live number, or "…" until one exists
+  bnumEl.textContent = (tps != null && isFinite(tps)) ? tps.toFixed(1) : '…';
+  bubbleEl.classList.toggle('on', s === 'gen');
+}
+
+// ── data: poll /api/widget/recent every 5 s ────────────────────────────────
+// The endpoint returns the exact rolling-window population (completed in the
+// last 5 min), so the number is just Σtokens ÷ Σduration over the response.
+// Rows are keyed by completion time (time + duration_ms) for the idle clock.
+async function poll() {
+  try {
+    const r = await fetch('/api/widget/recent', { cache: 'no-store' });
+    if (!r.ok) throw new Error('http ' + r.status);
+    const rows = await r.json();
+    if (Array.isArray(rows)) {
+      let tok = 0, ms = 0, lastEnd = 0;
+      for (const q of rows) {
+        const end = new Date(q.time).getTime() + (q.duration_ms || 0);
+        if (end > lastEnd) lastEnd = end; // NaN rows drop out via comparison
+        if (q.duration_ms > 0) {
+          tok += (q.output || 0) + (q.reasoning || 0);
+          ms += q.duration_ms;
+        }
+      }
+      lastActivity = Math.max(lastActivity, lastEnd);
+      tps = rows.length && ms > 0 ? tok / (ms / 1000) : null;
+    }
+  } catch (e) {
+    /* silent by design: a dead server just means the cat keeps its last
+       known mood; if it never spoke, the initial idle stands */
+  }
+  // Staleness guard: if the gen stream died right after a 'start', don't let
+  // the cat run forever. 10 min without any gen event demotes to cruise —
+  // long enough that a real marathon generation isn't visually cut short.
+  if (gen && Date.now() - genLastAt > GEN_STALE) gen = false;
+  // idle demotion is time-based, so it must run even when the fetch failed
+  render();
+}
+
+// ── generating flag: SSE /api/gen/events, event "gen" ─────────────────────
+function openSSE() {
+  try {
+    es = new EventSource('/api/gen/events');
+    es.addEventListener('gen', e => {
+      let m; try { m = JSON.parse(e.data); } catch { return; }
+      sseSeenEvent = true;
+      genLastAt = Date.now();
+      if (m.phase === 'start') gen = true;
+      else if (m.phase === 'end') {
+        gen = false;
+        lastActivity = Math.max(lastActivity, Date.now()); // an end IS traffic
+      }
+      render();
+    });
+    // The endpoint may not exist yet. Native EventSource retries every ~3 s
+    // forever; a source that never produced an event gets closed and retried
+    // once a minute instead, so a permanent 404 stays silent instead of
+    // hammering. Once it has produced events, trust the native reconnect.
+    es.onerror = () => {
+      if (!sseSeenEvent && es) { es.close(); es = null; setTimeout(openSSE, 60000); }
+    };
+  } catch { /* EventSource unavailable: pet lives on poll data alone */ }
+}
+
+poll();
+setInterval(poll, 5000);
+openSSE();
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { poll(); lastTs = 0; } // resync frame pacing after rAF pause
+});
+
+// ── frameless-window affordances (identical contract to widget.html) ──────
+// Document-level listeners keep EVERY pixel of the card draggable; the canvas
+// and bubble are pointer-events:none so nothing can swallow them.
+if (IN_WEBVIEW) {
+  document.addEventListener('pointerdown', e => {
+    if (e.button === 0) window.chrome.webview.postMessage({ type: 'drag' });
+  });
+  document.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    window.chrome.webview.postMessage({ type: 'menu', x: Math.round(e.screenX * (window.devicePixelRatio || 1)), y: Math.round(e.screenY * (window.devicePixelRatio || 1)) });
+  });
+  document.addEventListener('dblclick', () => {
+    cyclePack(); // double-click switches to the next pet (dashboard: menus)
+  });
+}
+</script>
+</body>
+</html>

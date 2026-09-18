@@ -1,13 +1,18 @@
 <!DOCTYPE html>
 <!-- token-speed floating widget — pill edition.
-     One line: brand · tier-colored mono number · unit. Nothing else.
+     One line: tier-colored number · unit. Nothing else.
      Number = rolling weighted tps over requests COMPLETED in the last 5
      minutes: seeded from /api/widget/recent (the exact window population),
      then live completed requests via SSE /api/live/events 'model'.
      Idle → "—". One decimal always shown (56.0, not 56).
      States: ok (number, tier color) · idle (—, dim) · error (—, red brand).
-     The shell window is 160×36 with a transparent WebView2 background; this
-     page paints the pill itself (full radius + hairline border).
+     Texture, not new elements: a 30×10s micro-sparkline of the same rolling
+     window hides behind the number at 45% tier color; while a generation is
+     in flight (/api/gen/events) the number's color breathes ±12% lightness;
+     hovering 400ms surfaces today's usage in a card tooltip above the pill.
+     Shell window: 240×56 physical = 120×28 CSS px at 200% DPI. The window
+     region shapes the pill, so the body paints full-bleed with no border
+     or radius of its own.
      Affordances: drag anywhere · right-click menu · double-click dashboard. -->
 <html lang="zh-CN">
 <head>
@@ -34,6 +39,7 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { height: 100%; overflow: hidden; }
 body {
+  position: relative; /* containing block for the absolutely-placed sparkline */
   background: var(--surface-card); /* full-bleed: the shell's window region shapes the pill */
   font-family: var(--font-sans);
   user-select: none;
@@ -42,7 +48,10 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0 14px;
+  /* right side is the sparkline's reserved zone (12px inset + 44px chart):
+     the centered number+unit can never collide with the stroke — vision
+     review caught the unit glyphs sitting inside the polyline's span */
+  padding: 0 58px 0 14px;
   white-space: nowrap;
 }
 /* one baseline for all three parts — mixed font sizes otherwise drift apart */
@@ -67,15 +76,83 @@ body {
   color: var(--text-disabled);
   margin-left: 4px;
 }
+
+/* micro-sparkline: pure texture behind the number's trailing half. The tier
+   classes above supply its color via currentColor; the 45% stroke opacity
+   keeps it subordinate to the digits. 48×12 drawn 1:1 with its viewBox so
+   the 1.5px stroke never distorts or exceeds 2px at any DPI. */
+.spark {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 44px;
+  height: 12px;
+  pointer-events: none; /* never a hit target: drag must be able to start anywhere */
+}
+.spark.off { display: none; }
+.spark polyline {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-opacity: 0.45;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.spark circle { fill: currentColor; fill-opacity: 0.6; } /* 2px live-end dot, a hair stronger than the stroke */
+
+/* generation in flight: ONE indicator — the number's color breathes
+   (±12% lightness, 2s ease cycle). Chosen over a 4px status dot: at 28px
+   window height a third element reads as clutter, while modulating the
+   color of an element that already exists reads as state, not content. */
+body.gen .tps { animation: gen-breathe 2s ease-in-out infinite alternate; }
+@keyframes gen-breathe {
+  from { filter: brightness(0.88); }
+  to   { filter: brightness(1.12); }
+}
+
+/* hover tooltip (today's usage): S2 card above the pill, centered. Fixed
+   placement + pointer-events:none keep the frameless drag (pointerdown
+   anywhere, including through this card) completely untouched. Card chrome
+   is derived from existing tokens only (color-mix for hairline + shadow,
+   shadow tinted toward the text hue, never raw black). */
+.tip {
+  position: fixed;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--surface-card);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--text-disabled) 35%, transparent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--text-heading) 15%, transparent);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 10;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.gen .tps { animation: none; } /* breathing is ambient, not informational */
+}
 </style>
 </head>
 <body>
   <span class="row"><span class="tps" id="tps">—</span><span class="unit" id="unit" hidden>t/s</span></span>
+  <svg class="spark off" id="spark" width="44" height="12" viewBox="0 0 44 12" aria-hidden="true" focusable="false">
+    <polyline id="sparkLine"></polyline>
+    <circle id="sparkDot" r="1.5"></circle>
+  </svg>
+  <div class="tip" id="tip" hidden></div>
 
 <script>
 'use strict';
 const IN_WEBVIEW = !!(window.chrome && window.chrome.webview);
 const ROLL_MS = 5 * 60 * 1000;   // rolling window for the real-time number
+const SLOTS = 30, SLOT_MS = 10000; // sparkline granularity: 30×10s = the same 5 min
+const SPARK_W = 44, SPARK_H = 12;
 
 const $ = id => document.getElementById(id);
 function speedClass(tps) {
@@ -103,6 +180,55 @@ function pushReq(id, endMs, tok, durMs) {
   }
   buf.push({ end: endMs, tok, durMs, id });
 }
+
+// Micro-sparkline: rebuilt from buf on every render (each 2s tick, every seed,
+// every SSE bump), so the series backfills automatically after page load and
+// self-heals with the 15s re-seed. Each slot aggregates only the completions
+// that fell inside its own 10s span; empty slots are skipped and the line
+// connects THROUGH them — plotting them as zero would fabricate "0 t/s" for
+// idle minutes that never had a measurement.
+function drawSpark(tier) {
+  const svg = $('spark');
+  if (!tier) { svg.setAttribute('class', 'spark off'); return; }
+  // Epoch-aligned slot indices (not "now minus k×10s") dodge boundary
+  // off-by-ones; slot 29 is the CURRENT partial slot, which is what makes
+  // the live-end dot move as rows arrive mid-slot.
+  const cur = Math.floor(Date.now() / SLOT_MS);
+  const agg = new Array(SLOTS).fill(null);
+  for (const r of buf) {
+    const i = Math.floor(r.end / SLOT_MS) - cur + SLOTS - 1;
+    if (i < 0 || i >= SLOTS) continue; // rows straddling the window edge: render() evicts, guard anyway
+    const s = (agg[i] ??= { tok: 0, ms: 0 });
+    s.tok += r.tok;
+    s.ms += r.durMs;
+  }
+  const v = new Array(SLOTS).fill(null);
+  let max = 0, last = -1, n = 0;
+  for (let i = 0; i < SLOTS; i++) {
+    const s = agg[i];
+    if (s && s.ms > 0) {
+      v[i] = s.tok / (s.ms / 1000);
+      if (v[i] > max) max = v[i];
+      last = i;
+      n++;
+    }
+  }
+  // a single populated slot is a lone dot, not a line; an all-zero window
+  // has no scale to draw against
+  if (max <= 0 || n < 2) { svg.setAttribute('class', 'spark off'); return; }
+  const pts = [];
+  for (let i = 0; i <= last; i++) {
+    if (v[i] == null) continue;
+    pts.push((i / (SLOTS - 1) * SPARK_W).toFixed(2) + ',' +
+             (SPARK_H - 1 - (v[i] / max) * (SPARK_H - 2)).toFixed(2)); // 1px inset keeps the stroke inside
+  }
+  $('sparkLine').setAttribute('points', pts.join(' '));
+  const [dx, dy] = pts[pts.length - 1].split(',');
+  $('sparkDot').setAttribute('cx', dx);
+  $('sparkDot').setAttribute('cy', dy);
+  svg.setAttribute('class', 'spark ' + tier); // tier classes carry the color via currentColor
+}
+
 function render() {
   const now = Date.now();
   const cutoff = now - ROLL_MS;
@@ -122,6 +248,7 @@ function render() {
     $('tps').textContent = '—';
     $('tps').className = 'tps';
     $('unit').hidden = true;
+    drawSpark(null);
     return;
   }
   let tok = 0, ms = 0;
@@ -129,9 +256,11 @@ function render() {
   // weighted aggregate over the window — same caliber as the dashboard KPI:
   // Σ(output+reasoning) ÷ Σduration (completed only, TTFT included)
   const text = ms > 0 ? (tok / (ms / 1000)).toFixed(1) : null;
+  const tier = speedClass(text != null ? parseFloat(text) : null);
   $('tps').textContent = text != null ? text : '—';
-  $('tps').className = 'tps ' + speedClass(text != null ? parseFloat(text) : null);
+  $('tps').className = 'tps ' + tier;
   $('unit').hidden = text == null;
+  drawSpark(tier);
 }
 
 // seed = the exact rolling-window population (completed in the last 5 min,
@@ -152,6 +281,7 @@ async function seed() {
     $('tps').textContent = '—';
     $('tps').className = 'tps err';
     $('unit').hidden = true;
+    drawSpark(null); // the error state owns the surface: no stale texture
   }
 }
 
@@ -172,8 +302,71 @@ try {
   });
 } catch {}
 
+// ── generation breathing ──
+// Track live session ids (not a boolean) so overlapping generations keep
+// breathing until the LAST one ends. 'tick' events are received but ignored
+// on purpose: estTps is an estimate and must never overwrite the exact
+// rolling number, and a fixed 2s rhythm reads calmer than rate-synced pulsing.
+const genLive = new Set();
+const syncGen = () => document.body.classList.toggle('gen', genLive.size > 0);
+try {
+  const ges = new EventSource('/api/gen/events');
+  ges.addEventListener('gen', e => {
+    try {
+      const m = JSON.parse(e.data);
+      if (m.phase === 'start') genLive.add(m.sessionId);
+      else if (m.phase === 'end') genLive.delete(m.sessionId);
+      syncGen();
+    } catch {}
+  });
+  // connection lost → drop to no-breathing and stay silent: stream state is
+  // unknown, and an unreachable endpoint must degrade without any UI noise
+  ges.addEventListener('error', () => { genLive.clear(); syncGen(); });
+} catch {}
+
+// ── hover tooltip: today's usage ──
+// Fetched on first qualifying hover, cached 60s. Failures (e.g. the endpoint
+// not existing yet) show nothing and are retried on the next hover. The card
+// is pointer-events:none and appears only after a 400ms mouse dwell, so the
+// drag handler's document-level pointerdown never sees it as a target.
+const tip = $('tip');
+const TIP_TTL = 60000;
+let tipTimer = 0, tipCache = null, tipBusy = false, tipOver = false;
+const fmtWan = n => n >= 10000 ? (n / 10000).toFixed(1) + '万' : String(n);
+async function showTip() {
+  let text = tipCache && Date.now() - tipCache.at < TIP_TTL ? tipCache.text : null;
+  if (!text && !tipBusy) {
+    tipBusy = true; // one fetch at a time; a concurrent hover reuses its result via the cache
+    try {
+      const r = await fetch('/api/widget/today', { cache: 'no-store' });
+      if (!r.ok) throw new Error('http ' + r.status);
+      const d = await r.json();
+      if (!Number.isFinite(d.tokens) || !Number.isFinite(d.requests)) throw new Error('shape');
+      text = '今日 ' + fmtWan(d.tokens) + ' tok · ' + d.requests + ' 次';
+      tipCache = { text, at: Date.now() };
+    } catch {} // silent by contract: no data yet → no tooltip
+    tipBusy = false;
+  }
+  if (text && tipOver) { tip.textContent = text; tip.hidden = false; } // pointer may have left during await
+}
+document.body.addEventListener('pointerenter', e => {
+  if (e.pointerType !== 'mouse') return; // touch "hover" is a tap, not dwell intent
+  tipOver = true;
+  clearTimeout(tipTimer);
+  tipTimer = setTimeout(showTip, 400);
+});
+document.body.addEventListener('pointerleave', () => {
+  tipOver = false;
+  clearTimeout(tipTimer);
+  tip.hidden = true;
+});
+document.addEventListener('pointerdown', () => {
+  clearTimeout(tipTimer); // drag/menu start from a clean surface
+  tip.hidden = true;
+});
+
 seed();
-setInterval(render, 10000);   // window slides even without new events
+setInterval(render, 2000);    // 2s cadence: the sliding window decay must feel alive
 setInterval(seed, 15000);     // self-heal: SSE watermark misses rows that were
                               // in-flight when the server booted; 15s bounds it
 document.addEventListener('visibilitychange', () => { if (!document.hidden) seed(); });
@@ -185,7 +378,7 @@ if (IN_WEBVIEW) {
   });
   document.addEventListener('contextmenu', e => {
     e.preventDefault();
-    window.chrome.webview.postMessage({ type: 'menu', x: e.screenX, y: e.screenY });
+    window.chrome.webview.postMessage({ type: 'menu', x: Math.round(e.screenX * (window.devicePixelRatio || 1)), y: Math.round(e.screenY * (window.devicePixelRatio || 1)) });
   });
   document.addEventListener('dblclick', () => {
     window.chrome.webview.postMessage({ type: 'open-dashboard' });
