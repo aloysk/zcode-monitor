@@ -48,6 +48,19 @@ internal static class Program
     [DllImport("user32.dll")]
     private static extern bool SetProcessDpiAwarenessContext(IntPtr value);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int nStdHandle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetStdHandle(int nStdHandle, IntPtr hHandle);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateFileW(string name, uint access, uint share,
+        IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr hObject);
+
     [STAThread]
     private static void Main()
     {
@@ -55,6 +68,7 @@ internal static class Program
         // races otherwise, and rect reads flip between physical/virtualized
         // (observed: same window reporting 3200×1904 and 1600×952)
         _ = SetProcessDpiAwarenessContext(new IntPtr(-4));
+        DetachInheritedStdio();
         Log("boot");
         using var singleton = new Mutex(true, "ZcodeWidget_SingleInstance", out bool first);
         if (!first)
@@ -68,6 +82,33 @@ internal static class Program
             Log("UnhandledException: " + e.ExceptionObject + " terminating=" + e.IsTerminating);
         Application.Run(new WidgetForm());
         Log("message loop exited");
+    }
+
+    // When spawned by a hook runner (SessionStart → Start-Process), our std
+    // handles can be the runner's capture pipes: holding them makes the hook
+    // wait for EOF until its timeout, then the runner kills the whole tree
+    // (observed: every SessionStart today died this way). Swap each inherited
+    // handle to NUL and close the original — the runner sees EOF immediately,
+    // and WebView2 children spawned later inherit NUL, not pipes.
+    private static void DetachInheritedStdio()
+    {
+        try
+        {
+            const uint GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000;
+            foreach (int slot in new[] { -10, -11, -12 }) // STD_INPUT/OUTPUT/ERROR
+            {
+                IntPtr old = GetStdHandle(slot);
+                if (old == IntPtr.Zero || old == new IntPtr(-1)) continue;
+                IntPtr nul = CreateFileW("NUL", GENERIC_READ | GENERIC_WRITE,
+                    3 /* FILE_SHARE_READ|WRITE */, IntPtr.Zero, 3 /* OPEN_EXISTING */,
+                    0x80 /* FILE_ATTRIBUTE_NORMAL */, IntPtr.Zero);
+                if (nul == new IntPtr(-1)) continue;
+                _ = SetStdHandle(slot, nul);
+                _ = CloseHandle(old);
+            }
+            Log("stdio detached from launcher pipes");
+        }
+        catch { /* best-effort: worst case the launcher times out as before */ }
     }
 }
 
