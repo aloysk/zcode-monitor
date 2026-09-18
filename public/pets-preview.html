@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<!-- Candidate preview sheet: renders one idle frame (row 0, col 0) of each
+     downloaded gallery candidate as a numbered card. Playwright screenshots
+     this page into the contact sheet the user circles numbers on.
+     The packs live under /pets-preview/<slug>/ (NOT /pets/ — the widget
+     registry does not see them until promoted). -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>宠物候选预览</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1b1b1b;
+    color: #f2f2f2;
+    font-family: "Source Sans 3", "Noto Sans SC", "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 24px;
+  }
+  h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  p.sub { font-size: 12px; color: #afafaf; margin-bottom: 18px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+  }
+  .card {
+    background: #242424;
+    border: 1px solid #3a3a3a;
+    border-radius: 10px;
+    padding: 12px 10px 10px;
+    text-align: center;
+  }
+  .num { font-size: 13px; font-weight: 700; color: #3b63fb; }
+  canvas { height: 110px; image-rendering: auto; margin: 6px 0 4px; }
+  .name { font-size: 13px; font-weight: 600; }
+  .src { font-size: 11px; color: #afafaf; }
+</style>
+</head>
+<body>
+<h1>宠物候选 · 第二批（跨站） · 圈选编号</h1>
+<p class="sub">每只展示待机帧 · 来源横跨 petscodex / codex-pet.org / codex-pets.net / codex-pet.com(+petdex 精选) · 未进正式轮换</p>
+<div class="grid" id="grid"></div>
+
+<script>
+'use strict';
+// [slug, 名字, 域面 · 来源, 备注]
+const CANDIDATES = [
+  ['chiikawa',       '吉伊卡哇',   '吉祥物 IP · petscodex',  '现象级'],
+  ['labubu',         'Labubu',    '潮玩 IP · petscodex',    '全球爆火'],
+  ['moo-deng',       '弹跳小河马', '动物 meme · petscodex',  '病毒式'],
+  ['kemusan-dancer', '科目三舞者', '热梗 · petscodex',       '真人形象'],
+  ['usagi',          '兔兔乌萨吉', '吉祥物 IP · petscodex',  '吉伊卡哇一家'],
+  ['tailmon',        '迪路兽',     '数码宝贝 · codex-pets.net', '经典'],
+  ['gundam-aerial',  '风灵高达',   '机甲 · codex-pets.net',  '水星魔女'],
+  ['lovvy',          'Lovvy',      'Lovable 官方 · codex-pets.net', '编程吉祥物'],
+  ['doraemon',       '哆啦A梦',    '经典 · codex-pet.com+petdex', '双站精选'],
+  ['eve',            'EVE',        'WALL·E · codex-pet.com+petdex', '双站精选'],
+];
+const CW = 192, CH = 208;
+const grid = document.getElementById('grid');
+let loaded = 0;
+CANDIDATES.forEach(([slug, name, src, rank], i) => {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = '<div class="num">#' + (i + 1) + '</div>';
+  const cv = document.createElement('canvas');
+  cv.width = 204; cv.height = 220;
+  card.appendChild(cv);
+  const nm = document.createElement('div'); nm.className = 'name'; nm.textContent = name;
+  const sc = document.createElement('div'); sc.className = 'src'; sc.textContent = src + ' · ' + rank;
+  card.appendChild(nm); card.appendChild(sc);
+  grid.appendChild(card);
+  const im = new Image();
+  im.onload = () => {
+    const ctx = cv.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(im, 1, 1, CW - 2, CH - 2, 0, 0, cv.width, cv.height);
+    loaded++;
+  };
+  im.src = '/pets-preview/' + slug + '/spritesheet.webp';
+});
+window.__previewReady = () => loaded === CANDIDATES.length;
+</script>
+</body>
+</html>

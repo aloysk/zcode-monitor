@@ -269,8 +269,12 @@ app.get('/api/pets', (_req, res) => {
         && fs.existsSync(path.join(root, d.name, 'spritesheet.webp')))
       .map(d => {
         try {
-          const m = JSON.parse(fs.readFileSync(path.join(root, d.name, 'pet.json'), 'utf8'));
-          return { id: d.name, name: m.displayName || d.name, sheet: '/pets/' + d.name + '/spritesheet.webp' };
+          // some galleries emit PowerShell-style JSON: UTF-8 BOM (JSON.parse
+          // throws on it) and snake_case keys — tolerate both
+          const raw = fs.readFileSync(path.join(root, d.name, 'pet.json'), 'utf8').replace(/^\uFEFF/, '');
+          const m = JSON.parse(raw);
+          const name = m.displayName || m.display_name || m.name || d.name;
+          return { id: d.name, name, sheet: '/pets/' + d.name + '/spritesheet.webp' };
         } catch { return null; }
       })
       .filter(Boolean)
