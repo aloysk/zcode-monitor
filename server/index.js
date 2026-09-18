@@ -254,6 +254,31 @@ app.get('/pet', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public',
 // exact rolling-window seed for the widget page (no LIMIT cap — see db.js completedSince)
 app.get('/api/widget/recent', (_req, res) => res.json(dbq.completedSince(Date.now() - 5 * 60 * 1000)));
 
+// pet pack registry for the pet page: every public/pets/<id>/ holding
+// pet.json + spritesheet.webp is a selectable pack — drop a folder in and it
+// joins the cycle. The two original packs stay first so the cycle feels
+// stable as packs are added.
+const fs = require('fs');
+app.get('/api/pets', (_req, res) => {
+  try {
+    const root = path.join(__dirname, '..', 'public', 'pets');
+    const order = ['yuexinmiao', 'maid-deepseek-whale'];
+    const packs = fs.readdirSync(root, { withFileTypes: true })
+      .filter(d => d.isDirectory()
+        && fs.existsSync(path.join(root, d.name, 'pet.json'))
+        && fs.existsSync(path.join(root, d.name, 'spritesheet.webp')))
+      .map(d => {
+        try {
+          const m = JSON.parse(fs.readFileSync(path.join(root, d.name, 'pet.json'), 'utf8'));
+          return { id: d.name, name: m.displayName || d.name, sheet: '/pets/' + d.name + '/spritesheet.webp' };
+        } catch { return null; }
+      })
+      .filter(Boolean)
+      .sort((a, b) => (order.indexOf(a.id) + 1 || 90 + a.id.charCodeAt(0)) - (order.indexOf(b.id) + 1 || 90 + b.id.charCodeAt(0)));
+    res.json(packs);
+  } catch { res.json([]); }
+});
+
 // SPA fallback: any non-api route → index.html
 app.get(/^\/(?!api).*/, (_req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));

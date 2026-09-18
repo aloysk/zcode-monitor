@@ -25,3 +25,7 @@ tools/wdiag/*.txt
 genprobe-out.txt
 msgprobe-out.txt
 msgprobe.js
+
+# pet research/staging (local only)
+tools/pets-staging/
+tools/*-catalog.json

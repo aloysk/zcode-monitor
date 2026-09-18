@@ -169,53 +169,30 @@ const $ = id => document.getElementById(id);
 const petEl = $('pet'), bubbleEl = $('bubble'), bnumEl = $('bnum'), bunitEl = $('bunit');
 const reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
 
-// ── sprite packs: Codex Pet format (verified from upstream dsh-desk renderer;
-//    pet.json beside each sheet carries metadata only, no frame table).
+// ── sprite packs: Codex Pet format. The registry comes from the server
+//    (/api/pets scans public/pets/*) — adding a pet is dropping a folder;
+//    pet.json beside each sheet carries the display name only.
 //    Double-click the pet cycles packs; choice persists in localStorage. ──
-const PACKS = [
-  {
-    id: 'yuexinmiao', name: '月薪喵',
-    sheet: '/pets/yuexinmiao/spritesheet.webp',
-    anims: {
-      idle:               { row: 0, frames: 6 },
-      running_right:      { row: 1, frames: 8 },
-      running_left:       { row: 2, frames: 8 },
-      waving:             { row: 3, frames: 4 },
-      jumping:            { row: 4, frames: 5 },
-      failed:             { row: 5, frames: 8 },
-      waiting_permission: { row: 6, frames: 6 },
-      running:            { row: 7, frames: 6 },
-      review:             { row: 8, frames: 6 },
-    },
-  },
-  {
-    id: 'maid-deepseek-whale', name: '鲸鱼女仆',
-    sheet: '/pets/maid-deepseek-whale/spritesheet.webp',
-    anims: {
-      idle:               { row: 0, frames: 7 },
-      running_right:      { row: 1, frames: 8 },
-      running_left:       { row: 2, frames: 8 },
-      waving:             { row: 3, frames: 4 },
-      jumping:            { row: 4, frames: 5 },
-      failed:             { row: 5, frames: 8 },
-      waiting_permission: { row: 6, frames: 6 },
-      running:            { row: 7, frames: 6 },
-      // upstream skips a broken column 4 and an oversized 5 on this row
-      review:             { row: 8, frames: 6, play: [0, 1, 2, 3, 0] },
-    },
-  },
-];
-let packIdx = Math.max(0, PACKS.findIndex(p => p.id === localStorage.getItem('petPack')));
-let pack = PACKS[packIdx];
-let ANIMS = pack.anims;
 const CELL_W = 192, CELL_H = 208, COLS = 8, FRAME_MS = 160;
+// standard contract: the first 9 rows are these anims, in this order
+const ROW_ANIMS = ['idle', 'running_right', 'running_left', 'waving', 'jumping',
+                   'failed', 'waiting_permission', 'running', 'review'];
+// hand-tuned exceptions the pixel scan can't see (cells that are non-blank
+// but visually broken/oversized); everything else is derived from the sheet
+const PACK_OVERRIDES = {
+  'maid-deepseek-whale': { review: [0, 1, 2, 3, 0] }, // upstream skips a broken col 4 and an oversized 5
+};
+let PACKS = [];   // [{id, name, sheet}] from /api/pets
+let packIdx = 0;
+let pack = null;  // active pack
+let ANIMS = null; // { anim: {row, play:[cols]} } built per pack from the sheet
 
 // ── canvas rendering (same approach as upstream PetWidget) ────────────────
 const ctx = petEl.getContext('2d');
 let sheetOk = false;
 let anim = 'idle';     // row currently playing
 let pending = 'idle';  // queued row; applied only at a full-cycle boundary
-let frame = 0;         // index within the current row
+let frame = 0;         // index within the current row's play list
 let rafId = 0, lastTs = 0;
 
 // sheet loads/restarts are owned by applyPack() below
@@ -230,12 +207,14 @@ function fitCanvas() {
   petEl.height = Math.max(1, Math.round(r.height * dpr));
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-  if (sheetOk) draw(anim, frame);
+  if (sheetOk && ANIMS) draw(anim, frame);
 }
 window.addEventListener('resize', fitCanvas);
 
-function draw(name, col) {
-  const a = ANIMS[name];
+function draw(name, idx) {
+  const a = ANIMS?.[name];
+  if (!a) return;
+  const col = a.play[idx] ?? a.play[0] ?? 0;
   // clear first: cat frames sit at different offsets inside the cell, so
   // drawing over the previous frame left ghost outlines behind (vision-caught)
   ctx.clearRect(0, 0, petEl.width, petEl.height);
@@ -246,13 +225,9 @@ function draw(name, col) {
                 0, 0, petEl.width, petEl.height);
 }
 
-// frame positions index the PLAY sequence (explicit col list, else 0..frames-1)
-function playCols(a) { return a.play || null; }
-
 function step() {
   const a = ANIMS[anim];
-  const total = a.play ? a.play.length : a.frames;
-  if (++frame >= total) {
+  if (++frame >= a.play.length) {
     frame = 0;
     // upstream rule: switch rows only after the last frame of a cycle, so
     // the cat never pops mid-motion; high tier also alternates direction
@@ -261,7 +236,7 @@ function step() {
     else if (anim === 'running_right') anim = pending = 'running_left';
     else if (anim === 'running_left')  anim = pending = 'running_right';
   }
-  draw(anim, (playCols(ANIMS[anim]) || [])[frame] ?? frame);
+  draw(anim, frame);
 }
 
 let lastBeat = 0;  // last advance (rAF or fallback) — watchdog input
@@ -291,22 +266,63 @@ function startAnim() {
   }
 }
 
-// Apply a pack: swap the anim table + sheet, restart the loop on load.
-// A failed sheet load used to leave the canvas blank forever (onerror was
-// silent) — the exact "切换宠物后空白" bug. Now: retry once with a
-// cache-buster (stalled/partial cache entries heal), and if it still fails
-// REVERT to the pack that was on screen, so the pet never disappears.
-// prevIdx=null (boot, or a revert already in flight) means no revert hop.
+// Pixel-scan one row of the sheet: sample every cell at 1/8 scale into an
+// offscreen canvas and keep the columns that actually contain sprite pixels.
+// Artists pad short rows with fully transparent columns — stepping into one
+// would flash an empty frame — and pet.json carries no frame table, so the
+// sheet itself is the only source of truth. Sheets with opaque backgrounds
+// simply scan as "all 8" (the pre-scan behavior).
+const SCAN_W = 24, SCAN_H = 26;
+let scanCanvas = null;
+function scanRow(row) {
+  if (!scanCanvas) scanCanvas = document.createElement('canvas');
+  scanCanvas.width = SCAN_W; scanCanvas.height = SCAN_H;
+  const sctx = scanCanvas.getContext('2d', { willReadFrequently: true });
+  const cols = [];
+  for (let col = 0; col < COLS; col++) {
+    sctx.clearRect(0, 0, SCAN_W, SCAN_H);
+    sctx.drawImage(sheet, col * CELL_W, row * CELL_H, CELL_W, CELL_H,
+                   0, 0, SCAN_W, SCAN_H);
+    const d = sctx.getImageData(0, 0, SCAN_W, SCAN_H).data;
+    let ink = 0;
+    for (let i = 3; i < d.length; i += 4) if (d[i] > 16) ink++;
+    if (ink > SCAN_W * SCAN_H * 0.005) cols.push(col);
+  }
+  return cols.length ? cols : [0];
+}
+
+function buildAnims() {
+  ANIMS = {};
+  for (let row = 0; row < ROW_ANIMS.length; row++) {
+    const name = ROW_ANIMS[row];
+    const ov = (PACK_OVERRIDES[pack.id] || {})[name];
+    ANIMS[name] = { row, play: ov || scanRow(row) };
+  }
+}
+
+// Apply a pack: swap the sheet, derive the anim table from its pixels,
+// restart the loop on load. A failed sheet load used to leave the canvas
+// blank forever (onerror was silent) — the exact "切换宠物后空白" bug. Now:
+// retry once with a cache-buster (stalled/partial cache entries heal), and
+// if it still fails REVERT to the pack that was on screen, so the pet never
+// disappears. prevIdx=null (boot, or a revert already in flight) means no
+// revert hop.
 function applyPack(idx, prevIdx) {
   packIdx = idx;
   pack = PACKS[packIdx];
-  ANIMS = pack.anims;
+  ANIMS = null; // rebuilt from the new sheet's pixels on load
   try { localStorage.setItem('petPack', pack.id); } catch { /* private mode */ }
   sheetOk = false;
   anim = pending = 'idle';
   frame = 0;
   let retried = false;
-  sheet.onload = () => { sheetOk = true; fitCanvas(); startAnim(); };
+  sheet.onload = () => {
+    sheetOk = true;
+    try { buildAnims(); }
+    catch (e) { console.error('[pet] anim scan failed: ' + e); }
+    fitCanvas();
+    startAnim();
+  };
   sheet.onerror = () => {
     if (!retried) {
       retried = true;
@@ -319,13 +335,26 @@ function applyPack(idx, prevIdx) {
   sheet.src = pack.sheet;
 }
 function cyclePack() {
+  if (PACKS.length < 2 || !pack) return;
   applyPack((packIdx + 1) % PACKS.length, packIdx);
 }
-applyPack(packIdx, null); // boot: begin decoding while the data logic warms up
+// boot: the registry comes from the server; until it answers (or forever, if
+// unreachable) the card is just an empty pet seat — the bubble + data still run
+(async function initPacks() {
+  try {
+    const r = await fetch('/api/pets', { cache: 'no-store' });
+    if (r.ok) PACKS = await r.json();
+  } catch { /* server down: keep the fallback below */ }
+  if (!Array.isArray(PACKS) || !PACKS.length) {
+    PACKS = [{ id: 'yuexinmiao', name: '月薪喵', sheet: '/pets/yuexinmiao/spritesheet.webp' }];
+  }
+  packIdx = Math.max(0, PACKS.findIndex(p => p.id === localStorage.getItem('petPack')));
+  applyPack(packIdx, null);
+})();
 function stopAnim() { if (rafId) { cancelAnimationFrame(rafId); rafId = 0; } }
 // honor the OS setting toggling at runtime, not just at load
 reduceMQ.addEventListener('change', () => {
-  if (reduceMQ.matches) { stopAnim(); if (sheetOk) draw(anim, 0); }
+  if (reduceMQ.matches) { stopAnim(); if (sheetOk && ANIMS) draw(anim, 0); }
   else startAnim();
 });
 
