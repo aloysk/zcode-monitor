@@ -7,11 +7,12 @@
 // now", polled from the `message` table, and emits start/end edge events that
 // drive the pill's breathing animation.
 //
-// v1 is deliberately boolean-only: probes showed the DB has no live text
-// stream while a request is in flight (message.data is metadata, ~650 bytes,
-// no content), so tps estimation is out of scope. The poll/event shape is
-// kept estimator-friendly (per-session counts + a single reused statement) so
-// one can be layered in later without changing consumers.
+// v1 was deliberately boolean-only; the poll/event shape kept per-session
+// counts + a single reused statement so a lane counter could be layered in
+// without changing consumers — that counter is live now: 'start'/'lanes'
+// events and state() carry `sessions` (distinct in-flight sessions = the
+// concurrent "lanes" the widget shows as ×N) and `inflight` (in-flight
+// assistant-message rows, ≥ sessions).
 //
 // In-flight detection: an assistant message row is in-flight while
 // json_extract(data,'$.time.completed') IS NULL; completion writes that field.
@@ -59,6 +60,8 @@ function createGenWatcher(dbq, { pollMs = POLL_MS } = {}) {
 
   let generating = false; // edge-detector memory: last observed boolean
   let sessions = 0;       // distinct sessions currently in flight
+  let inflight = 0;       // in-flight assistant rows (≥ sessions)
+  let lastSessions = 0;   // last value emitted to consumers (lane-change memory)
   let stopped = false;
   let lastErrorLogAt = 0;
 
@@ -93,18 +96,23 @@ function createGenWatcher(dbq, { pollMs = POLL_MS } = {}) {
     }
 
     sessions = row.sessions || 0;
-    const nowGenerating = (row.inflight || 0) > 0;
+    inflight = row.inflight || 0;
+    const nowGenerating = inflight > 0;
 
-    // Edge detection: emit ONLY on boolean transitions, not every tick. A
-    // second session joining an ongoing generation is not an edge; its count
-    // still shows up via state() for snapshot consumers.
+    // Edge detection: boolean transitions stay pure edges (start/end). A
+    // lane-count CHANGE while generating is its own 'lanes' event — the
+    // widget's ×N badge must move the moment a session joins or leaves an
+    // ongoing generation, not only at the next boolean edge.
     if (nowGenerating && !generating) {
-      emitter.emit('gen', { phase: 'start', sessions, at: Date.now() });
+      emitter.emit('gen', { phase: 'start', sessions, inflight, at: Date.now() });
     } else if (!nowGenerating && generating) {
       // count just dropped to 0, so the end event carries only the timestamp
       emitter.emit('gen', { phase: 'end', at: Date.now() });
+    } else if (nowGenerating && sessions !== lastSessions) {
+      emitter.emit('gen', { phase: 'lanes', sessions, inflight, at: Date.now() });
     }
     generating = nowGenerating;
+    lastSessions = nowGenerating ? sessions : 0;
   }
 
   // Establish the baseline immediately so state() is correct right after boot
@@ -120,7 +128,7 @@ function createGenWatcher(dbq, { pollMs = POLL_MS } = {}) {
     // Subscribe to start/end edge events; returns an unsubscribe function so
     // short-lived consumers (one SSE response) can detach on close.
     onEvent(cb) { emitter.on('gen', cb); return () => emitter.off('gen', cb); },
-    state() { return { generating, sessions }; },
+    state() { return { generating, sessions, inflight }; },
     stop() { stopped = true; clearInterval(timer); },
   };
 }

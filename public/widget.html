@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <!-- token-speed floating widget — pill edition.
-     One line: tier-colored number · unit. Nothing else.
+     One line: tier-colored number · unit — plus a quiet accent "×N" badge
+     while ≥2 sessions generate concurrently (N = live lanes; tps × N ≈
+     aggregate burn, the number itself stays per-lane).
      Number = rolling weighted tps over requests COMPLETED in the last 5
      minutes: seeded from /api/widget/recent (the exact window population),
      then live completed requests via SSE /api/live/events 'model'.
@@ -31,6 +33,7 @@
   --text-secondary: light-dark(#505050, #afafaf);
   --text-disabled: light-dark(#8f8f8f, #6d6d6d);
   --negative: light-dark(#d73220, #df3422);
+  --accent: light-dark(#3b63fb, #8ea5fb); /* Spectrum 2 blue — the ×N lane badge */
   --notice: light-dark(#fc7d00, #e06400);
   --positive: light-dark(#05834e, #068850);
 }
@@ -48,7 +51,11 @@ body {
   cursor: default;
   display: flex;
   align-items: center;
-  justify-content: center;
+  /* left-anchored, not centered: the tabular number's glyphs are fixed-width,
+     so its start position NEVER moves when digits/lanes change; the ×N badge
+     appends at the text tail. Centering would re-center the whole line every
+     time a lane joins/leaves mid-battle — a hop every few seconds reads cheap. */
+  justify-content: flex-start;
   /* right side is the sparkline's reserved zone (12px inset + 44px chart):
      the centered number+unit can never collide with the stroke — vision
      review caught the unit glyphs sitting inside the polyline's span */
@@ -77,7 +84,21 @@ body {
   font-size: 10px; /* ~67% of the number — a quiet qualifier, not a co-headline */
   font-weight: 500;
   color: var(--text-disabled);
-  margin-left: 4px;
+  margin-left: 3px; /* 3px internal rhythm leaves ≥5px to the sparkline (vision-caught: at 4px the badge grazed it) */
+}
+/* concurrent-lane badge: "×5" while ≥2 sessions generate at once. Inline at
+   the text tail — the line is left-anchored and digits are tabular, so the
+   number's position is invariant when the badge appears/disappears.
+   Single-lane and idle stay visually silent. A very wide number (100+ tps
+   WITH 10+ lanes) may graze the 45%-opacity sparkline — accepted: per-lane
+   tps stays 2-digit in exactly the multi-lane regime. */
+.lanes {
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-left: 3px; /* matches .unit — one rhythm for all qualifiers */
 }
 
 /* micro-sparkline: pure texture beside the number. The tier classes above
@@ -146,7 +167,7 @@ body.gen .tps { animation: gen-breathe 2s ease-in-out infinite alternate; }
 </style>
 </head>
 <body>
-  <span class="row"><span class="tps" id="tps">—</span><span class="unit" id="unit" hidden>t/s</span></span>
+  <span class="row"><span class="tps" id="tps">—</span><span class="unit" id="unit" hidden>t/s</span><span class="lanes" id="lanes" hidden></span></span>
   <svg class="spark off" id="spark" width="44" height="12" viewBox="0 0 44 12" aria-hidden="true" focusable="false">
     <polyline id="sparkLine"></polyline>
     <circle id="sparkDot" r="2"></circle>
@@ -308,26 +329,33 @@ try {
   });
 } catch {}
 
-// ── generation breathing ──
-// Track live session ids (not a boolean) so overlapping generations keep
-// breathing until the LAST one ends. 'tick' events are received but ignored
-// on purpose: estTps is an estimate and must never overwrite the exact
-// rolling number, and a fixed 2s rhythm reads calmer than rate-synced pulsing.
-const genLive = new Set();
-const syncGen = () => document.body.classList.toggle('gen', genLive.size > 0);
+// ── generation breathing + concurrent-lane badge ──
+// 'start'/'end' are boolean edges; 'lanes' fires whenever the concurrent
+// session count CHANGES mid-generation. lanes ≥ 2 surfaces the ×N badge
+// (per-lane tps × N ≈ aggregate burn); single-lane generating stays
+// visually silent. Estimates never overwrite the exact rolling number.
+let lanes = 0;
+const syncGen = () => {
+  document.body.classList.toggle('gen', lanes > 0);
+  const show = lanes >= 2;
+  const el = $('lanes');
+  el.hidden = !show;
+  if (show) el.textContent = '×' + lanes;
+};
 try {
   const ges = new EventSource('/api/gen/events');
   ges.addEventListener('gen', e => {
     try {
       const m = JSON.parse(e.data);
-      if (m.phase === 'start') genLive.add(m.sessionId);
-      else if (m.phase === 'end') genLive.delete(m.sessionId);
+      if (m.phase === 'start') lanes = Math.max(1, m.sessions || 1);
+      else if (m.phase === 'lanes') lanes = m.sessions || 0;
+      else lanes = 0; // 'end'
       syncGen();
     } catch {}
   });
   // connection lost → drop to no-breathing and stay silent: stream state is
   // unknown, and an unreachable endpoint must degrade without any UI noise
-  ges.addEventListener('error', () => { genLive.clear(); syncGen(); });
+  ges.addEventListener('error', () => { lanes = 0; syncGen(); });
 } catch {}
 
 // ── hover tooltip: today's usage ──

@@ -30,3 +30,4 @@ msgprobe.js
 tools/pets-staging/
 tools/*-catalog.json
 tools/scratch/
+.serena/

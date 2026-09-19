@@ -229,7 +229,7 @@ app.get('/api/gen/events', (req, res) => {
   // edge (possibly the generation's end, minutes away) with the animation
   // stuck off. The snapshot closes that gap.
   const cur = genWatcher.state();
-  res.write(`event: gen\ndata: ${JSON.stringify({ phase: cur.generating ? 'start' : 'end', sessions: cur.sessions })}\n\n`);
+  res.write(`event: gen\ndata: ${JSON.stringify({ phase: cur.generating ? 'start' : 'end', sessions: cur.sessions, inflight: cur.inflight })}\n\n`);
 
   const heartbeat = setInterval(() => res.write(': hb\n\n'), 25000);
   const off = genWatcher.onEvent(ev => {

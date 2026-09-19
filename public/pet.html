@@ -53,6 +53,7 @@
   --text-secondary: light-dark(#505050, #afafaf);
   --text-disabled: light-dark(#8f8f8f, #6d6d6d);
   --negative: light-dark(#d73220, #df3422);
+  --accent: light-dark(#3b63fb, #8ea5fb); /* Spectrum 2 blue — the ×N lane badge */
   --notice: light-dark(#fc7d00, #e06400);
   --positive: light-dark(#05834e, #068850);
 
@@ -132,6 +133,13 @@ body {
   color: var(--text-secondary);
   margin-left: 0.25em;
 }
+.blanes { /* "×5" — live concurrent-lane count, ≥2 lanes only; accent marks
+             it as the multiplier of the per-lane number beside it */
+  font-size: 0.72em;
+  font-weight: 600;
+  color: var(--accent);
+  margin-left: 0.3em;
+}
 .bubble::after { /* little tail: rotated square with two exposed borders */
   content: "";
   position: absolute;
@@ -156,7 +164,7 @@ body {
 <body class="state-idle">
 <canvas id="pet" role="img" aria-label="Token 桌宠：打盹中"></canvas>
 <div class="bubble-zone">
-  <div class="bubble" id="bubble"><span id="bnum">…</span><span class="bunit" id="bunit">t/s</span></div>
+  <div class="bubble" id="bubble"><span id="bnum">…</span><span class="bunit" id="bunit">t/s</span><span class="blanes" id="blanes" hidden></span></div>
 </div>
 
 <script>
@@ -166,7 +174,7 @@ const IDLE_AFTER = 2 * 60 * 1000;  // no completed traffic for 2 min → idle ca
 const GEN_STALE  = 10 * 60 * 1000; // see staleness guard in poll()
 
 const $ = id => document.getElementById(id);
-const petEl = $('pet'), bubbleEl = $('bubble'), bnumEl = $('bnum'), bunitEl = $('bunit');
+const petEl = $('pet'), bubbleEl = $('bubble'), bnumEl = $('bnum'), bunitEl = $('bunit'), blanesEl = $('blanes');
 const reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 // ── sprite packs: Codex Pet format. The registry comes from the server
@@ -362,6 +370,7 @@ reduceMQ.addEventListener('change', () => {
 let tps = null;          // rolling tps over the last-5-min population, or null
 let lastActivity = 0;    // epoch ms of the newest COMPLETED request (0 = never)
 let gen = false;         // true between SSE gen:start and gen:end
+let lanes = 0;           // concurrent in-flight sessions (≥2 → ×N badge)
 let genLastAt = 0;       // time of the last gen event, for the staleness guard
 let sseSeenEvent = false;
 let es = null;
@@ -412,6 +421,12 @@ function render() {
   const hasNum = tps != null && isFinite(tps);
   bnumEl.textContent = hasNum ? tps.toFixed(1) : '…';
   bunitEl.style.display = hasNum ? '' : 'none';
+  // lane badge is independent of the number: "… ×5" while streams warm up.
+  // Readability floor (vision-caught): the mini form's bubble clamps to 8px,
+  // where a 0.72em ×N is a 4px-tall blob — below 10px number size the badge
+  // hides instead of smearing. Normal form (13.5px) always qualifies.
+  blanesEl.hidden = lanes < 2 || parseFloat(getComputedStyle(bnumEl).fontSize) < 10;
+  if (!blanesEl.hidden) blanesEl.textContent = '×' + lanes;
   bubbleEl.classList.add('on');
 }
 
@@ -444,7 +459,7 @@ async function poll() {
   // Staleness guard: if the gen stream died right after a 'start', don't let
   // the cat run forever. 10 min without any gen event demotes to cruise —
   // long enough that a real marathon generation isn't visually cut short.
-  if (gen && Date.now() - genLastAt > GEN_STALE) gen = false;
+  if (gen && Date.now() - genLastAt > GEN_STALE) { gen = false; lanes = 0; }
   // idle demotion is time-based, so it must run even when the fetch failed
   render();
 }
@@ -457,9 +472,10 @@ function openSSE() {
       let m; try { m = JSON.parse(e.data); } catch { return; }
       sseSeenEvent = true;
       genLastAt = Date.now();
-      if (m.phase === 'start') gen = true;
+      if (m.phase === 'start') { gen = true; lanes = Math.max(1, m.sessions || 1); }
+      else if (m.phase === 'lanes') lanes = m.sessions || 0;
       else if (m.phase === 'end') {
-        gen = false;
+        gen = false; lanes = 0;
         lastActivity = Math.max(lastActivity, Date.now()); // an end IS traffic
       }
       render();
