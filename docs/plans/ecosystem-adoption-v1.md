@@ -1567,7 +1567,7 @@ zcode-monitor-plan/
   7. 手势替换：删除 `if (IN_WEBVIEW)` 块内的 `dblclick` 监听（`:511-513`），在 `IN_WEBVIEW` 块**之后**（页面通用注册，浏览器直开同样可双击切换）加：
      ```js
      // 双击优先、计数延后：窗口内累计点击，关闭时判定——2/3 击切换，≥4 击连击。
-     // 拖动排除：壳内 pointerdown 即 postMessage drag（:505-508），松开仍会补发 click；
+     // 拖动排除：壳内 pointerdown 即 postMessage drag（:504-506，postMessage 在 :505），松开仍会补发 click；
      // down→up 间位移超阈值的序列不计入手势，否则连续两次快速拖动会被判为 switch 误切包。
      let clickTimes = [], clickTimer = 0, downPt = null, dragMoved = false;
      document.addEventListener('pointerdown', e => {
