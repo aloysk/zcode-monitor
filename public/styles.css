@@ -5,8 +5,13 @@
 
 /* ── theme tokens ────────────────────────────────────────
    Dark is the default (:root). Light overrides via [data-theme="light"]. */
+/* color-scheme 与 data-theme 联动：缺了它原生控件/滚动条按 UA 默认（浅色）
+   渲染——Windows Chromium 上主滚动容器 .view 拖出一条亮色滚动条，成为暗色
+   仪表盘上最亮的元素（截图实测）。 */
 :root,
 :root[data-theme="dark"] {
+  color-scheme: dark;
+
   /* surface stack (darkest → lightest) */
   --bg:        #0b0d12;
   --surface-0: #0f1219;
@@ -21,7 +26,9 @@
   --fg-1:      #e4e8f0;
   --fg-2:      #bfc6d4;
   --fg-3:      #94a3b4;
-  --fg-4:      #6c7488;
+  /* --fg-4 是 10.5-11.5px 小灰字（KPI 标签/顶栏 meta）的唯一色：对 --surface-1
+     的对比须 ≥AA 4.5:1。#6c7488 实测约 3.9:1 不达标 → #7f8aa0 约 5.2:1。 */
+  --fg-4:      #7f8aa0;
   --fg-5:      #454c5e;
 
   /* category colors (event types) */
@@ -47,7 +54,7 @@
   /* chart palette (read by JS via getComputedStyle) */
   --chart-grid:    rgba(255,255,255,.05);
   --chart-grid-x:  rgba(255,255,255,.04);
-  --chart-tick:    #6c7488;
+  --chart-tick:    #7f8aa0; /* 与 --fg-4 同步的 AA 对比修正（图表刻度同为小灰字） */
   --chart-tooltip-bg:#1f2430;
   --chart-tooltip-border:#2d3342;
   --chart-tooltip-title:#e4e8f0;
@@ -67,6 +74,8 @@
 }
 
 :root[data-theme="light"] {
+  color-scheme: light;
+
   --bg:        #f6f8fa;
   --surface-0: #ffffff;
   --surface-1: #f0f3f7;
@@ -79,7 +88,8 @@
   --fg-1:      #1f2328;
   --fg-2:      #3b424b;
   --fg-3:      #59636e;
-  --fg-4:      #818b98;
+  /* 同 --fg-4 的 AA 约束（对 #fff 约 ≥4.5:1）：#818b98 约 3.5:1 → #6b7684 约 4.6:1 */
+  --fg-4:      #6b7684;
   --fg-5:      #b1bac4;
 
   /* category colors — darker for contrast on light bg */
@@ -211,6 +221,11 @@ input[type=search] { width: 100%; }
 }
 .btn:hover { border-color: var(--accent); color: var(--accent); }
 .btn.ghost { background: transparent; }
+/* 顶栏主题化单色图标（index.html 内联 SVG）：currentColor 随主题/按钮 hover，
+   替代跨主题亮度不可控的 emoji 字形（💾 在深色顶栏渲染成亮白方块） */
+.btn .icon { width: 14px; height: 14px; display: block; fill: none;
+  stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.btn .icon[hidden] { display: none; } /* svg 不总尊重 [hidden] 的 UA 规则，显式兜底 */
 .btn.on { border-color: var(--accent); color: var(--accent); }
 .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 .toolbar .spacer { flex: 1; }
@@ -221,6 +236,9 @@ input[type=search] { width: 100%; }
 .kpi .label { font-size: 10.5px; color: var(--fg-4); text-transform: uppercase; letter-spacing: .6px; }
 .kpi .value { font-size: 23px; font-weight: 600; margin-top: 1px; font-variant-numeric: tabular-nums; color: var(--fg); }
 .kpi .delta { font-size: 11.5px; color: var(--fg-3); margin-top: 1px; }
+/* 口径徽章（T4）：标注数字的口径来源（官方口径/本地估算/下界），hover 有说明 */
+.caliber { font-size: 11px; padding: 1px 6px; margin-left: 6px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--fg-3); white-space: nowrap; }
 .kpi .bar { height: 3px; background: var(--surface-3); border-radius: 2px; margin-top: 8px; overflow: hidden; }
 .kpi .bar > span { display: block; height: 100%; }
 .v-accent { color: var(--accent) !important; }
@@ -468,11 +486,25 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 @keyframes spin { to { transform: rotate(360deg); } }
 .toast { position: fixed; bottom: 18px; right: 18px; background: var(--toast-bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 14px; font-size: 12.5px; box-shadow: var(--shadow); }
 .scroll { overflow-y: auto; }
-.scroll::-webkit-scrollbar { width: 8px; height: 8px; }
-.scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-.scroll::-webkit-scrollbar-track { background: transparent; }
+/* 主滚动容器 .view（:195 处自带 overflow-y）与 .scroll 共用主题化滚动条：
+   否则 Windows Chromium 按原生默认渲染出亮色滚动条（color-scheme 修正后
+   仍是系统样式，这里统一为暗色 token） */
+.scroll::-webkit-scrollbar, .view::-webkit-scrollbar { width: 8px; height: 8px; }
+.scroll::-webkit-scrollbar-thumb, .view::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.scroll::-webkit-scrollbar-track, .view::-webkit-scrollbar-track { background: transparent; }
 .row-flash { animation: flash 1.2s ease-out; }
 @keyframes flash { from { background: color-mix(in srgb, var(--accent) 18%, transparent); } to { background: transparent; } }
 .kv { display: grid; grid-template-columns: 130px 1fr; gap: 4px 12px; font-size: 12px; }
 .kv .k { color: var(--fg-4); }
 .kv .v { color: var(--fg-1); font-family: var(--font-mono); word-break: break-all; }
+
+/* ── privacy notice bar（WP5 快照上传第三方报告提示，可关闭）── */
+.privacy-notice { display: flex; align-items: flex-start; gap: 10px; margin: 10px 14px 0; padding: 8px 12px; border-radius: var(--radius); border: 1px solid color-mix(in srgb, var(--sev-warn) 35%, transparent); background: color-mix(in srgb, var(--sev-warn) 8%, transparent); font-size: 12.5px; color: var(--fg-2); line-height: 1.7; }
+/* display:flex 会盖过 [hidden] 的 UA 默认 display:none，需显式还原 */
+.privacy-notice[hidden] { display: none; }
+.privacy-notice code { font-family: var(--font-mono); font-size: 12px; color: var(--sev-warn); word-break: break-all; }
+.privacy-notice strong { color: var(--fg-1); font-weight: 600; }
+.privacy-notice-tag { flex: none; font-weight: 700; color: var(--sev-warn); }
+.privacy-notice-text { flex: 1; min-width: 0; }
+.privacy-notice-close { flex: none; background: transparent; border: 0; color: var(--fg-4); font-size: 14px; line-height: 1; padding: 2px 6px; cursor: pointer; border-radius: var(--radius-sm); font-family: inherit; }
+.privacy-notice-close:hover { color: var(--fg-1); background: var(--surface-3); }

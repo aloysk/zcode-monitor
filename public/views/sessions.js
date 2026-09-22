@@ -382,7 +382,7 @@
     const data = await getJSON(`/api/sessions/${id}/turns`);
     if (!data.turns.length) { body.innerHTML = '<div class="empty">无 turn 记录</div>'; return; }
     const maxDur = Math.max(...data.turns.map(t => t.duration_ms || 0), 1);
-    body.innerHTML = `<h2>Turn 时间线 <span class="sub">${data.turns.length} 个 turn</span></h2>
+    body.innerHTML = `<h2>Turn 时间线 <span class="sub">${data.turns.length} 个 turn</span><span class="caliber" title="turn_usage 不含标题生成等 side call（query_source='session_title' 只写 model_usage），turn 级 token 总量为下界，见 docs/usage-accounting.md">下界</span></h2>
       <div class="turns">${data.turns.map(t => {
         const w = pct(t.duration_ms, maxDur);
         const fill = t.status==='error' ? 'var(--sev-err)' : t.status==='cancelled' ? 'var(--sev-warn)' : 'var(--accent)';
@@ -431,7 +431,7 @@
     const data = await getJSON(`/api/sessions/${id}/turns`);
     if (!data.turns.length) { body.innerHTML = '<div class="empty">无 usage 数据</div>'; return; }
     body.innerHTML = `<div class="card tight" style="overflow-x:auto"><table>
-      <thead><tr><th>turn</th><th>状态</th><th class="num">req</th><th class="num">tools</th><th class="num">tool err</th><th class="num">input</th><th class="num">output</th><th class="num">reasoning</th><th class="num">cache read</th><th class="num">total</th><th class="num">耗时</th></tr></thead>
+      <thead><tr><th>turn</th><th>状态</th><th class="num">req</th><th class="num">tools</th><th class="num">tool err</th><th class="num">input</th><th class="num">output</th><th class="num">reasoning</th><th class="num">cache read</th><th class="num">total<span class="caliber" title="turn_usage 不含标题生成等 side call，总量为下界（官方口径 computed_total_tokens 本身的下界），见 docs/usage-accounting.md">下界</span></th><th class="num">耗时</th></tr></thead>
       <tbody>${data.turns.map(t => `<tr>
         <td class="mono faint">${shortId(t.turn_id,10)}</td>
         <td>${statusBadge(t.status)}</td>

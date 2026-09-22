@@ -28,8 +28,12 @@ function webpSize(buf) {
   return null;
 }
 
-for (const f of process.argv.slice(2)) {
-  const s = webpSize(fs.readFileSync(f));
-  const ok = s && s.w === 1536 && s.h % 208 === 0 && s.h / 208 >= 9;
-  console.log(`${f}: ${s ? s.w + 'x' + s.h + ' rows=' + (s.h / 208) : 'PARSE-FAIL'} ${ok ? 'OK' : 'NONSTANDARD'}`);
+if (require.main === module) {
+  for (const f of process.argv.slice(2)) {
+    const s = webpSize(fs.readFileSync(f));
+    const ok = s && s.w === 1536 && s.h % 208 === 0 && s.h / 208 >= 9;
+    console.log(`${f}: ${s ? s.w + 'x' + s.h + ' rows=' + (s.h / 208) : 'PARSE-FAIL'} ${ok ? 'OK' : 'NONSTANDARD'}`);
+  }
 }
+
+module.exports = { webpSize };

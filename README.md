@@ -18,7 +18,7 @@
 
 `zcode-monitor` 是一个跑在 `127.0.0.1` 的本地观测面板。它会读取 ZCode 客户端在磁盘上落下的数据（SQLite 主库、`transcript.jsonl` 事件流、日志、Bash 输出），把一次 agent 运行里发生的所有事——模型请求、token 消耗、工具调用、子 agent 派生、推理链——整理成可视、可查、可追溯的界面。
 
-全程**只读**，不修改、不删除任何 ZCode 数据，也不和 ZCode 的写事务抢锁。
+监控读路径全程**只读**，不修改、不删除任何 ZCode 数据，也不和 ZCode 的写事务抢锁（唯一例外是 WAL checkpoint 功能，完整边界见下文「隐私提示」之后的说明）。
 
 视觉对齐 kimi-vis 参考页面：分层暗色背景、分类色编码、左列表 + 右详情（7 标签）。
 
@@ -31,6 +31,9 @@
 -  **推理可视化** —— 思考型模型的推理链单独呈现，与最终回答分开，点击展开。
 - ️ **原始数据查看器** —— 直接查任意 SQLite 表（`where` / `order` / 降序，JSON 列可展开）。
 -  **双主题** —— Dark（默认）/ Light，三种切换方式。
+- 🐾 **宠物一键导入** —— Codex 格式宠物包（`pet.json + spritesheet.webp`）一键导入，导入时校验 sheet 尺寸 / 行数 / JSON 健全性并生成 NOTICE；CLI（`node tools/import-pet.js <包目录>`）、API（`POST /api/pets/import`）与图鉴页（`pets-preview.html`）三个入口共用同一校验模块。
+- ⚡ **fs.watch 实时增强** —— 日志目录 `fs.watch` 监听 + 字节偏移增量解析，JSONL 追加即触发、大幅降低日志尾部发现延迟；watch 失败自动降级短轮询，周期偏移对账兜底，事件不丢不重。
+- ✅ **测试套件** —— Node 内置 `node:test`（零新依赖），`npm test` 一键运行；fixture 全部落 `os.tmpdir()`，与真实库完全隔离。
 -  **全程只读** —— 不改 ZCode 一行数据。
 
 ## 快速开始
@@ -66,7 +69,7 @@ npm run dev          # node --watch，文件改动自动重启
 | `PORT`     | `7331`                      | 监听端口                 |
 | `HOST`     | `127.0.0.1`                 | 监听地址（出于安全默认只绑本地）     |
 | `ZCODE_DB` | `~/.zcode/cli/db/db.sqlite` | SQLite 主库路径          |
-| `OPEN`     | `1`                         | 启动时是否自动打开浏览器（`0` 关闭） |
+| `OPEN_BROWSER` | `1`（未设即开）          | 启动时是否自动打开浏览器（设 `0` 关闭） |
 
 示例：
 
@@ -131,6 +134,23 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
 - `turn_id` 串起一个回合
 - `trace_id` 贯穿整棵请求树
 - `tool_call_id` 连接工具调用 ↔ 输出 ↔ 事件
+
+## 隐私提示
+
+有第三方报告称 ZCode 可能会在后台上传工作区快照到云端（涉及本机 `~/.zcode/v2/checkpoints/` 目录）。
+**该说法为第三方报告，未经我们验证**，本项目不下断言、也不复现该行为，仅汇总公开来源供参考：
+
+- 第三方项目：Masterchiefm/zcode-speed-panel 的「快照防护」说明（早期版本曾引 HumanAILoop/zemote 的「停更声明」，经核实全网查无此项目，已弃用该来源——与 docs/specs/ecosystem-adoption-v1.md WP5 的裁定一致）
+- 社区报道：Hacker News「Zcode silent workspace snapshot upload」讨论串、知乎文章《智谱ZCode，你打包上传我的代码仓库干什么》、开源中国 2026-09 相关报道
+
+如需自查，可在 Windows 上以只读方式列出该目录（只列目录，不做任何改动）：
+
+- PowerShell：`Get-ChildItem "$env:USERPROFILE\.zcode\v2\checkpoints"`
+- Git Bash：`ls ~/.zcode/v2/checkpoints`
+
+目录存在与否都属于正常的自查结果：目录存在仅说明本机生成了快照数据，不足以据此推断云端行为。
+
+监控读路径对 `~/.zcode/` 全程只读。唯一例外是 WAL checkpoint 功能（ZCode 退出后自动折叠，或经 `/api/checkpoint` 手动触发）：它以短时可写连接执行 `wal_checkpoint(TRUNCATE)`，只把 WAL 日志折叠进主库、清空 `-wal` 文件，不改变任何数据行内容。
 
 ## 故障排查
 

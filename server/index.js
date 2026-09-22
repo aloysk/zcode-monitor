@@ -16,6 +16,7 @@ const live = require('./routes/live');
 const transcript = require('./routes/transcript');
 const raw = require('./routes/raw');
 const agents = require('./routes/agents');
+const petImport = require('./pet-import');
 
 const PORT = +process.env.PORT || 7331;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -50,51 +51,68 @@ if (warm.ok) {
 // Also reports ZCode runtime status + WAL size so the UI can show whether
 // a checkpoint is pending (i.e. recent data is at risk until ZCode exits cleanly).
 // ── ZCode runtime watcher ────────────────────────────────────
-// Polls whether ZCode is running. When it transitions running→stopped, we run
-// a one-shot wal_checkpoint(TRUNCATE) so all subsequent read-only connections
-// see the complete history (the WAL's freshest rows get folded into the main db).
+// Polls whether ZCode is running (ASYNC probe — see zcode-runtime.probeZCodeRunning:
+// tasklist/ps takes seconds, so the probe must never run synchronously on the
+// event loop, must never overlap itself, and is throttled well above its own
+// latency). When it transitions running→stopped, we run a one-shot
+// wal_checkpoint(TRUNCATE) so all subsequent read-only connections see the
+// complete history (the WAL's freshest rows get folded into the main db).
 // We NEVER write to the db otherwise — checkpoint only reorganizes existing
 // WAL frames, and we only do it when ZCode isn't holding the writer lock.
+// 探测误报的第二道保险：-wal 近期有写入（walIdleMs < 窗口）= 真实 writer 在场
+// （进程探测只认桌面端镜像名，覆盖不了 node 跑的 CLI 形态），否决「已退出」并
+// 回置运行中——绝不与真实 writer 抢锁。
 const runtimeState = {
-  running: true,                       // updated by the watcher
+  running: true,                       // optimistic until the first probe lands
   lastCheckpoint: null,                // { at, folded, walBefore, walAfter }
   watchError: null,
 };
 
+const PROBE_MIN_INTERVAL_MS = 30 * 1000; // 探测节流 ≥ 单次子进程延迟（tasklist 实测 4-7s）
+const WAL_ACTIVE_WINDOW_MS = 60 * 1000;  // -wal 静默不足此时长即视为 writer 在场
+let lastProbeAt = 0;
+
 function pollZCodeRuntime() {
-  let running;
-  try { running = runtime.isZCodeRunning(); runtimeState.watchError = null; }
-  catch (e) { running = runtimeState.running; runtimeState.watchError = e.message; }
-
-  const wasRunning = runtimeState.running;
-  runtimeState.running = running;
-
-  // Transition: running → stopped → fold the WAL so history stays readable.
-  if (wasRunning && !running) {
-    console.log('[runtime] ZCode exited — checkpointing WAL to preserve history…');
-    const before = runtime.walStatus(dbq.DB_PATH);
-    const result = runtime.checkpointNow(dbq.DB_PATH);
-    if (result.ok) {
-      const after = result.after;
-      runtimeState.lastCheckpoint = {
-        at: new Date().toISOString(),
-        ok: true,
-        walBefore: before ? before.walBytes : null,
-        walAfter: after ? after.walBytes : null,
-        folded: before && after ? (before.walBytes - after.walBytes) : null,
-      };
-      console.log(`[runtime] checkpoint done: WAL ${before ? before.walBytes : '?'} → ${after ? after.walBytes : '?'} bytes`);
-    } else {
-      runtimeState.lastCheckpoint = { at: new Date().toISOString(), ok: false, error: result.error };
-      console.warn(`[runtime] checkpoint failed: ${result.error}`);
+  if (Date.now() - lastProbeAt < PROBE_MIN_INTERVAL_MS) return; // 结果沿用上次
+  lastProbeAt = Date.now();
+  runtime.probeZCodeRunning(running => {
+    if (running === false) {
+      const idle = runtime.walIdleMs(dbq.DB_PATH);
+      if (idle != null && idle < WAL_ACTIVE_WINDOW_MS) running = true; // 误报否决
     }
-    // Drop our read-only connection cache so the next read sees the folded db.
-    dbq.invalidateDb();
-  }
+    runtimeState.watchError = null;
+
+    const wasRunning = runtimeState.running;
+    runtimeState.running = running;
+
+    // Transition: running → stopped → fold the WAL so history stays readable.
+    if (wasRunning && !running) {
+      console.log('[runtime] ZCode exited — checkpointing WAL to preserve history…');
+      const before = runtime.walStatus(dbq.DB_PATH);
+      const result = runtime.checkpointNow(dbq.DB_PATH);
+      if (result.ok) {
+        const after = result.after;
+        runtimeState.lastCheckpoint = {
+          at: new Date().toISOString(),
+          ok: true,
+          walBefore: before ? before.walBytes : null,
+          walAfter: after ? after.walBytes : null,
+          folded: before && after ? (before.walBytes - after.walBytes) : null,
+        };
+        console.log(`[runtime] checkpoint done: WAL ${before ? before.walBytes : '?'} → ${after ? after.walBytes : '?'} bytes`);
+      } else {
+        runtimeState.lastCheckpoint = { at: new Date().toISOString(), ok: false, error: result.error };
+        console.warn(`[runtime] checkpoint failed: ${result.error}`);
+      }
+      // Drop our read-only connection cache so the next read sees the folded db.
+      dbq.invalidateDb();
+    }
+  });
 }
 
-// initial poll (don't checkpoint at boot — ZCode may already be down and that's fine)
-runtimeState.running = runtime.isZCodeRunning();
+// initial probe (async, doesn't block boot; don't checkpoint at boot — ZCode
+// may already be down and that's fine)
+pollZCodeRuntime();
 setInterval(pollZCodeRuntime, 5000);
 
 // Manual checkpoint endpoint (for a "preserve now" button). Refuses to run
@@ -256,32 +274,28 @@ app.get('/api/widget/recent', (_req, res) => res.json(dbq.completedSince(Date.no
 
 // pet pack registry for the pet page: every public/pets/<id>/ holding
 // pet.json + spritesheet.webp is a selectable pack — drop a folder in and it
-// joins the cycle. The two original packs stay first so the cycle feels
+// joins the cycle. Discovery lives in server/pet-import.js (shared with the
+// import CLI/endpoint); the two original packs stay first so the cycle feels
 // stable as packs are added.
-const fs = require('fs');
+const PETS_ROOT = path.join(__dirname, '..', 'public', 'pets');
+// staging root for candidate packs: imports may only source from inside this
+// directory — the endpoint rejects any source that resolves outside of it.
+const PETS_STAGING_ROOT = path.join(__dirname, '..', 'tools', 'pets-staging');
+
 app.get('/api/pets', (_req, res) => {
-  try {
-    const root = path.join(__dirname, '..', 'public', 'pets');
-    const order = ['yuexinmiao', 'maid-deepseek-whale'];
-    const packs = fs.readdirSync(root, { withFileTypes: true })
-      .filter(d => d.isDirectory()
-        && fs.existsSync(path.join(root, d.name, 'pet.json'))
-        && fs.existsSync(path.join(root, d.name, 'spritesheet.webp')))
-      .map(d => {
-        try {
-          // some galleries emit PowerShell-style JSON: UTF-8 BOM (JSON.parse
-          // throws on it) and snake_case keys — tolerate both
-          const raw = fs.readFileSync(path.join(root, d.name, 'pet.json'), 'utf8').replace(/^\uFEFF/, '');
-          const m = JSON.parse(raw);
-          const name = m.displayName || m.display_name || m.name || d.name;
-          return { id: d.name, name, sheet: '/pets/' + d.name + '/spritesheet.webp' };
-        } catch { return null; }
-      })
-      .filter(Boolean)
-      .sort((a, b) => (order.indexOf(a.id) + 1 || 90 + a.id.charCodeAt(0)) - (order.indexOf(b.id) + 1 || 90 + b.id.charCodeAt(0)));
-    res.json(packs);
-  } catch { res.json([]); }
+  try { res.json(petImport.listPetPacks(PETS_ROOT)); }
+  catch { res.json([]); }
 });
+
+// staging 包清单：pets-preview 页“从暂存导入”入口的数据源（staging 不存在时返回 []）
+app.get('/api/pets/staging', (_req, res) => {
+  res.json(petImport.listStagingPacks(PETS_STAGING_ROOT));
+});
+
+// 导入端点：缺 X-Zcode-Monitor-Import 首部一律 403（跨源简单 POST 无法携带自定义首部）。
+// body: { source: <staging 内的包目录名>, id?, sourceUrl?, author?, license?, force? }
+app.post('/api/pets/import',
+  petImport.importEndpointMiddleware({ petsRoot: PETS_ROOT, stagingRoot: PETS_STAGING_ROOT }));
 
 // SPA fallback: any non-api route → index.html
 app.get(/^\/(?!api).*/, (_req, res) => {

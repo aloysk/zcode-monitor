@@ -24,6 +24,22 @@
 //     minutes; an older never-completed assistant row is a zombie, not a turn.
 //   - time_updated > now-90s: ZCode keeps touching time_updated while the row
 //     is being driven; 90s of silence means nothing is writing it anymore.
+//
+// Tool-failure edges (T5): the same tick also watermark-scans the newest
+// tool_usage rows and emits phase:'tool_error' for rows with status='error'.
+// The watermark is rowid (recentToolRowsAfterRowid — O(log n) rowid tail seek,
+// one of the two query shapes the perf red line allows), not started_at: a
+// single-key started_at watermark permanently skips same-millisecond rows that
+// land after a LIMIT truncation point, and a boot watermark of MAX(started_at)
+// never fires for rows that started before boot but were written after it.
+// rowid is monotonic for appends, so both gaps disappear (>LIMIT remainder is
+// resumed next tick; late-written old rows carry larger rowids). Consumers:
+// the gen SSE (/api/gen/events forwards any emitter event verbatim) drives
+// the desktop pet's failed animation; state() carries lastToolError for
+// pollers. Boot watermark = MAX(rowid), so historical errors are never
+// replayed; if that boot lookup fails the watermark stays unresolved and the
+// first successful tick anchors it — a broken boot must never replay old
+// errors, and future errors stay visible once the DB recovers.
 const EventEmitter = require('events');
 
 const POLL_MS = 1000;
@@ -62,6 +78,15 @@ function createGenWatcher(dbq, { pollMs = POLL_MS } = {}) {
   let sessions = 0;       // distinct sessions currently in flight
   let inflight = 0;       // in-flight assistant rows (≥ sessions)
   let lastSessions = 0;   // last value emitted to consumers (lane-change memory)
+  // tool-error watermark: newest tool_usage rowid already inspected. MAX at
+  // boot = no historical replay; on boot failure the watermark stays null and
+  // the next successful tick anchors it (falling back to 0 would rescan from
+  // the ASC head; falling back to a huge sentinel would blind the scan even
+  // after the DB recovers — null keeps both properties).
+  let lastErrRowid = (() => {
+    try { return dbq.latestToolRowid(); } catch { return null; }
+  })();
+  let lastToolError = null; // { tool, at } — newest observed failure, for state()
   let stopped = false;
   let lastErrorLogAt = 0;
 
@@ -99,6 +124,33 @@ function createGenWatcher(dbq, { pollMs = POLL_MS } = {}) {
     inflight = row.inflight || 0;
     const nowGenerating = inflight > 0;
 
+    // Tool-failure edge scan: rowid watermark + ASC LIMIT. Strictly-increasing
+    // rowid watermark means several failures in the SAME millisecond still all
+    // get their own event (the old started_at watermark collapsed them into
+    // one). A >LIMIT backlog resumes on the next tick instead of being lost.
+    // The scan sits outside the main query's try/catch, so it carries its own
+    // guard: a busy/damaged DB must skip the tick, not crash the poll interval
+    // (watermark untouched → the rows are simply retried next tick).
+    try {
+      if (lastErrRowid == null) {
+        lastErrRowid = dbq.latestToolRowid(); // boot 失败的兜底：首个成功 tick 再锚定
+      } else {
+        for (const r of dbq.recentToolRowsAfterRowid(lastErrRowid, 50)) {
+          if (r.status === 'error') {
+            lastToolError = { tool: r.tool_name, at: Date.now() };
+            emitter.emit('gen', { phase: 'tool_error', tool: r.tool_name,
+              session: r.session_id, at: Date.now() });
+          }
+          lastErrRowid = r.rid;
+        }
+      }
+    } catch (e) {
+      if (Date.now() - lastErrorLogAt >= ERROR_LOG_INTERVAL_MS) {
+        lastErrorLogAt = Date.now();
+        console.error(`[livegen] tool-error scan failed (tick skipped): ${e.message}`);
+      }
+    }
+
     // Edge detection: boolean transitions stay pure edges (start/end). A
     // lane-count CHANGE while generating is its own 'lanes' event — the
     // widget's ×N badge must move the moment a session joins or leaves an
@@ -128,7 +180,7 @@ function createGenWatcher(dbq, { pollMs = POLL_MS } = {}) {
     // Subscribe to start/end edge events; returns an unsubscribe function so
     // short-lived consumers (one SSE response) can detach on close.
     onEvent(cb) { emitter.on('gen', cb); return () => emitter.off('gen', cb); },
-    state() { return { generating, sessions, inflight }; },
+    state() { return { generating, sessions, inflight, lastToolError }; },
     stop() { stopped = true; clearInterval(timer); },
   };
 }
