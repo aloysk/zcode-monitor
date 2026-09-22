@@ -20,39 +20,52 @@
 // The writable connection is only opened transiently for the checkpoint, and
 // only when ZCode is NOT running (so we never contend with its writer).
 
-const { execFileSync } = require('child_process');
+const { execFile } = require('child_process');
 const fs = require('fs');
 const Database = require('better-sqlite3');
 
-// Detect ZCode running via process list. Returns boolean.
-// Matches the Electron app binary path (cross-platform-ish) and the CLI helper.
-function isZCodeRunning() {
-  try {
+// Detect ZCode running via process list. ASYNC and callback-based: the probe
+// shells out to tasklist/ps, which takes seconds on win32 (2026-09-23 实测
+// tasklist /FI 单次 4.2-7.4s——枚举全部进程的成本，/FI 不减少枚举量）。调用方
+// 是常驻轮询（server/index.js），同步 execFileSync 曾把事件循环按单次 5-7s
+// 冻结、5s 间隔背靠背近乎持续阻塞（评审实测 /api/health median 5.0s）——
+// 热路径上严禁同步子进程调用；本函数只允许异步使用。
+// Probes never overlap: while one is in flight the next request reuses it.
+let probeInFlight = false;
+function probeZCodeRunning(cb) {
+  if (probeInFlight) return; // 在途不重叠：上一次的结果即将写回
+  probeInFlight = true;
+  const finish = (v) => { probeInFlight = false; cb(v); };
+  const onOut = (err, stdout) => {
+    if (err) {
+      // probe failed (non-unix, tasklist missing?) — fall back to optimistic:
+      // assume running so we stay in safe read-only mode rather than risk a
+      // contended checkpoint.
+      return finish(true);
+    }
+    const lines = String(stdout).split('\n');
     if (process.platform === 'win32') {
-      // Git Bash 的 ps 是 MSYS 迷你实现，不支持 -o（2026-09-23 实测每次探测
-      // 以 `ps: unknown option -- x` 失败退出 → 恒走乐观回退、health 恒报
-      // "运行中"）。win32 改用 tasklist 按镜像名精确匹配桌面端进程。
-      const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq ZCode.exe', '/NH'],
-        { encoding: 'utf8', maxBuffer: 1 << 20, stdio: ['ignore', 'pipe', 'pipe'] });
-      return /ZCode\.exe/i.test(out);
+      // tasklist /NH：命中行首即镜像名；按桌面端镜像名匹配。
+      return finish(lines.some(l => /(^|\s)ZCode\.exe\s/i.test(l)));
     }
     // `ps -axo comm` gives the executable path; matching is robust to args.
-    const out = execFileSync('ps', ['-axo', 'comm'],
-      { encoding: 'utf8', maxBuffer: 1 << 20, stdio: ['ignore', 'pipe', 'pipe'] });
-    const lines = out.split('\n');
-    return lines.some(line => {
+    // Match the ZCode app on macOS, the .exe on Windows, and the linux binary.
+    return finish(lines.some(line => {
       const l = line.trim();
-      // Match the ZCode app on macOS, the .exe on Windows, and the linux binary.
       return /\/ZCode\.app\//.test(l)
           || /(^|\/)zcode-cli$/.test(l)
           || /(^|\/)zcode-host-local/.test(l)
           || /(^|\/)ZCode(\.exe)?$/.test(l);
-    });
-  } catch {
-    // probe failed (non-unix, tasklist missing?) — fall back to optimistic:
-    // assume running so we stay in safe read-only mode rather than risk a
-    // contended checkpoint.
-    return true;
+    }));
+  };
+  if (process.platform === 'win32') {
+    // Git Bash 的 ps 是 MSYS 迷你实现，不支持 -o（实测 `ps: unknown option -- x`
+    // 失败退出）。win32 用 tasklist 按镜像名精确匹配桌面端进程。
+    execFile('tasklist', ['/FI', 'IMAGENAME eq ZCode.exe', '/NH'],
+      { encoding: 'utf8', maxBuffer: 1 << 20 }, onOut);
+  } else {
+    execFile('ps', ['-axo', 'comm'],
+      { encoding: 'utf8', maxBuffer: 1 << 20 }, onOut);
   }
 }
 
@@ -64,6 +77,16 @@ function walStatus(dbPath) {
     const shm = fs.existsSync(dbPath + '-shm') ? fs.statSync(dbPath + '-shm').size : 0;
     return { mainBytes: main, walBytes: wal, shmBytes: shm };
   } catch { return null; }
+}
+
+// -wal 文件的写入静默时长（ms）：writer 活跃性判据。ZCode 运行中会持续触碰
+// -wal；进程探测（tasklist 只认桌面端镜像名，覆盖不了 node 跑的 CLI 形态）误报
+// 「已退出」时，-wal 近期有写入即是真实 writer 在场的反证——自动 checkpoint 前
+// 以此否决误报，避免用可写连接与真实 writer 抢锁。-wal 不存在或不可 stat（已
+// checkpoint 过 / 从未写入）→ 返回 null（无反证，允许 checkpoint）。
+function walIdleMs(dbPath) {
+  try { return Date.now() - fs.statSync(dbPath + '-wal').mtimeMs; }
+  catch { return null; }
 }
 
 // Fold the WAL into the main db so read-only connections can see all history.
@@ -95,4 +118,4 @@ function checkpointNow(dbPath) {
   }
 }
 
-module.exports = { isZCodeRunning, walStatus, checkpointNow };
+module.exports = { probeZCodeRunning, walStatus, walIdleMs, checkpointNow };

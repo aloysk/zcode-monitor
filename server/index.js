@@ -51,51 +51,68 @@ if (warm.ok) {
 // Also reports ZCode runtime status + WAL size so the UI can show whether
 // a checkpoint is pending (i.e. recent data is at risk until ZCode exits cleanly).
 // ── ZCode runtime watcher ────────────────────────────────────
-// Polls whether ZCode is running. When it transitions running→stopped, we run
-// a one-shot wal_checkpoint(TRUNCATE) so all subsequent read-only connections
-// see the complete history (the WAL's freshest rows get folded into the main db).
+// Polls whether ZCode is running (ASYNC probe — see zcode-runtime.probeZCodeRunning:
+// tasklist/ps takes seconds, so the probe must never run synchronously on the
+// event loop, must never overlap itself, and is throttled well above its own
+// latency). When it transitions running→stopped, we run a one-shot
+// wal_checkpoint(TRUNCATE) so all subsequent read-only connections see the
+// complete history (the WAL's freshest rows get folded into the main db).
 // We NEVER write to the db otherwise — checkpoint only reorganizes existing
 // WAL frames, and we only do it when ZCode isn't holding the writer lock.
+// 探测误报的第二道保险：-wal 近期有写入（walIdleMs < 窗口）= 真实 writer 在场
+// （进程探测只认桌面端镜像名，覆盖不了 node 跑的 CLI 形态），否决「已退出」并
+// 回置运行中——绝不与真实 writer 抢锁。
 const runtimeState = {
-  running: true,                       // updated by the watcher
+  running: true,                       // optimistic until the first probe lands
   lastCheckpoint: null,                // { at, folded, walBefore, walAfter }
   watchError: null,
 };
 
+const PROBE_MIN_INTERVAL_MS = 30 * 1000; // 探测节流 ≥ 单次子进程延迟（tasklist 实测 4-7s）
+const WAL_ACTIVE_WINDOW_MS = 60 * 1000;  // -wal 静默不足此时长即视为 writer 在场
+let lastProbeAt = 0;
+
 function pollZCodeRuntime() {
-  let running;
-  try { running = runtime.isZCodeRunning(); runtimeState.watchError = null; }
-  catch (e) { running = runtimeState.running; runtimeState.watchError = e.message; }
-
-  const wasRunning = runtimeState.running;
-  runtimeState.running = running;
-
-  // Transition: running → stopped → fold the WAL so history stays readable.
-  if (wasRunning && !running) {
-    console.log('[runtime] ZCode exited — checkpointing WAL to preserve history…');
-    const before = runtime.walStatus(dbq.DB_PATH);
-    const result = runtime.checkpointNow(dbq.DB_PATH);
-    if (result.ok) {
-      const after = result.after;
-      runtimeState.lastCheckpoint = {
-        at: new Date().toISOString(),
-        ok: true,
-        walBefore: before ? before.walBytes : null,
-        walAfter: after ? after.walBytes : null,
-        folded: before && after ? (before.walBytes - after.walBytes) : null,
-      };
-      console.log(`[runtime] checkpoint done: WAL ${before ? before.walBytes : '?'} → ${after ? after.walBytes : '?'} bytes`);
-    } else {
-      runtimeState.lastCheckpoint = { at: new Date().toISOString(), ok: false, error: result.error };
-      console.warn(`[runtime] checkpoint failed: ${result.error}`);
+  if (Date.now() - lastProbeAt < PROBE_MIN_INTERVAL_MS) return; // 结果沿用上次
+  lastProbeAt = Date.now();
+  runtime.probeZCodeRunning(running => {
+    if (running === false) {
+      const idle = runtime.walIdleMs(dbq.DB_PATH);
+      if (idle != null && idle < WAL_ACTIVE_WINDOW_MS) running = true; // 误报否决
     }
-    // Drop our read-only connection cache so the next read sees the folded db.
-    dbq.invalidateDb();
-  }
+    runtimeState.watchError = null;
+
+    const wasRunning = runtimeState.running;
+    runtimeState.running = running;
+
+    // Transition: running → stopped → fold the WAL so history stays readable.
+    if (wasRunning && !running) {
+      console.log('[runtime] ZCode exited — checkpointing WAL to preserve history…');
+      const before = runtime.walStatus(dbq.DB_PATH);
+      const result = runtime.checkpointNow(dbq.DB_PATH);
+      if (result.ok) {
+        const after = result.after;
+        runtimeState.lastCheckpoint = {
+          at: new Date().toISOString(),
+          ok: true,
+          walBefore: before ? before.walBytes : null,
+          walAfter: after ? after.walBytes : null,
+          folded: before && after ? (before.walBytes - after.walBytes) : null,
+        };
+        console.log(`[runtime] checkpoint done: WAL ${before ? before.walBytes : '?'} → ${after ? after.walBytes : '?'} bytes`);
+      } else {
+        runtimeState.lastCheckpoint = { at: new Date().toISOString(), ok: false, error: result.error };
+        console.warn(`[runtime] checkpoint failed: ${result.error}`);
+      }
+      // Drop our read-only connection cache so the next read sees the folded db.
+      dbq.invalidateDb();
+    }
+  });
 }
 
-// initial poll (don't checkpoint at boot — ZCode may already be down and that's fine)
-runtimeState.running = runtime.isZCodeRunning();
+// initial probe (async, doesn't block boot; don't checkpoint at boot — ZCode
+// may already be down and that's fine)
+pollZCodeRuntime();
 setInterval(pollZCodeRuntime, 5000);
 
 // Manual checkpoint endpoint (for a "preserve now" button). Refuses to run

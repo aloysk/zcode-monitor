@@ -80,6 +80,28 @@ test('A4-5: Bearer 凭证头整体收敛', () => {
   assert.ok(out.includes('[凭证]'));
 });
 
+test('A4-5: JWT 三段（eyJ 前缀）整体剥除，头/载荷/签名无任何分段残留', () => {
+  // 规范三段 JWT：header(eyJ…36) . payload(eyJ…27) . signature(42)——每段都可能
+  // 短于长 base64 的 40 位下限，且载荷可 base64url 解出 claims，必须整体收敛。
+  const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0'
+              + '.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
+  const out = sanitizeSpeech('token=' + jwt + ' 已带上');
+  assert.equal(out, 'token=[凭证] 已带上', 'JWT 须整体收敛为一个占位符');
+  for (const seg of ['eyJhbGciOi', 'eyJzdWIiOi', 'SflKxwRJSMeK']) {
+    assert.equal(out.indexOf(seg), -1, '段残留: ' + seg);
+  }
+});
+
+test('A4-5: JWT 规则先于长 hex/base64 规则（顺序不变量）', () => {
+  // 顺序敏感的守护：若 RULES 重排致长 base64 规则（≥40 位）先跑，签名段先被
+  // 剥、三段整体匹配失配，头与载荷（可解出 claims）将原样残留且无报警。
+  // 构造短签名段 JWT：签名不足 40 位时只有 JWT 规则能整体剥除——重排后本用例必红。
+  const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeK';
+  const out = sanitizeSpeech('jwt:' + jwt + ';end');
+  assert.equal(out, 'jwt:[凭证];end');
+  assert.equal(out.indexOf('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9'), -1);
+});
+
 test('A4-5: 普通中文短句原样保留（含标点与数字）', () => {
   const s = '今天完成了三个任务，速度 42.5 t/s，一切正常。';
   assert.equal(sanitizeSpeech(s), s);

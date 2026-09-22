@@ -145,7 +145,8 @@ const REMAINDER_MAX_BYTES = 16 * 1024 * 1024;
 
 function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
                             todayFile = defaultTodayFile,
-                            maxBytesPerPump = MAX_PUMP_BYTES } = {}) {
+                            maxBytesPerPump = MAX_PUMP_BYTES,
+                            statFile = (p) => fs.statSync(p) } = {}) {
   if (typeof onEvents !== 'function') throw new TypeError('onEvents required');
   let curFile = null, offset = 0, remainder = Buffer.alloc(0);
   let watcher = null, reconcileTimer = 0, pollTimer = 0, stopped = false;
@@ -173,7 +174,7 @@ function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
       curFile = file; offset = 0; remainder = Buffer.alloc(0); // 日切换（换名）→ 新文件从偏移 0 起读
       if (isFirst) { // 起点对账：已存在的当日文件从尾部开始，不回放历史
         try {
-          offset = fs.statSync(curFile).size;
+          offset = statFile(curFile).size;
         } catch (e) {
           if ((e && e.code) !== 'ENOENT') return; // 文件在但 stat 瞬时失败（EPERM/EBUSY）：
                                                   // 历史未知、保持未锚定，下次 pump 先补锚定，
@@ -188,13 +189,13 @@ function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
     }
     if (!anchoredToTail) { // 首次非 ENOENT 失败过的补锚定（再失败则继续等）
       try {
-        offset = fs.statSync(curFile).size;
+        offset = statFile(curFile).size;
         anchoredToTail = true;
       } catch { return; }
       return;
     }
     let stat;
-    try { stat = fs.statSync(curFile); }
+    try { stat = statFile(curFile); }
     catch { return; } // 当日文件尚不存在：等下次事件/对账
     if (stat.size < offset) { offset = 0; remainder = Buffer.alloc(0); } // 截断/回绕：按新文件从 0 重读
                                                                          // （对账定时器调的就是本 pump，走同一

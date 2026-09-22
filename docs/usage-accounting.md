@@ -292,12 +292,18 @@ fixture 组：边界行在改动前后各跑一次（`git stash` 切换），脚
 | USAGE | apps/zcode-cli/packages/adapters/src/storage/session-store/repositories/usage.ts |
 | OBS | apps/zcode-cli/packages/core/src/runtime/methods/usage-observability.ts |
 
-带标注的查询（16 处；2026-09-23 按 server/db.js 逐查询 "schema source:" 注释实测
-复核，段头另有 1 条全路径版总注不计入）：overviewKpis、timeseries、
-breakdownByModel、breakdownByTool、overviewSpeed、recentSpeed、completedSince、
-todayUsage、sessionList、sessionTurns（含 side call 下界标注）、sessionActivity、
-sessionChildren、sessionReasoning、recentModelRows、recentToolRows、agentsForest。
-（初稿曾写「13 处」并误列 errorsList/errorSummary——二者实无逐查询标注——本行已按实测修正。）
+带标注的查询（16 处；成员逐条以各 "schema source:" 注释在其所属函数体内为准，
+2026-09-23 按 `grep -n "schema source" server/db.js` 的 16 条逐查询命中
+（:172/:262/:287/:304/:336/:367/:414/:441/:472/:495/:608/:650/:679/:712/:726/:772）
+逐一回溯所属函数核实；段头 :158 另有 1 条全路径版总注不计入）：overviewKpis、
+timeseries、breakdownByModel、breakdownByTool、overviewSpeed、recentSpeed、
+completedSince、todayUsage、sessionList、sessionTurns（含 side call 下界标注）、
+sessionChildren、errorsList(model)、errorSummary、recentModelRows、
+recentToolRows、agentsForest。（初稿曾写「13 处」；修订轮曾把成员误改为含
+sessionActivity/sessionReasoning、并误断言 errorsList/errorSummary 无标注——
+二者实有标注（errorsList model 段 :650、errorSummary :679），
+sessionActivity(:574)/sessionReasoning(:621) 实无——本行按逐条回溯函数体的
+实测改正，列为后续补注候选。）
 抽查 5 处与本文档一致性核验：见 commit 说明。
 
 ## 10. 与计划文件的对应关系

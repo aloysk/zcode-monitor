@@ -16,6 +16,13 @@ fs.mkdirSync(fxLogDir, { recursive: true });
 process.env.ZCODE_LOG_DIR = fxLogDir;
 const log = require(path.join(__dirname, '..', 'server', 'log-tail.js'));
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function waitFor(cond, deadlineMs, stepMs = 50) {
+  const deadline = Date.now() + deadlineMs;
+  while (!cond() && Date.now() < deadline) await sleep(stepMs);
+  return cond();
+}
+
 test.after(() => {
   fs.rmSync(fxRoot, { recursive: true, force: true });
   // A0-7 守护断言：运行中记录的临时路径在钩子内已不存在
@@ -109,6 +116,52 @@ test('A0-5 eventsForTrace: 今昨双文件都扫描、按 timestamp 排序、坏
   assert.deepEqual(got.map(e => e.seq), [0, 1, 2], '双文件命中且按 timestamp 升序');
   assert.equal(got.length, 3, '无关 trace 与坏行不计入');
   assert.deepEqual(await log.eventsForTrace(''), [], '空 traceId 返回空');
+});
+
+test('A3-watch 锚定: 首次 stat 非 ENOENT 失败（EPERM）→ 不回放历史；补锚定后追加持续可见', async () => {
+  // 覆盖 createLogWatcher 的尾部锚定分支（2026-09-23 修订引入）：启动时文件在但
+  // stat 瞬时失败（EPERM/EBUSY 形态）必须保持未锚定、绝不从偏移 0 整文件回放
+  // （真实日志 ~295MB/日，回放即事件循环冻结级事故）。statFile 是测试 seam
+  // （createLogWatcher 注入点，缺省 fs.statSync）。
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zcmon-anchor-'));
+  const logDir = path.join(root, 'log');
+  fs.mkdirSync(logDir, { recursive: true });
+  const file = path.join(logDir, 'zcode-2026-09-23.jsonl');
+  for (let i = 1; i <= 3; i++) { // 启动前已存在的历史
+    fs.appendFileSync(file, JSON.stringify({ i }) + '\n');
+  }
+  const got = [];
+  let allowStat = false; // 保持 EPERM 直到测试放行，消除补锚定时序的不确定性
+  const eperm = () => Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+  const w = log.createLogWatcher({
+    todayFile: () => file,
+    statFile: (p) => { if (!allowStat) throw eperm(); return fs.statSync(p); },
+    reconcileMs: 50, // 快速对账驱动 pump，缩短等待
+    onEvents: evs => got.push(...evs),
+  });
+  try {
+    await sleep(300); // 期间多次 pump 全部 EPERM：锚定保持未完成
+    assert.equal(got.length, 0, '非 ENOENT 锚定失败不得回放启动前历史（3 行）');
+    fs.appendFileSync(file, JSON.stringify({ i: 4 }) + '\n'); // 未锚定窗口内写入
+    fs.appendFileSync(file, JSON.stringify({ i: 5 }) + '\n');
+    allowStat = true;
+    // 放行后第一次 pump 即补锚定（reconcileMs=50 → 该窗口内必然完成）：锚到当时的
+    // size。锚定窗口内已写入的 4/5 行落在「启动对账错过、又不该回放」的模糊带，
+    // 实现选择按窄窗取舍锚掉（不丢历史、不回放）——先等补锚定完成，再写 line6
+    // 验证续读正确性。
+    await sleep(400);
+    fs.appendFileSync(file, JSON.stringify({ i: 6 }) + '\n');
+    const saw6 = await waitFor(() => got.some(e => e.i === 6), 5000);
+    assert.ok(saw6, '补锚定完成后的追加必须可见');
+    fs.appendFileSync(file, JSON.stringify({ i: 7 }) + '\n');
+    await waitFor(() => got.some(e => e.i === 7), 5000);
+    assert.ok(!got.some(e => e.i <= 3), '历史 3 行任何时刻都不得回放');
+    assert.ok(!got.some(e => e.i === 4 || e.i === 5), '锚定窗口内写入的行不回读（窄窗取舍，见注）');
+  } finally {
+    w.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+    assert.equal(fs.existsSync(root), false, 'A0-7: 临时目录已清理'); // 守护断言
+  }
 });
 
 test('A0-5 todayLogFile: UTC 日命名映射（zcode-YYYY-MM-DD.jsonl，落在注入的 LOG_DIR）', () => {
