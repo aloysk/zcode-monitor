@@ -85,7 +85,8 @@ const CANDIDATES = [
 ];
 const CW = 192, CH = 208;
 const grid = document.getElementById('grid');
-let loaded = 0;
+// settled 而非 loaded：缺图包画占位后也算就绪，联系表截图流程不被单个坏包挂死
+let settled = 0;
 CANDIDATES.forEach(([slug, name, src, rank], i) => {
   const card = document.createElement('div');
   card.className = 'card';
@@ -102,11 +103,25 @@ CANDIDATES.forEach(([slug, name, src, rank], i) => {
     const ctx = cv.getContext('2d');
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(im, 1, 1, CW - 2, CH - 2, 0, 0, cv.width, cv.height);
-    loaded++;
+    settled++;
+  };
+  // 缺图占位：候选包未下载/损坏时明确标出，别让卡片静默空白
+  im.onerror = () => {
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle = '#2e2e2e';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.strokeStyle = '#4a4a4a';
+    ctx.strokeRect(6.5, 6.5, cv.width - 13, cv.height - 13);
+    ctx.fillStyle = '#9a9a9a';
+    ctx.font = '12px "Segoe UI", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('缺图 · ' + slug, cv.width / 2, cv.height / 2);
+    settled++;
   };
   im.src = '/pets-preview/' + slug + '/spritesheet.webp';
 });
-window.__previewReady = () => loaded === CANDIDATES.length;
+window.__previewReady = () => settled === CANDIDATES.length;
 </script>
 
 <script>
