@@ -153,10 +153,24 @@ function startOfDayMs(d = new Date()) {
 }
 
 // ───────────────────────── Overview ─────────────────────────
+// Token 口径（详见 docs/usage-accounting.md，官方出处核实于 zai-org/ZCode
+// commit 872ad96 "feat: open source"）：
+//   - schema source: zai-org/ZCode apps/zcode-cli/packages/adapters/src/storage/
+//     session-store/migrations.ts（migration 0010_usage_observability，下称 MIG）
+//   - 写入/聚合口径 source: zai-org/ZCode apps/zcode-cli/packages/adapters/src/
+//     storage/session-store/repositories/usage.ts（下称 USAGE）
+//   - 事实写入 source: zai-org/ZCode apps/zcode-cli/packages/core/src/runtime/
+//     methods/usage-observability.ts（下称 OBS）
+// 关键语义：input_tokens 已含 cache_read（AI SDK v6，USAGE inputSideTokensFromStoredUsage
+// 注释），cache_creation/cache_read 只是 breakdown；computed_total_tokens 是官方
+// 预计算权威值（USAGE recordModelUsage），官方聚合 queryAppUsage 的总量即
+// SUM(computed_total_tokens)——本文件所有 total 口径照此，不再自造公式。
 
 // KPI cards. `sinceMs` = window start (epoch ms). Counts/tokens/latency over
 // model_usage + tool_usage within the window.
 function overviewKpis(sinceMs) {
+  // schema source: zai-org/ZCode MIG 0010_usage_observability + USAGE queryAppUsage(totals)
+  // 全量行聚合（官方口径：子代理行属于子会话、无重复计入，不做 parent 维度排除）。
   const m = db().prepare(`
     SELECT COUNT(*)                                    AS model_calls,
            SUM(CASE WHEN status='completed' THEN 1 END) AS completed,
@@ -167,6 +181,7 @@ function overviewKpis(sinceMs) {
            SUM(reasoning_tokens)  AS reason_tok,
            SUM(cache_read_input_tokens)  AS cache_read,
            SUM(cache_creation_input_tokens) AS cache_write,
+           SUM(computed_total_tokens) AS total_tok,
            AVG(CASE WHEN duration_ms IS NOT NULL AND status='completed' THEN duration_ms END) AS avg_ms
     FROM model_usage
     WHERE started_at >= @since
@@ -180,9 +195,12 @@ function overviewKpis(sinceMs) {
     WHERE started_at >= @since
   `).get({ since: sinceMs });
 
+  // INDEXED BY 强制走 started_at 索引：缺省计划会全索引扫 session_turn_idx 求
+  // DISTINCT（真实库实测 1.9s/次，事件循环饿死风险）；强制后 SEARCH started_at
+  // 范围 + 小集合去重，结果一致（510=510）、50ms（docs/usage-accounting.md §红线实测）。
   const sessions = db().prepare(`
     SELECT COUNT(DISTINCT session_id) AS active_sessions
-    FROM model_usage
+    FROM model_usage INDEXED BY model_usage_started_model_idx
     WHERE started_at >= @since
   `).get({ since: sinceMs });
 
@@ -207,11 +225,16 @@ function overviewKpis(sinceMs) {
     },
     tokens: {
       input: m.in_tok || 0,
+      // 展示拆分：input 列原样含 cache_read（官方语义），拆出去重展示。
+      input_ex_cache: Math.max(0, (m.in_tok || 0) - (m.cache_read || 0)),
       output: m.out_tok || 0,
       reasoning: m.reason_tok || 0,
       reasoning_ratio: reasonRatio,
       cache_read: m.cache_read || 0,
       cache_write: m.cache_write || 0,
+      // 官方预计算权威总量 = SUM(computed_total_tokens)（USAGE queryAppUsage 同口径；
+      // 本地实测 381,548/381,548 行 == input+output，见 docs/usage-accounting.md）。
+      total: m.total_tok || 0,
     },
     active_sessions: sessions.active_sessions || 0,
   };
@@ -222,6 +245,7 @@ function timeseries(hours = 24) {
   const since = startOfDayMs() - (24 - new Date().getHours()) * 3600_000 - (hours - 24) * 3600_000;
   // Simpler: just compute since = now - hours*3600_000
   const sinceMs = Date.now() - hours * 3600_000;
+  // schema source: zai-org/ZCode MIG 0010_usage_observability（input 列含 cache_read）
   const rows = db().prepare(`
     SELECT (started_at / 3600000) * 3600000 AS bucket,
            COUNT(*) AS calls,
@@ -246,6 +270,8 @@ function timeseries(hours = 24) {
 
 // Breakdown by model + query_source — shows where compute goes.
 function breakdownByModel(sinceMs) {
+  // schema source: zai-org/ZCode MIG 0010_usage_observability +
+  // USAGE queryAppUsage(models)（官方同款按 model_id 分组，全量行）
   return db().prepare(`
     SELECT provider_id, model_id, variant, query_source,
            COUNT(*) AS calls,
@@ -261,6 +287,8 @@ function breakdownByModel(sinceMs) {
 }
 
 function breakdownByTool(sinceMs) {
+  // schema source: zai-org/ZCode MIG 0010_usage_observability +
+  // USAGE queryAppUsage(tools)（官方同款按 tool_name 分组）
   return db().prepare(`
     SELECT tool_name,
            COUNT(*) AS calls,
@@ -291,6 +319,9 @@ function breakdownByTool(sinceMs) {
 //     mean(tok/s) — long requests dominate, reflecting real throughput.
 
 function overviewSpeed(sinceMs) {
+  // schema source: zai-org/ZCode MIG 0010_usage_observability。速度分子
+  // （output+reasoning）是速度专用口径（本地估算合成），与 computed_total_tokens
+  // 的总量口径不同——徽章与 docs/usage-accounting.md §徽章映射一致。
   const m = db().prepare(`
     SELECT SUM(output_tokens + COALESCE(reasoning_tokens, 0)) AS total_tokens,
            SUM(duration_ms)                                    AS total_ms,
@@ -319,6 +350,7 @@ function overviewSpeed(sinceMs) {
 // id is exposed so the widget can dedup its SSE stream against seed re-fetches.
 // Returns newest first. tps is null when duration_ms <= 0 (not shown).
 function recentSpeed(sinceMs, limit = 50) {
+  // schema source: zai-org/ZCode MIG 0010_usage_observability（tps 分子同速度口径）
   const rows = db().prepare(`
     SELECT id,
            started_at,
@@ -365,6 +397,7 @@ function completedSince(sinceMs) {
   // 2h pad covers any real request (anything longer only lands in the
   // rolling average it belongs to anyway). The exact completion filter
   // still runs on the small candidate set, so results are identical.
+  // schema source: zai-org/ZCode MIG 0010_usage_observability
   return db().prepare(`
     SELECT id,
            started_at,
@@ -391,6 +424,7 @@ function completedSince(sinceMs) {
 // and same token caliber as overviewSpeed: output + reasoning count as
 // generated tokens; reasoning_tokens is nullable so COALESCE to 0.
 function todayUsage() {
+  // schema source: zai-org/ZCode MIG 0010_usage_observability（速度口径，见 overviewSpeed）
   const r = db().prepare(`
     SELECT SUM(output_tokens + COALESCE(reasoning_tokens, 0)) AS tokens,
            COUNT(*)                                            AS requests
@@ -421,6 +455,9 @@ function sessionList({ limit = 100, offset = 0, q = '', taskType = '', status = 
   if (taskType) { where.push('task_type = @taskType'); params.taskType = taskType; }
   // status filter applied on latest activity's existence
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  // schema source: zai-org/ZCode MIG 0010_usage_observability + USAGE queryAppUsage
+  // total_tokens = SUM(computed_total_tokens)（官方预计算权威值，保持原口径）。
+  // 子代理 token 记在子会话名下（session.parent_id 关联），不与本会话行重复。
   return db().prepare(`
     SELECT s.id, s.title, s.task_type, s.directory,
            s.parent_id,
@@ -441,6 +478,11 @@ function sessionGet(id) {
 
 // Turn timeline for a session: one row per turn with aggregated metrics.
 function sessionTurns(id) {
+  // schema source: zai-org/ZCode MIG 0010_usage_observability + OBS recordTurnUsageFact
+  // turn_usage 不含标题生成等 side call（官方 title-generation-sidecar.ts 异步运行，
+  // 只写 model_usage、query_source='session_title'；真实库 30/30 样本验证
+  // turn_usage.computed_total_tokens == Σ(model_usage 排除 session_title 行)），
+  // computed_total_tokens 为下界（出处见 docs/usage-accounting.md §side call 缺口）。
   return db().prepare(`
     SELECT turn_id, status, trace_id, user_message_id,
            started_at, first_token_at, completed_at,
@@ -549,6 +591,8 @@ function sessionActivity(id, limit = 200) {
 // We find children via session.parent_id, and link to the spawning tool call
 // via agents/<parent>/agent_*/metadata.json (read on demand in route).
 function sessionChildren(id) {
+  // schema source: zai-org/ZCode MIG 0010_usage_observability + USAGE queryAppUsage
+  // 同 sessionList：SUM(computed_total_tokens) 官方预计算口径（与主列表一致，勿改公式）。
   return db().prepare(`
     SELECT id, title, task_type, time_created, time_updated,
            (SELECT SUM(computed_total_tokens) FROM model_usage m WHERE m.session_id = c.id) AS total_tokens
@@ -589,6 +633,7 @@ function errorsList({ sinceMs = null, kind = 'both', limit = 200 } = {}) {
   const params = { since: sinceMs, limit };
   const out = { model: [], tool: [] };
   if (kind === 'both' || kind === 'model') {
+    // schema source: zai-org/ZCode MIG 0010_usage_observability
     out.model = db().prepare(`
       SELECT id, session_id, turn_id, trace_id, status, started_at,
              model_id, provider_id, query_source,
@@ -617,6 +662,7 @@ const STATUS_FAILED = `'error','cancelled'`;
 
 // Error counts grouped by error_type and by tool_name.
 function errorSummary(sinceMs) {
+  // schema source: zai-org/ZCode MIG 0010_usage_observability
   const mWhere = sinceMs
     ? `WHERE started_at >= ${+sinceMs} AND status IN (${STATUS_FAILED})`
     : `WHERE status IN (${STATUS_FAILED})`;
@@ -649,6 +695,7 @@ function slowTools({ sinceMs = null, limit = 50 } = {}) {
 
 // For SSE: rows newer than the given id (primary key ordering via started_at+rowid).
 function recentModelRows(afterStartedAt, limit = 50) {
+  // schema source: zai-org/ZCode MIG 0010_usage_observability
   return db().prepare(`
     SELECT id, session_id, turn_id, trace_id, status, started_at, duration_ms,
            query_source, model_id, variant, mode, agent,
@@ -662,6 +709,7 @@ function recentModelRows(afterStartedAt, limit = 50) {
 }
 
 function recentToolRows(afterStartedAt, limit = 50) {
+  // schema source: zai-org/ZCode MIG 0010_usage_observability
   return db().prepare(`
     SELECT id, session_id, turn_id, trace_id, tool_call_id, tool_name, status,
            started_at, duration_ms, exit_code, error_type
@@ -678,6 +726,9 @@ function recentToolRows(afterStartedAt, limit = 50) {
 function agentsForest({ projectId = null } = {}) {
   const where = projectId ? 'WHERE project_id = ?' : '';
   const bind = projectId ? [projectId] : [];
+  // schema source: zai-org/ZCode MIG 0010_usage_observability + USAGE queryAppUsage
+  // 同 sessionList：SUM(computed_total_tokens) 官方预计算口径；父/子节点各自持有
+  // 自己会话的行，森林展示不叠加求和，无重复计入。
   const sessions = db().prepare(
     `SELECT id, title, task_type, parent_id, directory,
             time_created, time_updated,

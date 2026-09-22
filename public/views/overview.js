@@ -104,7 +104,7 @@
         <div class="delta">到首 token 时间另计</div></div>
       <div class="kpi"><div class="label">输入 token</div><div class="value v-green">${fmtNum(k.tokens.input)}</div>
         <div class="bar"><span style="width:${cacheRate}%;background:var(--cat-tool-2)"></span></div>
-        <div class="delta">缓存命中 ${cacheRate}% · 写入 ${fmtNum(k.tokens.cache_write)}</div></div>
+        <div class="delta">缓存命中 ${cacheRate}% · 写入 ${fmtNum(k.tokens.cache_write)}<span class="caliber" title="官方口径：input 为官方列 SUM(input_tokens)，已含缓存读（AI SDK v6）；缓存命中/写入取官方分项列。去重展示的纯输入见 docs/usage-accounting.md">官方口径</span></div></div>
       <div class="kpi"><div class="label">输出 token</div><div class="value">${fmtNum(k.tokens.output)}</div>
         <div class="delta">模型实际生成</div></div>
       <div class="kpi"><div class="label">推理 token 占比</div><div class="value ${reasonCls}">${reasonPct == null ? '—' : reasonPct.toFixed(1) + '%'}</div>
@@ -280,7 +280,7 @@
       foot.hidden = false;
       foot.innerHTML = `
         <span><span class="lbl">均速</span> <b class="${speedClass(wTps != null ? +wTps : null)}">${wTps != null ? wTps + ' t/s' : '—'}</b></span>
-        <span><span class="lbl">总 token</span> <b>${fmtInt(totTok)}</b></span>
+        <span><span class="lbl">总 token</span> <b>${fmtInt(totTok)}</b><span class="caliber" title="本地估算：速度专用口径 Σ(输出+推理)，不含输入，与官方 computed_total_tokens（input+output）口径不同，见 docs/usage-accounting.md">本地估算</span></span>
         <span><span class="lbl">请求</span> <b>${fmtInt(recent.length)}</b></span>
         <span><span class="lbl">subagent</span> <b>${fmtInt(subs)}</b></span>`;
     }

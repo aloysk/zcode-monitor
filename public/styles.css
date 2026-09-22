@@ -221,6 +221,9 @@ input[type=search] { width: 100%; }
 .kpi .label { font-size: 10.5px; color: var(--fg-4); text-transform: uppercase; letter-spacing: .6px; }
 .kpi .value { font-size: 23px; font-weight: 600; margin-top: 1px; font-variant-numeric: tabular-nums; color: var(--fg); }
 .kpi .delta { font-size: 11.5px; color: var(--fg-3); margin-top: 1px; }
+/* 口径徽章（T4）：标注数字的口径来源（官方口径/本地估算/下界），hover 有说明 */
+.caliber { font-size: 11px; padding: 1px 6px; margin-left: 6px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--fg-3); }
 .kpi .bar { height: 3px; background: var(--surface-3); border-radius: 2px; margin-top: 8px; overflow: hidden; }
 .kpi .bar > span { display: block; height: 100%; }
 .v-accent { color: var(--accent) !important; }

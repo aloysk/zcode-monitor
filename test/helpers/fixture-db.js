@@ -22,7 +22,10 @@ CREATE TABLE model_usage (
   cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER,
   tool_call_count INTEGER, computed_total_tokens INTEGER,
   error_type TEXT, error_code TEXT, error_message TEXT);
-CREATE INDEX idx_model_usage_started_at ON model_usage(started_at);
+-- 索引名与官方 migration 0010_usage_observability 一致（db.js overviewKpis 的
+-- COUNT(DISTINCT session_id) 用 INDEXED BY model_usage_started_model_idx 强制
+-- 走 started_at 索引，fixture 必须提供同名索引）。
+CREATE INDEX model_usage_started_model_idx ON model_usage(started_at, provider_id, model_id);
 CREATE INDEX idx_model_usage_session ON model_usage(session_id);
 CREATE TABLE tool_usage (
   id INTEGER PRIMARY KEY, session_id TEXT, turn_id TEXT, trace_id TEXT,
