@@ -108,7 +108,7 @@
 - **来源**：zai-org/ZCode（schema 权威）、zcode-token-usage-statusbar、arvelvale/orrery（记账语义）、better-ccusage（GLM 定价表）
 - **改动面**：`server/db.js` 用量查询按核实后的口径修正（input 含 cache-read 的展示拆分、总量公式、`parent_id` 归组、`turn_usage` side call 缺口标注）；前端数字标注来源（官方口径 / 本地估算）。**不做对外 JSON 口径端点**（对外暴露非本轮目标）
 - **验收**：同一时段 our 数字与 **ccusage 单方对账**通过；无法对齐的差异逐条留痕（口径文档注明出处与原因）
-- **风险**：低（只读查询层改动）；官方仓库刚开源（2 commits），内容可能不完整——以核实结果为准，不确定处留痕
+- **风险**：中（一次性改动约 8 个用量查询函数的语义——input 含 cache-read 拆分、总量公式、`parent_id` 去重、side call 标注——全部前端数字随之变动；对账基准依赖 ccusage 对 ZCode 数据源的支持形态，实施时实测，不可用时回退 zcode-token-usage-statusbar 的 JSON CLI 或纯 SQL 交叉核对。2026-09-22 规格评审由"低"上调）；官方仓库刚开源（2 commits），内容可能不完整——以核实结果为准，不确定处留痕
 
 ### WP3（P1，lite）JSONL 实时性强化（零写入）
 
