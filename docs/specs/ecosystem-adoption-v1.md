@@ -1,7 +1,7 @@
 # 生态采纳需求规格 v1（ecosystem-adoption）
 
 - 日期：2026-09-22
-- 状态：v1.1（2026-09-22 规格评审修订版——评审发现逐条判定并落实，采纳 / 驳回理由见提交说明）
+- 状态：v1.2（2026-09-22 第二轮规格评审修订——9 条发现全部采纳落实，验证证据见提交说明；v1.1 为首轮修订）
 - 上游：`docs/ecosystem-adoption-plan.md`（v1，已通过架构 / 对抗性 / 事实核查三视角评审）。本 Spec 把该计划转化为**可验收的需求**；任务级实施计划（How、步骤、代码骨架）在上游计划基础上另行编写。
 - 实施位置：worktree `F:/project/zcode-monitor-plan`，分支 `feature/ecosystem-adoption-plan`；主仓库 `F:/project/zcode-monitor` 一律只读。
 - 本文行号基于 worktree HEAD `5933a1f`（2026-09-22 核实）。
@@ -84,7 +84,7 @@
 - **A1-2** `[测试]`（参数化五案，与需求 3 的错误类一一对应）Given 分别为缺 `pet.json` / webp 魔数损坏（不可解析）/ 宽 ≠ 1536 / 高不能被 208 整除 / 行数 < 9 的来源目录，When 导入，Then 每案失败且错误信息指明对应原因（后三案各自断言宽 / 高 / 行数的具体报错文案，不共用一条），目标根无新增目录（原子性）。
 - **A1-3** `[测试]` Given `pet.json` 带 UTF-8 BOM 且字段为 snake_case（`display_name` / `spritesheet_path`），When 导入，Then 成功且显示名解析正确。
 - **A1-4** `[测试]` Given 未提供许可证与来源元数据，When 导入，Then 生成的 `NOTICE.md` 以固定字面量承载三要素并逐一断言（`indexOf !== -1`）：`source: <未提供>`（来源占位）、`license: unknown`（许可证占位）、`非商用`（非商用声明），且导入结果为"成功但带警告"。
-- **A1-5** `[命令]` Given 用 CLI 完成的一次真实导入到默认根（前置命令固定：`node tools/import-pet.js tools/pets-staging/<任一含 pet.json 的包目录>`——staging 为本地 gitignored 暂存区、内容随时间变化，不硬编码包名；staging 为空时改用任一本地 Codex 包目录并照录所用命令），When `git -C "F:/project/zcode-monitor-plan" status --porcelain`，Then 导入产物不出现在待提交清单（`git check-ignore` 命中导入产物路径亦可作为等价证据）。
+- **A1-5** `[命令]` Given 用 CLI 完成的一次真实导入到默认根（前置命令固定：`node tools/import-pet.js "F:/project/zcode-monitor/tools/pets-staging/<任一含 pet.json 的包目录>"`——staging 仅存在于主仓库、worktree 下无此目录（2026-09-22 实测 `ls` 报 os error 2），为本地 gitignored 暂存区且内容随时间变化，不硬编码包名，来源目录仅读取；staging 不可达或为空时改用任一本地 Codex 包目录并照录所用命令），When `git -C "F:/project/zcode-monitor-plan" status --porcelain`，Then 导入产物不出现在待提交清单（`git check-ignore` 命中导入产物路径亦可作为等价证据）。
 - **A1-6** `[测试]` Given 现仓库 `public/pets`（10 包），When 调用 `/api/pets` 的发现逻辑（注入该根），Then 返回 10 包、前两位为 `yuexinmiao` 与 `maid-deepseek-whale`（回归守护）。
 - **A1-7** `[测试]` Given 模拟跨源简单 POST（无自定义首部），When 调用导入端点，Then 403 拒绝；带约定首部的同源请求正常放行。
 - **A1-8** `[评审]` 端到端：一个未经改动的真实 Codex 包目录 → 导入 → 图鉴可见、可预览、桌宠可选用（双击轮换能到达该包）；评审记录含截图。
@@ -114,8 +114,8 @@
 **验收标准**
 
 - **A2-1** `[测试]` Given fixture 库构造了覆盖口径边界的行（含 cache_read 与 cache_creation 并存、reasoning 为 NULL、`parent_id` 子代理组、`turn_usage` 缺 side call 的场景），When 调用修正后的用量查询，Then 返回值符合口径文档记载的结论（fixture 断言把口径文档固化为可执行检查；口径文档修订时本测试同步修订）。
-- **A2-2** `[命令]+[评审]`（复合验收）Given 真实库只读访问，When 对同一 UTC 时段（建议取最近一个完整 UTC 日）分别以我方口径与对账基准工具计算 token 总量，Then 产出对账记录：双方命令与原始输出、逐项差异、每条差异的原因分类与出处。**"已解释"的判定规则**：每条差异须附官方源码 / 数据样本出处，经评审记录确认后方可计为已解释；**通过判据 = 全部差异均"已解释"（评审确认留痕）**——差异可以存在（承上游计划"无法对齐的差异逐条留痕"）。对账基准首选 ccusage（"已支持 ZCode 数据源"系上游计划 §2.2 的调研结论，本会话未验证），调用命令以其当时文档为准、实施时如实记录、不预设 flag；**fallback 基准**：ccusage 不可用或支持形态不匹配时，改用 zcode-token-usage-statusbar 的 JSON CLI（同数据源、口径已对齐官方，上游计划 §2.1）或纯 SQL 交叉核对，同样逐条留痕——基准替换本身记入对账记录。
-- **A2-3** `[命令]` Given WP2 修改过的每条 SQL，When 在真实库上执行 `EXPLAIN QUERY PLAN` 与计时（只读、带 `started_at` 下界；命令模板见 §4.1），Then 计划输出**不含对任何表的 `SCAN`**（须为 `SEARCH ... USING INDEX` 或 rowid 尾界命中）——与 §4.1 红线一致，覆盖 `session` / `turn_usage` / `part` 等全部表（含触碰 `agentsForest` 等现存风险查询的情形，见 WP2 现状锚点），计时结果记入验收记录。
+- **A2-2** `[命令]+[评审]`（复合验收）Given 真实库只读访问，When 对同一 UTC 时段（建议取最近一个完整 UTC 日）分别以我方口径与对账基准工具计算 token 总量，Then 产出对账记录：双方命令与原始输出、逐项差异、每条差异的原因分类与出处。**"已解释"的判定规则**：每条差异须附官方源码 / 数据样本出处，经评审记录确认后方可计为已解释；**通过判据 = 全部差异均"已解释"（评审确认留痕）**——差异可以存在（承上游计划"无法对齐的差异逐条留痕"）。对账基准首选 ccusage（"已支持 ZCode 数据源"系上游计划 §2.1 的调研结论，本会话未验证），调用命令以其当时文档为准、实施时如实记录、不预设 flag；**fallback 基准**：ccusage 不可用或支持形态不匹配时，改用 zcode-token-usage-statusbar 的 JSON CLI（同数据源、口径已对齐官方，上游计划 §2.1）或纯 SQL 交叉核对，同样逐条留痕——基准替换本身记入对账记录。
+- **A2-3** `[命令]` Given WP2 修改过的每条 SQL，When 在真实库上执行 `EXPLAIN QUERY PLAN` 与计时（只读、带 `started_at` 下界；命令模板见 §4.1），Then 计划输出**不含对任何表的 `SCAN`**（须为 `SEARCH ... USING INDEX` 或 rowid 尾界命中）——与 §4.1 红线一致，覆盖 `session` / `turn_usage` / `part` 等全部表（含触碰 `agentsForest` 等现存风险查询的情形，见 WP2 现状锚点），计时结果记入验收记录。**出路条款**：若口径核实结论要求触碰的现存查询在只读约束下（§4.2 禁 CREATE INDEX）无法消 SCAN——实证：`session` 表仅有 parent / project / task_type / trace / workspace 索引、无时间列索引（2026-09-22 真实库 sqlite_master 实测），`agentsForest`（`server/db.js:678-705`）无 projectId 时功能上必须全量扫 `session`——则二选一并留痕：(a) 不触碰该查询，口径影响写入口径文档；(b) 该查询以"改造后真实库只读计时不劣于改造前同查询基线"为替代判据收口，两个数字与理由记入验收记录。
 - **A2-4** `[评审]` 前端用量数字旁标注口径来源（官方口径 / 本地估算）；文案与位置评审通过，记录截图。
 - **A2-5** `[评审]` `server/db.js` 每条被触碰查询的表 / 列假设处有官方源码出处注释；抽查 5 处核对注释与口径文档一致。
 
@@ -134,15 +134,15 @@
 **需求**
 
 1. `server/log-tail.js` 增加 watch 增量路径：`fs.watch` 监听**日志目录**（而非仅当日文件句柄），追加即触发解析；任一目录事件触发时按 `todayLogFile()` 重新解析当日文件名（`server/log-tail.js:12-15`），UTC 日切换（被监视文件换名）由此覆盖，跨日后新文件从偏移 0 起读。以字节偏移增量读取（对齐 hoangsonww/Claude-Code-Agent-Monitor 的混合摄取思路），同一偏移的行不得产出两次。
-2. 失败与漏事件双重兜底：watch 报错（如 ENOENT / EMFILE）自动回退现有轮询，不丢事件；watch 静默漏事件时，周期性偏移对账补齐，保证最终一致。对账周期 5s（取仓库既有 5s 轮询惯例：`server/index.js:98`、`public/pet.html:494`）。**降级路径（若 A3-4 的 Windows 预验证显示 watch 命中率不可接受，阈值实施计划定）**：改用"当日文件 1s 短轮询 + 字节偏移去重"（`tailLog` 单次尾读 ≤1MB，`server/log-tail.js:40-60`，成本可忽略，同样满足 A3-5 判据）——机制替换属实施权限内，验收判据不变。
+2. 失败与漏事件双重兜底：watch 报错（如 ENOENT / EMFILE）自动回退现有轮询，不丢事件；watch 静默漏事件时，周期性偏移对账补齐，保证最终一致。对账周期 5s（取仓库既有 5s 轮询惯例：`server/index.js:98`、`public/pet.html:494`）。**降级路径（若 A3-4 的 Windows 预验证显示 watch 命中率不可接受，阈值实施计划定）**：改用"当日文件 1s 短轮询 + 字节偏移去重"（`tailLog` 单次尾读 ≤1MB，`server/log-tail.js:40-60`，成本可忽略，同样满足 A3-5 判据）——机制替换属实施权限内，**除 A3-2 外验收判据不变**：降级态下无 watch 可回退，A3-2 的 Given 无法构造，其验证目标映射为"纯 1s 短轮询在停止追加后 ≤10s 内全部行可见且全程无重复"（连续性等价检查）。
 3. 全程零写入：模块及其测试对 `~/.zcode/` 无任何写操作；测试 fixture 全在 tmpdir。
 4. 明确不做：hooks 事件接收端点、hooks 安装 / 卸载脚本、配置 diff 展示。
 
 **验收标准**
 
-- **A3-1** `[测试]` Given fixture 日志目录（`ZCODE_LOG_DIR` 注入）且 watch 增量路径激活，When 向当日 JSONL 追加 10 行（每行间隔 ≥100ms），Then **硬判据**：事件总数恰为 10（偏移守恒，无重复）；**时序判据**：每行对应的事件在追加后 1s 内被解析回调收到（10/10）——Windows `fs.watch` 抖动容忍（承 R3）：允许整组重跑至多 2 次、任一次全过即通过；三次均未达 1s 时改以 3s 上界复测并照录实测值。亚秒级目标是否达成最终以 A3-5 实测裁定，不因时序抖动否决 watch 路径。
-- **A3-2** `[测试]` Given watch 处于回退态（fixture 中以删除被监视目录等方式触发错误），When 继续追加行，Then 事件仍被产出（轮询兜底），停止追加后 ≤10s（两个对账周期）内全部行可见，且全程无重复行。
-- **A3-3** `[命令]` Given `server/log-tail.js` 及其测试目录，When `grep -rnE "writeFile|appendFile|createWriteStream|open(Sync)?\([^)]*['"](w|a|wx|ax|r\+)" server/log-tail.js tests/`，Then 无匹配（grep 退出码 1 属预期——ERE 不支持前向查找，故枚举写打开模式而非排除 `r`；`open(` 形态同时覆盖 `fs.open` / `fs.openSync` / `fs.promises.open` 的写打开；动态面由 A0-3 的 tmpdir 注入守护兜底）。
+- **A3-1** `[测试]` Given fixture 日志目录（`ZCODE_LOG_DIR` 注入）且 watch 增量路径激活，When 向当日 JSONL 追加 10 行（每行间隔 ≥100ms），Then **硬判据**：事件总数恰为 10（偏移守恒，无重复）；**时序判据**：每行对应的事件在追加后 1s 内被解析回调收到（10/10）——Windows `fs.watch` 抖动容忍（承 R3）：允许整组重跑至多 2 次、任一次全过即通过；三次均未达 1s 时改以 3s 上界复测——**3s 复测全过则时序判据记通过（带注记），仍不过则时序判据记不通过、交 A3-5 综合裁定**（偏移守恒硬判据不过仍一票否决）。亚秒级目标是否达成最终以 A3-5 实测裁定，不因时序抖动否决 watch 路径。
+- **A3-2** `[测试]` Given watch 处于回退态（fixture 中以删除被监视目录等方式触发错误），When 继续追加行，Then 事件仍被产出（轮询兜底），停止追加后 ≤10s（两个对账周期）内全部行可见，且全程无重复行。（若需求 2 的降级路径被启用、watch 整体移除，本条按需求 2 的映射执行。）
+- **A3-3** `[命令]` Given `server/log-tail.js` 及其测试目录，When `grep -rnE 'writeFile|appendFile|createWriteStream|open(Sync)?\([^)]*['\''"]((w|wx|a|ax)\+?|r\+|rs\+)' server/log-tail.js tests/`，Then 无匹配（grep 退出码 1 属预期——ERE 不支持前向查找，故枚举写打开模式而非排除 `r`；模式以单引号承载、内嵌引号经 `'\''` 转义，字面可执行——2026-09-22 实测：`bash -n` 语法通过；对现存 `server/log-tail.js` 退出码 1；`w/a/r+/wx/w+/a+/rs+/ax` 八种写打开形态全部命中、`r`/`rs` 不命中；`open(` 同时覆盖 `fs.open` / `fs.openSync` / `fs.promises.open`；动态面由 A0-3 的 tmpdir 注入守护兜底）。
 - **A3-4** `[测试]`（Windows 预验证，上游计划风险项）Given WP0 fixture 在 Windows 上以接近 ZCode 的节奏连续追加 100 行，Then watch 命中率与漏事件数被记录，且最终一致判据（停止追加后 ≤10s 全部可见）成立——无论 watch 漏不漏，混合兜底必须满足最终一致。另覆盖一次 UTC 日切换场景：构造跨日文件名后继续追加（换名后的当日文件），事件仍须可见（对应需求 1 的目录监听与重解析）。本条结果同时是需求 2 降级路径（1s 短轮询）的启用依据。
 - **A3-5** `[评审]` 真实环境观测（量化判据）：对比强化前后"JSONL 追加 → 活动流可见"的延迟，各记 ≥5 个样本并照录原始值。**通过判据 = 强化后样本中位数 < 强化前纯轮询基线的中位数**（基线为现行 5s 轮询的同法采样）；"各样本 <1s"作为观测目标照录、不作硬判据（时序抖动由 A3-1 的容忍条款管辖）。
 
@@ -225,7 +225,7 @@
 ### 4.1 性能红线（一票否决项）
 
 - 真实库 `~/.zcode/cli/db/db.sqlite` 约 **15.4 GiB 且持续增长**（2026-09-22 实测 16,521,129,984 字节；早期基线约 14.6GB）——红线按当时实测的更大值执行。历史事故：对 message 表的全表扫描曾致事件循环饿死约 **2.4s/次**，视为回归、一票否决。
-- 任何新查询必须命中 `started_at` 索引或 rowid 尾界；本 Spec 各 WP 对 `db.js` 的改动（WP2）与一切后续查询均适用。
+- 任何新查询必须命中**任一可用索引**（`EXPLAIN QUERY PLAN` 显 `SEARCH ... USING INDEX`）或 rowid 尾界——即计划输出不含对任何表的 `SCAN`（与 A2-3 同一口径）；时间窗口类查询仍应优先 `started_at` 下界（历史事故教训的针对性手法）。本 Spec 各 WP 对 `db.js` 的改动（WP2）与一切后续查询均适用。
 - 真实库实测模板（只读、须带 `started_at` 下界）：
 
   ```bash
