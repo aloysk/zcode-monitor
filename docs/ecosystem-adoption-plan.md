@@ -1,9 +1,9 @@
 # zcode-monitor 生态调研 · 分析与采纳计划
 
 - 日期：2026-09-21（v1 修订：2026-09-22）
-- 状态：**v1（已通过三视角评审并修订）** —— 架构 / 对抗性 / 事实核查三视角的评审共识已逐条落实
+- 状态：**已实施（2026-09-22）** —— v1 经架构 / 对抗性 / 事实核查三视角评审修订后，WP0–WP5 全部实施完成（收尾定稿：2026-09-23）
 - 输入：4 路并行子代理调研（ZCode 生态、Claude Code 生态、桌宠引擎与素材、桌面 widget 与壁纸框架），共核实约 60 个仓库的 README 与许可证
-- 性质：**计划文档（已实施）**。评审已通过；WP0–WP5 已于分支 `feature/ecosystem-adoption-plan`（worktree `F:/project/zcode-monitor-plan`）按 T1–T6 顺序实施并逐任务提交（实施状态注记，2026-09-23：HEAD `abead5a`，分支未合并回主仓 main——主仓库代码尚未含本计划改动，勿以主仓代码对照本文档验收）。实施与计划的提交结构差异见 `docs/plans/ecosystem-adoption-v1.md` 的实施留痕。
+- 性质：**计划文档（已实施）**。评审已通过；WP0–WP5 已于分支 `feature/ecosystem-adoption-plan`（worktree `F:/project/zcode-monitor-plan`）按 T1–T6 顺序实施并逐任务提交，验收证据存档于 `docs/acceptance/`。实施与计划的提交结构差异见 `docs/plans/ecosystem-adoption-v1.md` 的实施留痕。
 
 ---
 

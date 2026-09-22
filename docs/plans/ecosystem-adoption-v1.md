@@ -1,5 +1,7 @@
 # 生态采纳 v1 实施计划（ecosystem-adoption）
 
+> **状态：已实施（2026-09-22）** —— T1–T6 全部完成并逐任务提交；实际提交结构与本文规划的偏离、终审修订留痕见「执行顺序与提交总览」一节的实施留痕注记。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans（顺序执行）或 superpowers:subagent-driven-development（每任务一个子代理）按任务实施本计划。步骤用 checkbox（`- [ ]`）跟踪。**若本机技能清单中不存在 `superpowers:*` 技能，则按本文档 checkbox 顺序逐任务顺序执行、每任务一 commit（放弃子代理并行），不阻塞。**
 
 **Goal:** 为 zcode-monitor 落地生态采纳 v1 的六个工作包：测试基建（WP0）、Codex 宠物包一键导入（WP1）、隐私提示（WP5）、token 口径对齐与对账（WP2）、桌宠行为与安全升级（WP4）、JSONL watch 实时化（WP3-lite）。

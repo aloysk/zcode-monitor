@@ -1,7 +1,7 @@
 # 生态采纳需求规格 v1（ecosystem-adoption）
 
 - 日期：2026-09-22
-- 状态：v1.2（2026-09-22 第二轮规格评审修订——9 条发现全部采纳落实，验证证据见提交说明；v1.1 为首轮修订）
+- 状态：**已实施（2026-09-22）**。v1.2（2026-09-22 第二轮规格评审修订——9 条发现全部采纳落实，验证证据见提交说明；v1.1 为首轮修订）
 - 上游：`docs/ecosystem-adoption-plan.md`（v1，已通过架构 / 对抗性 / 事实核查三视角评审）。本 Spec 把该计划转化为**可验收的需求**；任务级实施计划（How、步骤、代码骨架）在上游计划基础上另行编写。
 - 实施位置：worktree `F:/project/zcode-monitor-plan`，分支 `feature/ecosystem-adoption-plan`；主仓库 `F:/project/zcode-monitor` 一律只读。
 - 本文行号基于 worktree HEAD `5933a1f`（2026-09-22 核实）。
