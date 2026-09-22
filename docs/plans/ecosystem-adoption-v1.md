@@ -1,6 +1,6 @@
 # 生态采纳 v1 实施计划（ecosystem-adoption）
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans（顺序执行）或 superpowers:subagent-driven-development（每任务一个子代理）按任务实施本计划。步骤用 checkbox（`- [ ]`）跟踪。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans（顺序执行）或 superpowers:subagent-driven-development（每任务一个子代理）按任务实施本计划。步骤用 checkbox（`- [ ]`）跟踪。**若本机技能清单中不存在 `superpowers:*` 技能，则按本文档 checkbox 顺序逐任务顺序执行、每任务一 commit（放弃子代理并行），不阻塞。**
 
 **Goal:** 为 zcode-monitor 落地生态采纳 v1 的六个工作包：测试基建（WP0）、Codex 宠物包一键导入（WP1）、隐私提示（WP5）、token 口径对齐与对账（WP2）、桌宠行为与安全升级（WP4）、JSONL watch 实时化（WP3-lite）。
 
@@ -20,7 +20,7 @@
 - **9 行动画契约不动**：`ROW_ANIMS = ['idle','running_right','running_left','waving','jumping','failed','waiting_permission','running','review']`（`public/pet.html:186-187`），不新增动画行；入睡复用 idle 行。
 - **平台与可测性**：Windows + Git Bash；被测路径一律注入（env 或参数），不依赖 cwd；不引入浏览器自动化框架（页面级行为走纯函数抽取 + 实机评审）。
 - **IP 与分发**：导入产物不得被 git 跟踪（A1-5）；NOTICE 三要素强制；不建对外宠物包索引；不与账号切换 / 反代项目互链；AGPL 项目（clawd-on-desk）只学交互设计不抄代码素材。
-- **气泡默认不展示 agent 原始文本**（`public/pet.html:420-429` 现状）；本计划只交付消毒模块 + 单测，不改默认展示行为。
+- **气泡默认不展示 agent 原始文本**（`public/pet.html:419-431` 气泡渲染区现状：内容仅为速度数字、单位与 ×N 徽章，全页无 agent 文本来源——SSE 消费只见 phase/sessions/tps）；本计划只交付消毒模块 + 单测，不改默认展示行为。
 - **提交规范**：中文主题行 + 前缀（`docs:`/`feat:`/`fix:`/`test:`/`chore:`）；**不要 push**（收尾阶段统一处理）。
 
 ---
@@ -45,6 +45,8 @@
 1. **测试全绿**：在 worktree 根运行 `npm test`（即 `node --test tests/`），退出码 0、0 failed。
 2. **服务冒烟**（fixture 环境，绝不指向真实库）：
 
+   > **串行纪律**：门禁（尤其本冒烟，固定 `PORT=7391`）在任意时刻至多一个执行者在跑——T2/T3 的「可并行」指文件改动不相交，**不含门禁并行**；两个执行者同时跑冒烟会端口冲突、假失败。
+
    ```bash
    cd "F:/project/zcode-monitor-plan"
    FX=$(node -e "const f=require('./tests/helpers/fixture-db');const fx=f.createFixtureDb();fx.seed();console.log(fx.root)")
@@ -61,6 +63,18 @@
    期望输出三行 `HEALTH-OK / PETS-OK / INDEX-OK`。
 3. **依赖零新增**：`node -e "console.log(Object.keys(require('./package.json').dependencies))"` 输出恰为 `[ 'better-sqlite3', 'express' ]`。
 4. **加码项**（按任务）：T4 的 commit 另跑 §4.1 红线实测（T4 步骤 5）；T6 的 commit 另跑 A3-3 零写入 grep（T6 步骤 5）。
+
+### human-gate 清单（人工实机评审项，代理执行到此留痕即过、不得造假）
+
+以下步骤本质需要人或实机环境（截图、真实权限请求、WebView2 壳交互），自主执行的代理**无法亲自完成**。代理到达该步时的标准留痕格式：在对应 `docs/acceptance/*.md` 写一行「结论：待人工评审；已备复现步骤：<命令/操作序列>；自动可验证前置（npm test 等门禁）已全过」——这算该步的合法完成态，不算跳过；**严禁虚构评审结论或截图路径**。
+
+| 步骤 | 为什么是 human-gate | 留痕文件 |
+|---|---|---|
+| T2 Step 10（A1-8 端到端） | 需实机浏览器/壳查看图鉴与轮换 | `docs/acceptance/T2-import-e2e.md` |
+| T3 Step 5（A5-1 评审） | 文案观感与语气属人工判断 | 结论记入该任务 commit 说明（对照负面清单逐句自查） |
+| T4 Step 7（A2-4 徽章截图） | 需实机页面截图 | `docs/acceptance/T4-before-after.md` |
+| T5 Step 0(a)（触发真实权限请求） | 需在真实 ZCode 使用中自然产生权限请求，代理不得代填 | `docs/acceptance/T5-permission-gate.md` |
+| T5 Step 6（A4-7 手势演示） | 需 WebView2 壳内实机拖动/连击 | `docs/acceptance/T5-behavior-e2e.md` |
 
 ### 回滚方式
 
@@ -518,6 +532,9 @@ zcode-monitor-plan/
   });
 
   test('A0-7: fixture 目录在 cleanup 后不存在（tmpdir 清理守护）', () => {
+    // 与 Spec A0-7 字面的已知差异：Spec 写"一次完整运行后守护全部已登记临时路径"，
+    // node --test 每文件独立进程，跨文件集中断言不可行；本测试守护 cleanup 机制本身，
+    // 各文件的泄漏面由其 try { } finally { fx.cleanup() } / fs.rmSync 模式 + A0-3 注入守护共同承担。
     const fx = createFixtureDb();
     const root = fx.root;
     assert.ok(fs.existsSync(root));
@@ -813,7 +830,7 @@ zcode-monitor-plan/
   ```gitignore
 
   # imported pet packs stay local-only (IP / 非默认分发主张, Spec WP1 需求5 / A1-5)；
-  # 精选 10 包白名单（目录名以 2026-09-22 实测为准，注意是 xinlian 不是 xilian）
+  # 精选 10 包白名单（目录名以 2026-09-22 实测为准，worktree 与主仓库双仓核对均为 xilian）
   public/pets/*
   !public/pets/chiikawa/
   !public/pets/firefly/
@@ -823,7 +840,7 @@ zcode-monitor-plan/
   !public/pets/miku/
   !public/pets/nezukocoder/
   !public/pets/pikachu-local/
-  !public/pets/xinlian/
+  !public/pets/xilian/
   !public/pets/yuexinmiao/
   ```
 
@@ -1039,7 +1056,7 @@ zcode-monitor-plan/
 
 - [ ] **Step 9：A1-5（命令验收，真实导入到默认根）**
 
-  staging 仅存在于主仓库（本会话实测：`F:/project/zcode-monitor/tools/pets-staging` 存在、含 12 个包目录、8 个含 pet.json；worktree 下无此目录，`ls` 报 os error 2）。staging 内容随时间变化，不硬编码包名，执行时任选一个含 `pet.json` 的包目录：
+  staging 仅存在于主仓库（本会话实测：`F:/project/zcode-monitor/tools/pets-staging` 存在、含 14 个包目录、8 个含 pet.json；worktree 下无此目录，`ls` 报 os error 2）。staging 内容随时间变化，不硬编码包名，执行时任选一个含 `pet.json` 的包目录：
   ```bash
   node "F:/project/zcode-monitor-plan/tools/import-pet.js" "F:/project/zcode-monitor/tools/pets-staging/<任一含 pet.json 的包目录>" --id local-import-check
   git -C "F:/project/zcode-monitor-plan" status --porcelain    # 期望：无任何新增待提交项
@@ -1049,7 +1066,7 @@ zcode-monitor-plan/
 
 - [ ] **Step 10：A1-8（评审验收，端到端）**
 
-  启动服务（真实库只读，`npm start` 即可），用图鉴导入面板或 CLI 导入一个真实包 → 打开 `/pet` 与 `/pets-preview`：图鉴可见该包、双击轮换能到达该包、预览正常。评审记录（含截图）落 `docs/acceptance/T1-import-e2e.md`（截图不入库，只记路径与结论）。
+  启动服务（真实库只读，`npm start` 即可），用图鉴导入面板或 CLI 导入一个真实包 → 打开 `/pet` 与 `/pets-preview`：图鉴可见该包、双击轮换能到达该包、预览正常。评审记录（含截图）落 `docs/acceptance/T2-import-e2e.md`（截图不入库，只记路径与结论）。
 
 ---
 
@@ -1079,7 +1096,7 @@ zcode-monitor-plan/
 
 - [ ] **Step 2：`public/styles.css` 追加样式**
 
-  在文件末尾（`.toast` 规则 `:469` 之后）追加：
+  在文件末尾追加（EOF；现文件 478 行，末条规则为 `:478` `.kv .v`——`.toast` 在 `:469`，其后尚有 `.scroll`/`.row-flash`/`@keyframes flash`/`.kv` 共 9 行）：
 
   ```css
 
@@ -1145,7 +1162,7 @@ zcode-monitor-plan/
 
 **Interfaces:**
 - T1 的 fixture 构建器按表分组，本任务只需增补 `tests/db-caliber.test.js` 内的口径边界行（不改动 `fixture-db.js` 的既有导出签名）。
-- 本任务设有**核实门（Step 1→2）**：Step 1 的核实结论决定 Step 2 各修正点的取值分支。两个分支的代码都已完整给出，执行者按口径文档结论「择一保留」，这是机械选择而非设计决策。若核实发现与本计划假设冲突（如 `computed_total_tokens` 语义与两分支都不符），如实把结论写入口径文档并按文档调整断言，**不伪造结论**（诚实条款）。
+- 本任务设有**核实门（Step 1→2）**：Step 1 的核实结论决定 Step 2 各修正点的取值分支。两个分支的代码都已完整给出，执行者按口径文档结论「择一保留」，这是机械选择而非设计决策。**缺省规则**：核实门无结论（克隆失败、上游材料不全、两点均「未核实到」）时，一律**缺省走分支 A**（维持现状 SQL 只补注释 + overviewKpis 增 total 字段，取 `SUM(computed_total_tokens)`——列存在性是本地 schema 事实，不依赖上游核实；分支 B 的去重/公式改写一律不做），Step 3 保留分支 A 断言行、删除分支 B 断言行，口径文档如实记录「未核实到 + 按保守缺省落地」的理由。若核实发现与本计划假设冲突（如 `computed_total_tokens` 语义与两分支都不符），如实把结论写入口径文档并按文档调整断言，**不伪造结论**（诚实条款）。
 
 **触碰面与性能预判（本会话只读实测真实库 sqlite_master 所得的索引事实）：**
 `model_usage` 有 `started_at`/`session_turn`/`query_source`/`trace` 索引；`tool_usage` 有 `started_tool`/`session_tool_call`/`session_turn` 索引；`turn_usage` 有 `started_idx`；`session` 只有 parent/project/task_type/trace/workspace 索引、**无时间列索引**；`permission` 表当前 0 行。因此：凡 `model_usage`/`tool_usage`/`turn_usage` 上带 `started_at >=` 下界的查询可预期 `SEARCH`；`sessionList`/`agentsForest` 的根扫描受 Spec A2-3 出路条款管辖（见 Step 5）。
@@ -1179,9 +1196,14 @@ zcode-monitor-plan/
 
   - **总量公式**（若结论为「`computed_total_tokens` 不可直接取用 / 语义不符」→ 分支 B；否则分支 A）：
     ```js
-    // 分支 A（官方预计算权威）：sessionList(:430) 与 agentsForest(:684) 的
-    //   SUM(m.computed_total_tokens) 保持原样，补注释即可。
-    // 分支 B（自行计算）：两处改为
+    // 分支 A（官方预计算权威）：三处同口径子查询全部保持原样、补注释即可——
+    //   sessionList(:430)、sessionChildren(:554) 与 agentsForest(:684) 的
+    //   SUM(m.computed_total_tokens)。同时 overviewKpis 的 tokens 增加 total 字段
+    //   （A2-1 断言依赖）：主查询（db.js:160-173，带 started_at 下界）SELECT 加
+    //   SUM(computed_total_tokens) AS total_tok，tokens 对象（:208-215）加
+    //   total: m.total_tok || 0。
+    // 分支 B（自行计算）：上述三处（:430/:554/:684，含 sessionChildren——漏改会使
+    //   会话子树与主列表口径不一致）全部改为
     //   (SELECT SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)
     //     +COALESCE(reasoning_tokens,0)+COALESCE(cache_creation_input_tokens,0))
     //    FROM model_usage m WHERE m.session_id = …) AS total_tokens
@@ -1197,7 +1219,7 @@ zcode-monitor-plan/
     ```
   - **`turn_usage` side call 缺口**：纯标注，不改数字——`sessionTurns`（`:443-462`）注释补 `// turn_usage 不含标题生成等 side call，总量为下界（出处见口径文档 §x）`，前端 Turns 表头加同义提示。
 
-  前端标注（A2-4）：`public/views/overview.js:105-107`（输入 token 卡）与 `:283`（速度卡总 token）的 `.delta` 行追加口径徽章：
+  前端标注（A2-4）：`public/views/overview.js:105-107`（输入 token 卡的 `.delta` 行）与 `:283`（速度表 footer 的总 token span：`<span><span class="lbl">总 token</span> <b>…</b></span>`，非 `.delta` 结构）追加口径徽章：
   ```js
   // overview.js renderKpis 内，输入 token 卡的 delta 行改为（徽章文案为固定二选一，
   // 按口径文档对该数字的映射填写，不做运行时条件）：
@@ -1262,7 +1284,9 @@ zcode-monitor-plan/
       assert.equal(k.model.calls, 3);       // 分支 A：官方口径全量计入、无重复计入
       // assert.equal(k.model.calls, 2);    // 分支 B：主口径排除子代理行
       // assert.equal(k.subagent_tokens, 600); // 分支 B 携带：子代理 token 单列保留可见性
-      // side call 标注为注释级交付（无数字变化），fixture 断言不涉及。
+      // side call 标注为注释级交付（无数字变化），fixture 断言不涉及——相对 Spec A2-1
+      // 字面（"turn_usage 缺 side call 的场景"入 fixture）是显式缩减，理由（纯标注无
+      // 数值差可断言）在 docs/caliber/token-caliber-v1.md 的【fixture 断言取值】段留痕。
     } finally { fx.cleanup(); }
   });
   ```
@@ -1282,7 +1306,12 @@ zcode-monitor-plan/
        ' AND started_at < ' + t1).get();
      console.log(JSON.stringify(r));"
      ```
-  3. 对账基准：首选 ccusage（其「已支持 ZCode 数据源」系上游调研结论、本会话未验证——调用命令以其当时文档为准、不预设 flag、如实照录）；不可用或不匹配时回退 zcode-token-usage-statusbar 的 JSON CLI 或纯 SQL 交叉核对。**基准替换本身记入对账记录。**
+  3. 对账基准按以下**显式降级链**依次尝试，命中即停（ccusage 主线「已支持 ZCode 数据源」系上游调研结论、本会话 web 检索未能在主线证实，仅见 fork——故主线失败时下一级是 fork 而非跳过）：
+     1. ccusage 主线（调用命令以其当时文档为准、不预设 flag、如实照录）；
+     2. better-ccusage 社区 fork（cobra91/better-ccusage，若检索证实其支持 ZCode 数据源）；
+     3. zcode-token-usage-statusbar 的 JSON CLI；
+     4. 纯 SQL 交叉核对（对同一窗口用第二条独立构造的 SQL 口径互查，如按 session 聚合 vs 按 turn 聚合）。
+     **基准替换本身记入对账记录。**
   4. 产出 `docs/acceptance/T4-caliber-reconciliation.md`：双方命令与原始输出、逐项差异、每条差异的原因分类与出处。**通过判据 = 全部差异均「已解释」（每条附官方源码/数据样本出处）；差异可以存在，未解释差异不行。**
 
 - [ ] **Step 5：A2-3 红线实测（真实库只读，EXPLAIN + 计时）**
@@ -1354,23 +1383,25 @@ zcode-monitor-plan/
 - [ ] **Step 0：数据源核实门（结论决定 `waiting_permission` 子项去留）**
 
   ```bash
-  # (a)(b) 真实库只读观察：permission 表行数 + tool_usage.approval_status 取值分布（带 started_at 下界）
+  # (a)(b) 真实库只读观察：permission 表规模 + tool_usage.approval_status 取值分布（带 started_at 下界）。
+  # permission 用 MAX(rowid) 有界取数（本会话实测 EXPLAIN：COUNT(*) 为 SCAN permission，
+  # 违反红线；MAX(rowid) 走 B-tree 尾页为 SEARCH permission）——0 行时返回 0，语义同"无行"。
   node -e "
   const Database = require('F:/project/zcode-monitor/node_modules/better-sqlite3');
   const db = new Database(process.env.USERPROFILE + '/.zcode/cli/db/db.sqlite', { readonly: true });
-  console.log('permission rows:', db.prepare('SELECT COUNT(*) AS n FROM permission').get());
+  console.log('permission max rowid（0 = 空表）:', db.prepare('SELECT IFNULL(MAX(rowid),0) AS n FROM permission').get());
   const since = Date.now() - 86400e3;
   console.log('approval_status 分布(24h):',
     JSON.stringify(db.prepare('SELECT approval_status, COUNT(*) AS n FROM tool_usage' +
       ' WHERE started_at >= ' + since + ' GROUP BY approval_status').all()));
   db.close();"
   ```
-  (a) 在真实使用中触发一次权限请求（如让 ZCode 执行一个需要批准的命令），随后重跑上面命令观察 `permission` 表是否出现新行、`approval_status` 是否出现非 `'none'` 取值（只读观察）；(b) 在 Step 1 克隆的 `$TMP/ZCode-src` 中 grep 落盘行为：`grep -rn "approval_status\|permission" "$TMP/ZCode-src" --include='*.ts' -l | head`。
-  **判定**：两类落点均被证实 → 权限事件接线进入 Step 2~4（事件类型 `'permission'` 已在状态机内）；**任一未证实（当前证据：permission 0 行、approval_status 尾部取值全 'none'）→ `waiting_permission` 接线子项降级 backlog**（显式部分交付），A4-1 / A4-7 的对应子项移除，error 态交付不受影响。结论（落点 + 记录形态 + fixture 样例行形态或降级理由）写入 `docs/acceptance/T5-permission-gate.md`。
+  (a) 在真实使用中触发一次权限请求（如让 ZCode 执行一个需要批准的命令）——**human-gate**（见「human-gate 清单」）：代理执行到此无法自然制造权限请求时，按标准格式在 `docs/acceptance/T5-permission-gate.md` 留痕「待人工触发」并以 (b) 与既有快照证据先出结论；随后重跑上面命令观察 max rowid 是否增长、`approval_status` 是否出现非 `'none'` 取值（只读观察）；(b) 在 T4 Step 1 克隆的 `$TMP/ZCode-src`（**若已被清理，按 T4 Step 1 同命令重克隆**）中 grep 落盘行为：`grep -rn "approval_status\|permission" "$TMP/ZCode-src" --include='*.ts' -l | head`。
+  **判定**：两类落点均被证实 → 权限事件接线进入 Step 2~4（事件类型 `'permission'` 已在状态机内）；**任一未证实（2026-09-22 快照证据：permission 表 max rowid 0（空表）、approval_status 尾部取值全 'none'）→ `waiting_permission` 接线子项降级 backlog**（显式部分交付），A4-1 / A4-7 的对应子项移除，error 态交付不受影响。结论（落点 + 记录形态 + fixture 样例行形态或降级理由）写入 `docs/acceptance/T5-permission-gate.md`。
 
 - [ ] **Step 1：error 事件源（livegen）**
 
-  `server/livegen.js` 的 `createGenWatcher` 内，`let lastSessions = 0;`（`:64`）之后加水位变量，`tick()` 的 try 块内（主查询之后、边检测之前）加：
+  `server/livegen.js` 的 `createGenWatcher` 内，`let lastSessions = 0;`（`:64`）之后加水位变量；插入点在 `tick()` 内、**try/catch 块结束之后**的赋值区（主查询 :85 在 :83-96 的 try 内，:98-100 为 `sessions`/`inflight`/`nowGenerating` 赋值）之后、边检测（`:106` 起 if 链）之前——不在 try 块内（try 块只含主查询，其后即 catch 的错误兜底路径）：
 
   ```js
   // 工具失败边：复用 recentToolRows（started_at 索引命中，db.js:664-673），
@@ -1535,10 +1566,19 @@ zcode-monitor-plan/
      ```
   7. 手势替换：删除 `if (IN_WEBVIEW)` 块内的 `dblclick` 监听（`:511-513`），在 `IN_WEBVIEW` 块**之后**（页面通用注册，浏览器直开同样可双击切换）加：
      ```js
-     // 双击优先、计数延后：窗口内累计点击，关闭时判定——2/3 击切换，≥4 击连击
-     let clickTimes = [], clickTimer = 0;
+     // 双击优先、计数延后：窗口内累计点击，关闭时判定——2/3 击切换，≥4 击连击。
+     // 拖动排除：壳内 pointerdown 即 postMessage drag（:505-508），松开仍会补发 click；
+     // down→up 间位移超阈值的序列不计入手势，否则连续两次快速拖动会被判为 switch 误切包。
+     let clickTimes = [], clickTimer = 0, downPt = null, dragMoved = false;
+     document.addEventListener('pointerdown', e => {
+       if (e.button === 0) { downPt = { x: e.clientX, y: e.clientY }; dragMoved = false; }
+     });
+     document.addEventListener('pointermove', e => {
+       if (downPt && (Math.abs(e.clientX - downPt.x) > 6 || Math.abs(e.clientY - downPt.y) > 6)) dragMoved = true;
+     });
      document.addEventListener('click', e => {
        if (e.button !== 0) return;
+       if (dragMoved) { dragMoved = false; return; } // 拖动后的 click 不计入手势
        clickTimes.push(performance.now());
        if (!clickTimer) clickTimer = setTimeout(() => {
          const action = classifyClicks(clickTimes, GESTURE_WINDOW_MS);
@@ -1548,7 +1588,7 @@ zcode-monitor-plan/
        }, GESTURE_WINDOW_MS);
      });
      ```
-     `:504-510,514-518` 的 pointerdown 拖动 / contextmenu / wheel `postMessage` 契约**保持不变**。
+     `:504-510,514-518` 的 pointerdown 拖动 / contextmenu / wheel `postMessage` 契约**保持不变**（上面的 pointerdown/pointermove 记录只读坐标、不发消息，与既有契约叠加不冲突）。
 
 - [ ] **Step 5：写 `tests/pet-state.test.js`（A4-1~4、A4-6）与 `tests/pet-sanitize.test.js`（A4-5）**
 
@@ -1653,7 +1693,7 @@ zcode-monitor-plan/
   ```bash
   cd "F:/project/zcode-monitor-plan" && npm test
   ```
-  A4-7：`npm start` 后浏览器打开 `/pet`，以及经 WebView2 壳（widget 常驻）各演示一轮：制造一次工具失败（如让 ZCode 读不存在文件）看 `failed` 行；静置超入睡阈值看 zzz；期间发起生成看惊醒；快速两击切换、四击连击、三击切换。互不误触记录截图入 `docs/acceptance/T5-behavior-e2e.md`（截图不入库）。
+  A4-7：`npm start` 后浏览器打开 `/pet`，以及经 WebView2 壳（widget 常驻）各演示一轮：制造一次工具失败（如让 ZCode 读不存在文件）看 `failed` 行；静置超入睡阈值看 zzz；期间发起生成看惊醒；快速两击切换、四击连击、三击切换；**拖动卡片一段距离后松开（不切包）、紧接着再快速拖动一次（仍不切包）**——验证拖动排除不与 click 手势互扰。互不误触记录截图入 `docs/acceptance/T5-behavior-e2e.md`（截图不入库；human-gate，见清单）。
   ```bash
   git -C "F:/project/zcode-monitor-plan" add public/pet-state.js public/pet-sanitize.js \
     public/pet.html server/livegen.js tests/pet-state.test.js tests/pet-sanitize.test.js docs/acceptance
@@ -1711,7 +1751,11 @@ zcode-monitor-plan/
       let stat;
       try { stat = fs.statSync(curFile); }
       catch { return; } // 当日文件尚不存在：等下次事件/对账
-      if (stat.size <= offset) return; // 无新字节（或截断回绕：按新内容重读由对账兜底）
+      if (stat.size < offset) { offset = 0; remainder = ''; } // 截断/回绕：按新文件从 0 重读
+                                                               // （对账定时器调的就是本 pump，走同一
+                                                               //  分支兜不了底；offset 不重置会让此后
+                                                               //  追加在 size 追回 offset 前全部不可见）
+      if (stat.size === offset) return; // 无新字节
       const chunkSize = stat.size - offset;
       const buf = Buffer.alloc(chunkSize);
       let fd;
@@ -1939,10 +1983,11 @@ zcode-monitor-plan/
 
   ```bash
   cd "F:/project/zcode-monitor-plan"
-  grep -rnE 'writeFile|appendFile|createWriteStream|open(Sync)?\([^)]*['\''"]((w|wx|a|ax)\+?|r\+|rs\+)' server/log-tail.js tests/
+  grep -rnE 'writeFile|appendFile|createWriteStream|open(Sync)?\([^)]*['\''"]((w|wx|a|ax)\+?|r\+|rs\+)' server/log-tail.js tools/log-latency-probe.js
   ```
-  期望：退出码 1（无匹配）。本会话已预验证：该 ERE 对现存 `server/log-tail.js` 退出码 1，`w/a/r+/wx/w+/a+/rs+/ax` 八种写打开形态全部命中、`r`/`rs` 不命中（grep 退出码 1 属预期——ERE 不支持前向查找，故枚举写打开模式而非排除 `r`）。
-  > 注意：`tailLog` 与 `createLogWatcher.pump` 内的 `fs.openSync(file, 'r')` 是只读打开，`'r'` 不在枚举内、不命中；动态写入面由 A0-3 的 tmpdir 注入守护兜底（测试永远指 fixture）。
+  期望：退出码 1（无匹配）。**范围相对 Spec A3-3 字面（`server/log-tail.js tests/`）收窄**：T1 起 `tests/` 合法含写 tmpdir fixture 的 `fs.writeFileSync`/`fs.appendFileSync`（fixture-jsonl.js、pet-import.test.js、log-tail.watch.test.js 等），纳入范围则本门禁恒为命中、退出码 0，与期望矛盾、不可执行——零写入承诺（Spec §4.2）的主体是服务端模块，测试的 tmpdir 写入由 A0-3 注入守护兜底（测试永远指 fixture）。该收窄理由随本 commit 留痕。
+  本会话已预验证：该 ERE 对现存 `server/log-tail.js` 退出码 1，`w/a/r+/wx/w+/a+/rs+/ax` 八种写打开形态全部命中、`r`/`rs` 不命中（grep 退出码 1 属预期——ERE 不支持前向查找，故枚举写打开模式而非排除 `r`）；修订会话复测确认 `fs.writeFileSync(p, x)`/`fs.appendFileSync(f, l)` 均命中（count=2、exit=0），坐实 `tests/` 不可纳入。
+  > 注意：`tailLog` 与 `createLogWatcher.pump` 内的 `fs.openSync(file, 'r')` 是只读打开，`'r'` 不在枚举内、不命中；探针 `tools/log-latency-probe.js` 全程只 stat/read。
   然后 `npm test` 全绿 + 服务冒烟，提交：
   ```bash
   git -C "F:/project/zcode-monitor-plan" add server/log-tail.js tools/log-latency-probe.js \
@@ -2002,4 +2047,4 @@ zcode-monitor-plan/
 1. **Spec 覆盖**：WP0→T1（A0-1~7 全映射）；WP1→T2（A1-1~9；需求 5 的 gitignore、需求 2 的 webp-size exports、需求 8 的端点滥用面对策均有对应步骤）；WP5→T3（三要素 + 负面清单 + 三 grep）；WP2→T4（核实门、A2-1~5、出路条款、对照表）；WP4→T5（核实门、A4-1~7、消毒模块只交付不改默认展示、9 行契约守护）；WP3-lite→T6（watch/兜底/对账、A3-1~5、降级路径）。backlog（BP1/BP2）与全部「明确不做」项未排任务，符合 Spec §3/§6。
 2. **占位符扫描**：A1-1 webp 字节、A3-3 grep、A5-3 关键词、门禁冒烟命令均为可执行字面量；本会话实测过的构造（30 字节 webp 头解析 OK、grep 退出码 1、真实库索引清单、staging 形态）已逐条写入。T4 Step 2/3 与 T5 Step 0 的「两分支择一」是核实门结论的机械选择，两套代码均完整给出；依赖核实结论的具体数值（口径断言取值）不允许在本计划里凭空预写，已显式标注「以口径文档为准、勿凭记忆」——这是诚实条款下的已知限制，不是待填占位符。
 3. **类型一致性**：`importPetPack({sourceDir,targetRoot,id,source,license})`、`listPetPacks(root)`、`importEndpointMiddleware({petsRoot})` 在 T2 的模块/CLI/端点/测试四处一致；`createLogWatcher({onEvents,reconcileMs,pollMs,todayFile})` 在 T6 模块/测试/探针一致；`initState/onEvent/classifyClicks` 签名在 pet-state 定义、pet.html 消费、pet-state.test 断言三处一致；`createFixtureDb()` 返回形状在门禁冒烟与各测试一致。
-4. **事实勘误（相对 Spec 的两处以实测为准的修正）**：① 精选包目录名为 `xinlian`（Spec §1 写作 `xilian`，本会话 `ls public/pets` 实测为 `xinlian`）——白名单与文档均以实测为准；② staging 实测为 12 个包目录 + 8 个含 pet.json（Spec 记 14/8，staging 为本地暂存区、内容随时间变化，Spec 本身声明不硬编码其数量）。
+4. **事实勘误（相对 Spec 的以实测为准的核对，2026-09-22 修订会话复核）**：① 精选包目录名为 `xilian`（Spec §1 正确；本计划初稿白名单误写 `xinlian` 且自称"实测为 xinlian"，方向写反——修订会话双仓实测：worktree 与主仓库 `ls public/pets` 均为 `xilian`、`git ls-files` 含 3 个 `xilian/` 跟踪文件、0 个 `xinlian`，已更正白名单为 `!public/pets/xilian/`；沙盒模拟实测：白名单写 `xinlian` 时 `xilian/` 内新增未跟踪文件会被 `public/pets/*` 命中忽略，写 `xilian` 后不忽略）；② staging 本修订会话实测为 14 个包目录 + 8 个含 pet.json（初稿记 12/8 有误；Spec 记 14/8 与现值吻合，staging 为本地暂存区、内容随时间变化，Spec 本身声明不硬编码其数量）。
