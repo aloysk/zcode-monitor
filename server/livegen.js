@@ -26,12 +26,20 @@
 //     is being driven; 90s of silence means nothing is writing it anymore.
 //
 // Tool-failure edges (T5): the same tick also watermark-scans the newest
-// tool_usage rows (recentToolRows hits the tool_usage_started_tool_idx —
-// real-DB EXPLAIN: SEARCH ... (started_at>?), no table scan) and emits
-// phase:'tool_error' for rows with status='error'. Consumers: the gen SSE
-// (/api/gen/events forwards any emitter event verbatim) drives the desktop
-// pet's failed animation; state() carries lastToolError for pollers. Boot
-// watermark = MAX(started_at), so historical errors are never replayed.
+// tool_usage rows and emits phase:'tool_error' for rows with status='error'.
+// The watermark is rowid (recentToolRowsAfterRowid — O(log n) rowid tail seek,
+// one of the two query shapes the perf red line allows), not started_at: a
+// single-key started_at watermark permanently skips same-millisecond rows that
+// land after a LIMIT truncation point, and a boot watermark of MAX(started_at)
+// never fires for rows that started before boot but were written after it.
+// rowid is monotonic for appends, so both gaps disappear (>LIMIT remainder is
+// resumed next tick; late-written old rows carry larger rowids). Consumers:
+// the gen SSE (/api/gen/events forwards any emitter event verbatim) drives
+// the desktop pet's failed animation; state() carries lastToolError for
+// pollers. Boot watermark = MAX(rowid), so historical errors are never
+// replayed; if that boot lookup fails the watermark stays unresolved and the
+// first successful tick anchors it — a broken boot must never replay old
+// errors, and future errors stay visible once the DB recovers.
 const EventEmitter = require('events');
 
 const POLL_MS = 1000;
@@ -70,12 +78,13 @@ function createGenWatcher(dbq, { pollMs = POLL_MS } = {}) {
   let sessions = 0;       // distinct sessions currently in flight
   let inflight = 0;       // in-flight assistant rows (≥ sessions)
   let lastSessions = 0;   // last value emitted to consumers (lane-change memory)
-  // tool-error watermark: newest tool_usage.started_at already inspected
-  // (epoch ms, same unit as the ts()-mapped rows once Date.parse'd). MAX at
-  // boot = no historical replay; on failure fall back to "now" so a broken
-  // boot can never replay old errors (watermark 0 would rescan from ASC head).
-  let lastErrStartedAt = (() => {
-    try { return dbq.latestToolStartedAt(); } catch { return Date.now(); }
+  // tool-error watermark: newest tool_usage rowid already inspected. MAX at
+  // boot = no historical replay; on boot failure the watermark stays null and
+  // the next successful tick anchors it (falling back to 0 would rescan from
+  // the ASC head; falling back to a huge sentinel would blind the scan even
+  // after the DB recovers — null keeps both properties).
+  let lastErrRowid = (() => {
+    try { return dbq.latestToolRowid(); } catch { return null; }
   })();
   let lastToolError = null; // { tool, at } — newest observed failure, for state()
   let stopped = false;
@@ -115,23 +124,25 @@ function createGenWatcher(dbq, { pollMs = POLL_MS } = {}) {
     inflight = row.inflight || 0;
     const nowGenerating = inflight > 0;
 
-    // Tool-failure edge scan: same started_at watermark + ASC LIMIT pattern as
-    // routes/live.js. Strictly-increasing watermark means several failures in
-    // the SAME millisecond collapse into one — a best-effort visual signal,
-    // accepted truncation (comment kept per plan). The scan sits outside the
-    // main query's try/catch, so it carries its own guard: a busy/damaged DB
-    // must skip the tick, not crash the poll interval (watermark untouched →
-    // the rows are simply retried next tick).
+    // Tool-failure edge scan: rowid watermark + ASC LIMIT. Strictly-increasing
+    // rowid watermark means several failures in the SAME millisecond still all
+    // get their own event (the old started_at watermark collapsed them into
+    // one). A >LIMIT backlog resumes on the next tick instead of being lost.
+    // The scan sits outside the main query's try/catch, so it carries its own
+    // guard: a busy/damaged DB must skip the tick, not crash the poll interval
+    // (watermark untouched → the rows are simply retried next tick).
     try {
-      for (const r of dbq.recentToolRows(lastErrStartedAt, 50)) {
-        const t = Date.parse(r.started_at);
-        if (!(t > lastErrStartedAt)) continue; // null/NaN started_at: skip, keep watermark
-        if (r.status === 'error') {
-          lastToolError = { tool: r.tool_name, at: Date.now() };
-          emitter.emit('gen', { phase: 'tool_error', tool: r.tool_name,
-            session: r.session_id, at: Date.now() });
+      if (lastErrRowid == null) {
+        lastErrRowid = dbq.latestToolRowid(); // boot 失败的兜底：首个成功 tick 再锚定
+      } else {
+        for (const r of dbq.recentToolRowsAfterRowid(lastErrRowid, 50)) {
+          if (r.status === 'error') {
+            lastToolError = { tool: r.tool_name, at: Date.now() };
+            emitter.emit('gen', { phase: 'tool_error', tool: r.tool_name,
+              session: r.session_id, at: Date.now() });
+          }
+          lastErrRowid = r.rid;
         }
-        lastErrStartedAt = t;
       }
     } catch (e) {
       if (Date.now() - lastErrorLogAt >= ERROR_LOG_INTERVAL_MS) {

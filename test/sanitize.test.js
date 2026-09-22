@@ -7,8 +7,9 @@ const path = require('path');
 const { sanitizeSpeech } = require(path.join(__dirname, '..', 'public', 'sanitize.js'));
 
 test('A4-5: 绝对路径·Windows 盘符（反斜杠与正斜杠两种形态）', () => {
-  const out = sanitizeSpeech('看 C:\\Users\\18086\\secret.txt 和 C:/logs/run.log 的结果');
-  assert.equal(out.indexOf('C:\\Users\\18086\\secret.txt'), -1);
+  // 夹具用中性用户名：仓库公开时不把本机账号名带入版本历史
+  const out = sanitizeSpeech('看 C:\\Users\\demo\\secret.txt 和 C:/logs/run.log 的结果');
+  assert.equal(out.indexOf('C:\\Users\\demo\\secret.txt'), -1);
   assert.equal(out.indexOf('C:/logs/run.log'), -1);
   assert.equal(out, '看 [本地路径] 和 [本地路径] 的结果');
 });
@@ -61,6 +62,18 @@ test('A4-5: 密钥样式·长 base64（≥40 位，含 padding 尾）', () => {
   assert.ok(out.includes('[密钥]'));
 });
 
+test('A4-5: 密钥样式·长 base64 以 + / 开头时起点不残留（lookbehind 而非 \\b）', () => {
+  // + 开头的 token 前没有词边界（非词字符）：\b 起点锚会失配、首字符残留。
+  // 用非 hex 字母（Z/z）：先行执行的 hex 规则（/i）会把 A-F 段先收敛成
+  // [密钥]，那属于 hex 规则的正常优先级而非本规则的行为。
+  const token = '+' + 'Z'.repeat(40);
+  const out = sanitizeSpeech('凭证 ' + token + ' 已带');
+  assert.equal(out.indexOf(token), -1, '+ 开头的 base64 样串必须整体脱敏');
+  assert.equal(out, '凭证 [密钥] 已带');
+  const token2 = '/' + 'z'.repeat(41);
+  assert.equal(sanitizeSpeech('密钥 ' + token2 + ' 收'), '密钥 [密钥] 收');
+});
+
 test('A4-5: Bearer 凭证头整体收敛', () => {
   const out = sanitizeSpeech('Authorization: Bearer abc123.XYZ_~def 已带上');
   assert.equal(out.indexOf('Bearer abc123.XYZ_~def'), -1);
@@ -87,7 +100,7 @@ test('A4-5: 混合敏感样式的整句一次消毒', () => {
   const raw = '检查 C:\\tmp\\a.log，curl https://api.example.com/v1?k=1 失败：' +
     'key=sk-abcdefghijklmnopqrstuvwxyz，trace 4f2a9b1c8d3e7f6045a2b8c1d9e0f3a4';
   const out = sanitizeSpeech(raw);
-  for (const frag of ['C:\\tmp\\a.log', 'https://api.example.com/v1?k=1', 'k=1', 'k=1',
+  for (const frag of ['C:\\tmp\\a.log', 'https://api.example.com/v1?k=1', 'k=1',
                       'sk-abcdefghijklmnopqrstuvwxyz', '4f2a9b1c8d3e7f6045a2b8c1d9e0f3a4']) {
     assert.equal(out.indexOf(frag), -1, frag);
   }

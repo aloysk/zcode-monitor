@@ -47,7 +47,7 @@
     <span class="privacy-notice-tag">隐私提示</span>
     <span class="privacy-notice-text">
       有第三方报告称 ZCode 可能会在后台上传工作区快照（涉及 <code>~/.zcode/v2/checkpoints/</code>）。
-      该说法<strong>未经我们验证</strong>；本工具对 <code>~/.zcode/</code> 全程只读，不会上传任何数据。
+      该说法<strong>未经我们验证</strong>；本工具监控读路径全程只读，不会上传任何数据。checkpoint 功能在 ZCode 退出后折叠 WAL（不改动数据内容）。
       自查（只读列目录，PowerShell）：<code>Get-ChildItem "$env:USERPROFILE\.zcode\v2\checkpoints"</code>，来源汇总见 README「隐私提示」。
     </span>
     <button class="privacy-notice-close" id="privacy-notice-close" type="button" title="不再显示" aria-label="关闭隐私提示">×</button>

@@ -15,10 +15,13 @@
 // 3) 孙进程的测试输出走本进程 stdout，会被 --test 父进程的 reporter
 //    吞掉；stderr 能透传，故失败明细打到 stderr 供门禁日志定位。
 //
-// run() 仍按每文件独立子进程执行（与 `npm test` = node --test
-// test/*.test.js 同一隔离机制，不合并进程）：db-smoke.test.js 依赖
-// require 时注入 env 且 server/db.js 模块级缓存连接，跨文件共用进程会
-// 互相污染。npm test 的 glob 不匹配 index.js，两种入口不会叠加执行。
+// run() 仍按每文件独立子进程执行（与直接列 *.test.js 同一隔离机制，不合并
+// 进程）：db-smoke.test.js 依赖 require 时注入 env 且 server/db.js 模块级缓存
+// 连接，跨文件共用进程会互相污染。npm test 现为 `node --test test/index.js`
+//（显式文件入参，各 Node 版本语义一致）：package.json 原先的 test/*.test.js
+// 依赖测试运行器内建 glob 展开（Node ≥21/22）或 shell 通配（Windows cmd 不
+// 展开），engines 声明的 Node 18/20 上会失败；显式文件在所有版本都成立，且
+// run() 的 per-file 子进程隔离不变。
 const { run } = require('node:test');
 const fs = require('fs');
 const path = require('path');

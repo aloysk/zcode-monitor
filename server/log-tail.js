@@ -111,6 +111,8 @@ function buildSpanForest(events) {
 // 30ms 防抖合并后立即增量读取；watch 报错（ENOENT/EPERM/EMFILE/重命名风暴
 // 挤掉句柄）→ 关闭监听、降级 pollMs 短轮询并只告警一次；reconcile 周期对账
 // 定时器恒在——偏移读幂等，watch 静默漏事件由它补齐（最终一致）。
+// 单次 pump 设同步读上限（MAX_PUMP_BYTES）：大块增量（挂起恢复/长滞后）分片
+// 追平，片间 setImmediate 让出事件循环，偏移守恒不变。
 // 全程只读：只 stat / open('r')，绝不写入。EMFILE 防护靠"单一目录句柄"
 // （永不逐文件建 watch），防抖合并令重命名风暴不会放大为读放大。
 //
@@ -131,10 +133,21 @@ function defaultTodayFile() {
   return todayLogFile(new Date());
 }
 
+// 单次 pump 的同步读上限：进程挂起恢复/事件循环长停滞后，一次性读入的增量可达
+// 数百 MB（真实日志 ~295MB/日）——整段 Buffer.alloc + 同步 split/parse 正是
+// livegen.js 注释里定义为红线的事件循环冻结形态。设上限后单次只同步处理一小块，
+// 未追平的部分经 setImmediate 让出事件循环后继续追平（偏移守恒不变：不丢不重）。
+const MAX_PUMP_BYTES = 8 * 1024 * 1024;
+// 残行字节上限：超过它只可能是损坏/超长行（正常 JSONL 行远小于此），丢弃并告警，
+// 防止无 \n 的异常流让 remainder 无界增长。（独立于可注入的 maxBytesPerPump，
+// 测试用小上限时不会误伤比它长的正常行。）
+const REMAINDER_MAX_BYTES = 16 * 1024 * 1024;
+
 function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
-                            todayFile = defaultTodayFile } = {}) {
+                            todayFile = defaultTodayFile,
+                            maxBytesPerPump = MAX_PUMP_BYTES } = {}) {
   if (typeof onEvents !== 'function') throw new TypeError('onEvents required');
-  let curFile = null, offset = 0, remainder = '';
+  let curFile = null, offset = 0, remainder = Buffer.alloc(0);
   let watcher = null, reconcileTimer = 0, pollTimer = 0, stopped = false;
   let pending = 0;
   let degradedWarned = false;
@@ -152,7 +165,7 @@ function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
     try { file = todayFile(); } catch { return; }
     if (file !== curFile) {
       const isFirst = curFile === null;
-      curFile = file; offset = 0; remainder = ''; // 日切换（换名）→ 新文件从偏移 0 起读
+      curFile = file; offset = 0; remainder = Buffer.alloc(0); // 日切换（换名）→ 新文件从偏移 0 起读
       if (isFirst) { // 起点对账：已存在的当日文件从尾部开始，不回放历史
         try { offset = fs.statSync(curFile).size; } catch { /* 文件未生成，等下次 */ }
         return;
@@ -161,25 +174,40 @@ function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
     let stat;
     try { stat = fs.statSync(curFile); }
     catch { return; } // 当日文件尚不存在：等下次事件/对账
-    if (stat.size < offset) { offset = 0; remainder = ''; } // 截断/回绕：按新文件从 0 重读
-                                                             // （对账定时器调的就是本 pump，走同一
-                                                             //  分支兜不了底；offset 不重置会让此后
-                                                             //  追加在 size 追回 offset 前全部不可见）
+    if (stat.size < offset) { offset = 0; remainder = Buffer.alloc(0); } // 截断/回绕：按新文件从 0 重读
+                                                                         // （对账定时器调的就是本 pump，走同一
+                                                                         //  分支兜不了底；offset 不重置会让此后
+                                                                         //  追加在 size 追回 offset 前全部不可见）
     if (stat.size === offset) return; // 无新字节
-    const chunkSize = stat.size - offset;
-    const buf = Buffer.alloc(chunkSize);
+    const readSize = Math.min(stat.size - offset, maxBytesPerPump);
+    const buf = Buffer.alloc(readSize);
     let fd;
     try {
       fd = fs.openSync(curFile, 'r');
-      fs.readSync(fd, buf, 0, chunkSize, offset);
+      fs.readSync(fd, buf, 0, readSize, offset);
     } catch { return; }
     finally { try { if (fd != null) fs.closeSync(fd); } catch { /* ignore */ } }
-    offset = stat.size;
-    const text = remainder + buf.toString('utf8');
-    const lines = text.split('\n');
-    remainder = lines.pop() ?? ''; // 尾部残行留到下次拼接
-    const events = lines.map(parseLine).filter(Boolean);
-    if (events.length) onEvents(events);
+    offset += readSize;
+    // 残行按原始字节保存，只在完整行（以 \n 收尾的前缀）上做 utf8 解码：若某次
+    // 读取落在多字节 UTF-8 序列中间，两段各自解码会产生 U+FFFD，该行 JSON 解析
+    // 失败被静默丢弃且 offset 已前移、无法补读。\n 是 ASCII 字节、不出现在任何
+    // UTF-8 多字节序列内部，故 [0, nl] 前缀必为完整字节序列。
+    const chunk = remainder.length ? Buffer.concat([remainder, buf]) : buf;
+    const nl = chunk.lastIndexOf(0x0A);
+    if (nl === -1) {
+      remainder = chunk;
+      if (remainder.length > REMAINDER_MAX_BYTES) {
+        console.warn(`[log-tail] 丢弃 ${remainder.length} 字节残行（超残行上限，疑似损坏流）`);
+        remainder = Buffer.alloc(0);
+      }
+    } else {
+      remainder = chunk.subarray(nl + 1);
+      const lines = chunk.toString('utf8', 0, nl + 1).split('\n');
+      lines.pop(); // 最后一个 \n 之后的空串
+      const events = lines.map(parseLine).filter(Boolean);
+      if (events.length) onEvents(events);
+    }
+    if (offset < stat.size && !stopped) setImmediate(pump); // 未追平：让出事件循环后继续
   }
 
   function schedulePump() {

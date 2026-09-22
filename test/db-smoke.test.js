@@ -72,7 +72,44 @@ test('冒烟: 23 个查询函数在 fixture 上全部跑通且抽查结构正确
   assert.equal(out.sessionReasoning.length, 1);
   assert.equal(out.errorsList.model.length, 1);
   assert.equal(out.errorsList.model[0].error_message, 'boom');
-  assert.equal(out.completedSince.length, 2); // id1+id2 完成时间均在 1h 窗口内；id3 是 error
+  assert.equal(out.completedSince.length, 3, 'id1+id2+id4 的完成时间均在 1h 窗口内；id3 是 error');
+  // completedSince 的 2h pad 预过滤等价性（db.js 关键优化）的数值级守护：
+  // id4 开始于一小时窗前 90min、完成于窗内 50min——pad 被收紧为 0（预过滤
+  // 退化为 started_at >= since）时该行会被漏掉，此处即红。
+  assert.ok(out.completedSince.some(r => r.id === 4),
+    '「开始于窗前、完成于窗内」的载荷行必须计入（2h pad 预过滤等价性）');
+  // overviewSpeed 数值口径：started_at >= since 过滤下 id4 不参与（90min 前开始），
+  // 分子 = 200 + (100+50) = 350，分母 = (10000+8000)/1000 = 18s → 350/18 = 19.4
+  assert.equal(out.overviewSpeed.weighted_tps, 19.4);
+  assert.equal(out.overviewSpeed.total_tokens, 350);
+  assert.equal(out.overviewSpeed.request_count, 2);
   assert.equal(out.agentsForest.roots.length, 1); // s1 为根
   assert.equal(out.agentsForest.total, 2); // s1 + s2
+});
+
+test('回退: 缺 model_usage_started_model_idx 的库 overviewKpis 不抛 500（回退慢查询）', () => {
+  // 可写连接临时 DROP 官方索引，模拟旧版 ZCode / 外部 ZCODE_DB 的 schema。
+  // invalidateDb 只清引用不关旧句柄（为连接损伤设计）；Windows 上句柄未关时
+  // cleanup 的 rmSync 会 EPERM，故每次换连接前先显式 close。
+  const closeAndInvalidate = () => {
+    try { dbq.db().close(); } catch { /* already closed */ }
+    dbq.invalidateDb();
+  };
+  const Database = require('better-sqlite3');
+  const w = new Database(fx.dbPath);
+  try {
+    w.exec('DROP INDEX model_usage_started_model_idx');
+    closeAndInvalidate(); // 复位 sqlite_master 探测记忆，强制重查
+    const kpis = dbq.overviewKpis(Date.now() - 3600e3);
+    assert.equal(kpis.active_sessions, 2); // s1 + s2（回退查询结果不变）
+    assert.equal(kpis.model.calls, 3);     // id1/2/3 在 1h 窗内；id4 开始窗前
+  } finally {
+    try {
+      w.exec('CREATE INDEX IF NOT EXISTS model_usage_started_model_idx ' +
+             'ON model_usage(started_at, provider_id, model_id)');
+    } finally {
+      w.close();
+      closeAndInvalidate();
+    }
+  }
 });

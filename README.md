@@ -147,7 +147,7 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
 
 目录存在与否都属于正常的自查结果：目录存在仅说明本机生成了快照数据，不足以据此推断云端行为。
 
-无论自查结果如何，本工具（zcode-monitor）对 `~/.zcode/` 全程只读，不会写入或改动任何 ZCode 数据。
+监控读路径对 `~/.zcode/` 全程只读。唯一例外是 WAL checkpoint 功能（ZCode 退出后自动折叠，或经 `/api/checkpoint` 手动触发）：它以短时可写连接执行 `wal_checkpoint(TRUNCATE)`，只把 WAL 日志折叠进主库、清空 `-wal` 文件，不改变任何数据行内容。
 
 ## 故障排查
 

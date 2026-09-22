@@ -117,6 +117,14 @@ function createFixtureDb() {
           cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
           tool_call_count: 0, computed_total_tokens: 10,
           error_type: 'api_error', error_code: '500', error_message: 'boom' },
+        { // completedSince 的 2h pad 预过滤载荷行：开始于 1h 窗前 90min、完成于
+          // 窗内 50min（duration 40min）——pad 被收紧为 0 时该行会被漏掉
+          id: 4, session_id: 's1', turn_id: 't4', trace_id: 'tr4', status: 'completed',
+          started_at: now - 5400e3, completed_at: now - 3000e3, duration_ms: 2400e3,
+          query_source: 'main_turn', model_id: 'glm-5', provider_id: 'zai',
+          input_tokens: 800, output_tokens: 300, reasoning_tokens: 20,
+          cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+          tool_call_count: 1, computed_total_tokens: 1120 },
       ]);
       buildToolUsage(conn, [
         { id: 1, session_id: 's1', turn_id: 't1', trace_id: 'tr1', tool_call_id: 'c1',

@@ -161,6 +161,66 @@ test('目录穿越防护：resolveStagingSource 拒绝路径形态，放行裸�
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test('junction 逃逸防护：staging 内链接条目被拒，包外内容绝不落 web 服务目录', () => {
+  const root = tmp('junc');
+  try {
+    const staging = path.join(root, 'staging');
+    fs.mkdirSync(staging, { recursive: true });
+    // 合规包放在 staging 外，staging/link-j junction 指过去
+    const outsidePack = path.join(root, 'outside-pack');
+    fs.renameSync(makePack(root, {}), outsidePack);
+    fs.symlinkSync(outsidePack, path.join(staging, 'link-j'), 'junction');
+    // 端点入口：真实路径包含复核在 stat/cpSync 跟随链接之前拒绝
+    assert.throws(() => resolveStagingSource('link-j', staging),
+      e => e instanceof PetImportError && e.code === 'OUTSIDE_STAGING');
+    // CLI 直路径形态：源树审计拒绝链接根
+    assert.throws(() => importPetPack({
+      sourceDir: path.join(staging, 'link-j'), targetRoot: path.join(root, 'pets'),
+    }), e => e instanceof PetImportError && e.code === 'SOURCE_SYMLINK');
+    // 落位目录根本不该被创建（零残留）
+    assert.equal(fs.existsSync(path.join(root, 'pets')), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('junction 逃逸防护：包目录树内的嵌套链接条目被拒', () => {
+  const root = tmp('junc2');
+  try {
+    const src = makePack(root, {});
+    const outside = path.join(root, 'outside');
+    fs.mkdirSync(outside);
+    fs.symlinkSync(outside, path.join(src, 'extra'), 'junction');
+    assert.throws(() => importPetPack({ sourceDir: src, targetRoot: path.join(root, 'pets') }),
+      e => e instanceof PetImportError && e.code === 'SOURCE_SYMLINK');
+    assert.equal(fs.existsSync(path.join(root, 'pets')), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('导入端点：非回环 Host（DNS rebinding 形态）403，回环 Host 过闸进入后续校验', () => {
+  const staging = fs.mkdtempSync(path.join(os.tmpdir(), 'zcmon-host-'));
+  try {
+    const mw = importEndpointMiddleware({
+      petsRoot: path.join(staging, 'unused-pets'), stagingRoot: staging,
+    });
+    const call = (hostHeader) => {
+      const hits = [];
+      const req = { get: h => (h.toLowerCase() === 'x-zcode-monitor-import' ? '1' : hostHeader) };
+      const res = {
+        status(c) { hits.push(['status', c]); return this; },
+        json(b) { hits.push(['error', b.error]); return this; },
+      };
+      mw(req, res);
+      return hits;
+    };
+    // rebinding 下恶意页与 127.0.0.1「同源」可携带自定义首部，但 Host 头仍是攻击者域名
+    assert.deepEqual(call('evil.example:7331'), [['status', 403], ['error', 'forbidden']]);
+    assert.deepEqual(call('[::1]:7331'), [['status', 400], ['error', 'SOURCE_MISSING']],
+      '回环 IPv6 Host 应过闸（进入 source 校验）');
+    // 过闸后进入 source 校验（空 staging → SOURCE_MISSING），证明闸在 source 之前且已放行
+    assert.deepEqual(call('127.0.0.1:7331'), [['status', 400], ['error', 'SOURCE_MISSING']]);
+    assert.deepEqual(call('localhost:7331'), [['status', 400], ['error', 'SOURCE_MISSING']]);
+  } finally { fs.rmSync(staging, { recursive: true, force: true }); }
+});
+
 test('spritesheetPath 指向包外被拒（SHEET_MISSING，不读包外文件）', () => {
   const root = tmp('esc');
   try {
@@ -186,6 +246,20 @@ test('spritesheetPath 为非固定名时，导入产物补一份 spritesheet.web
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test('spritesheet_path（snake_case 键名）选路同样生效并补固定名', () => {
+  const root = tmp('alias2');
+  try {
+    const src = makePack(root, { webp: null });
+    fs.writeFileSync(path.join(src, 'pet.json'),
+      JSON.stringify({ id: 'snake-pack', displayName: '蛇形', spritesheet_path: 'sheet.webp' }));
+    fs.writeFileSync(path.join(src, 'sheet.webp'), vp8xSheet(LEGAL.w, LEGAL.h));
+    const r = importPetPack({ sourceDir: src, targetRoot: path.join(root, 'pets') });
+    assert.equal(r.ok, true);
+    assert.equal(fs.existsSync(path.join(r.dir, 'sheet.webp')), true);
+    assert.equal(fs.existsSync(path.join(r.dir, 'spritesheet.webp')), true);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('buildNotice：来源包自带 NOTICE 原样保留在分隔线之后', () => {
   const text = buildNotice({
     id: 'p', name: 'P', source: 'u', author: 'a', license: 'l',
@@ -197,11 +271,17 @@ test('buildNotice：来源包自带 NOTICE 原样保留在分隔线之后', () =
   assert.ok(!noOrig.includes('---'));
 });
 
-test('A1-6 回归：现仓库 10 包发现结果与排序不变', () => {
+test('A1-6 回归：精选包可发现、order 前置两名恒定、其余按序性质稳定（数量随内容增删）', () => {
   const packs = listPetPacks(path.join(REPO, 'public', 'pets'));
-  assert.equal(packs.length, 10);
+  assert.ok(packs.length >= 2, '至少发现两个精选包');
+  // 回归守护的实质是 order 前置（pet-import.js listPetPacks 的注释契约）：
+  // 数量硬编码会随图鉴内容增删假红（roster 已变过一次）
   assert.equal(packs[0].id, 'yuexinmiao');
   assert.equal(packs[1].id, 'maid-deepseek-whale');
+  // 前置之后按首字符码兜底排序的相对顺序稳定
+  const rest = packs.slice(2).map(p => p.id);
+  assert.deepEqual(rest,
+    [...rest].sort((a, b) => (90 + a.charCodeAt(0)) - (90 + b.charCodeAt(0))));
   for (const p of packs) {
     assert.equal(typeof p.name, 'string');
     assert.equal(p.sheet, '/pets/' + p.id + '/spritesheet.webp');

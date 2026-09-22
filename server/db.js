@@ -198,9 +198,19 @@ function overviewKpis(sinceMs) {
   // INDEXED BY 强制走 started_at 索引：缺省计划会全索引扫 session_turn_idx 求
   // DISTINCT（真实库实测 1.9s/次，事件循环饿死风险）；强制后 SEARCH started_at
   // 范围 + 小集合去重，结果一致（510=510）、50ms（docs/usage-accounting.md §红线实测）。
-  const sessions = db().prepare(`
+  // 该索引名来自官方 migration 0010：缺它的库（旧版 ZCode、外部 ZCODE_DB）会抛
+  // "no such index"，错误中间件不匹配 SQLITE_ERROR → Overview 整页 500。故先查
+  // sqlite_master，缺失时回退不加 INDEXED BY 的原查询（慢但可用）；结果按连接
+  // 记忆（连接被 invalidateDb 换掉后自然重查）。
+  const conn = db();
+  if (conn._hasStartedModelIdx === undefined) {
+    conn._hasStartedModelIdx = !!conn.prepare(
+      `SELECT 1 FROM sqlite_master WHERE type='index' AND name='model_usage_started_model_idx'`
+    ).get();
+  }
+  const sessions = conn.prepare(`
     SELECT COUNT(DISTINCT session_id) AS active_sessions
-    FROM model_usage INDEXED BY model_usage_started_model_idx
+    FROM model_usage ${conn._hasStartedModelIdx ? 'INDEXED BY model_usage_started_model_idx' : ''}
     WHERE started_at >= @since
   `).get({ since: sinceMs });
 
@@ -720,6 +730,28 @@ function recentToolRows(afterStartedAt, limit = 50) {
   `).all(afterStartedAt, limit).map(r => ({ ...r, started_at: ts(r.started_at) }));
 }
 
+// livegen 工具失败扫描专用：水位是 rowid 而非 started_at。started_at 单键水位
+// 有两个盲区——同毫秒批量新行超过 LIMIT 时截断点之后的同毫秒行被 WHERE
+// started_at > 水位永久跳过；boot 取 MAX(started_at) 后，启动前开始、启动后才
+// 落库的行也永不发射。rowid（id INTEGER PRIMARY KEY 的别名，追加行恒单调）作
+// 水位后两个盲区同时消失：>LIMIT 的余量下一 tick 续扫，晚落库的旧行 rowid 更大
+// 照常发射。rowid > ? 命中隐式行 id 的 O(log n) 尾界寻址（性能红线允许的两条
+// 路径之一），不碰 started_at 索引、绝不全表扫。返回原始 epoch ms 的 started_at
+//（本查询的唯一消费者 livegen 做数值比较，无需 ISO 化）。
+function recentToolRowsAfterRowid(afterRowid, limit = 50) {
+  return db().prepare(`
+    SELECT rowid AS rid, id, session_id, tool_name, status
+    FROM tool_usage
+    WHERE rowid > ?
+    ORDER BY rowid ASC
+    LIMIT ?
+  `).all(afterRowid, limit);
+}
+
+function latestToolRowid() {
+  return db().prepare('SELECT MAX(rowid) AS m FROM tool_usage').get().m || 0;
+}
+
 // ───────────────────────── Agents tree ─────────────────────────
 // Build a forest of sessions rooted at interactive/main sessions, with their
 // subagent children (parent_id chain) underneath.
@@ -765,5 +797,6 @@ module.exports = {
   sessionActivity, sessionChildren, sessionReasoning,
   errorsList, errorSummary, slowTools,
   recentModelRows, recentToolRows, latestModelStartedAt, latestToolStartedAt,
+  recentToolRowsAfterRowid, latestToolRowid,
   agentsForest,
 };

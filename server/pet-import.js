@@ -37,7 +37,9 @@ function readPetJson(sourceDir) {
   return raw && typeof raw === 'object' ? raw : {};
 }
 
-// spritesheet 尺寸读取 + 布局契约校验。相对路径强制留在包目录之内（防穿越）。
+// spritesheet 尺寸读取 + 布局契约校验。相对路径强制留在包目录之内（防穿越）：
+// 词法包含复核之后再用 fs.realpathSync 双向比对真实路径——指向包外的符号链接
+// 在词法视角完全合法，只有真实路径包含复核对它成立。
 function checkSheet(sourceDir, pet) {
   const rel = pet.spritesheetPath || pet.spritesheet_path || 'spritesheet.webp';
   if (typeof rel !== 'string' || !rel.trim()) {
@@ -52,9 +54,26 @@ function checkSheet(sourceDir, pet) {
   if (!fs.existsSync(p) || !fs.statSync(p).isFile()) {
     throw new PetImportError('SHEET_MISSING', `spritesheet 不存在: ${rel}`);
   }
+  let realSrc, realP;
+  try { realSrc = fs.realpathSync(src); realP = fs.realpathSync(p); }
+  catch { throw new PetImportError('SHEET_MISSING', `spritesheet 不可达: ${rel}`); }
+  const containedReal = path.relative(realSrc, realP);
+  if (containedReal === '' || containedReal.startsWith('..') || path.isAbsolute(containedReal)) {
+    throw new PetImportError('SHEET_MISSING', `spritesheet 真实路径越出包目录（链接?）: ${rel}`);
+  }
+  // 只读头部 32 字节交给 webpSize（三种 fourcc 分支最多索引到第 30 字节）：
+  // staging 里一个损坏/超大文件不应被整文件 readFileSync 全量载入内存。
+  let head;
+  try {
+    const fd = fs.openSync(p, 'r');
+    try {
+      head = Buffer.alloc(32);
+      head = head.subarray(0, fs.readSync(fd, head, 0, 32, 0));
+    } finally { fs.closeSync(fd); }
+  } catch (e) { throw new PetImportError('SHEET_UNPARSEABLE', `webp 无法解析（读取失败）: ${e.message}`); }
   let size;
-  try { size = webpSize(fs.readFileSync(p)); }
-  catch (e) { throw new PetImportError('SHEET_UNPARSEABLE', `webp 无法解析（读取失败）: ${e.message}`); }
+  try { size = webpSize(head); }
+  catch (e) { throw new PetImportError('SHEET_UNPARSEABLE', `webp 无法解析（头部损坏）: ${e.message}`); }
   if (!size) throw new PetImportError('SHEET_UNPARSEABLE', 'webp 无法解析（RIFF/WEBP 头缺失或损坏）');
   if (size.w !== SHEET_W) {
     throw new PetImportError('SHEET_WIDTH', `sheet 宽度 ${size.w} ≠ ${SHEET_W}（CELL_W ${CELL_W} × COLS ${COLS}）`);
@@ -67,6 +86,31 @@ function checkSheet(sourceDir, pet) {
     throw new PetImportError('SHEET_ROWS', `sheet 行数 ${rows} < ${MIN_ROWS}（ROW_ANIMS 契约，含 failed/waiting_permission 行）`);
   }
   return { sheetRel: rel, w: size.w, h: size.h, rows };
+}
+
+// 源目录树安全审计：任何 symlink/junction 条目（含 sourceDir 本身）一律拒绝。
+// fs.statSync/fs.cpSync 都跟随链接——staging 里一个指向包外的 junction，字面名
+// 落在词法包含校验之内、真实目标在外，能把 staging 外的整棵目录树带进可被
+// HTTP 静态服务的 public/pets（违背 index.js 声明的 "imports may only source
+// from inside this directory"）。包目录树很小（pet.json + webp + NOTICE），
+// 全树 lstat 成本可忽略。返回遍历到的条目数（供测试断言审计确实发生）。
+function auditNoSymlinks(rootDir) {
+  if (fs.lstatSync(rootDir).isSymbolicLink()) {
+    throw new PetImportError('SOURCE_SYMLINK', `来源目录本身是链接，拒绝导入: ${rootDir}`);
+  }
+  let seen = 0;
+  const walk = (dir) => {
+    for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
+      seen++;
+      if (d.isSymbolicLink()) {
+        throw new PetImportError('SOURCE_SYMLINK',
+          `来源目录树内含 symlink/junction，拒绝导入: ${path.join(dir, d.name)}`);
+      }
+      if (d.isDirectory()) walk(path.join(dir, d.name));
+    }
+  };
+  walk(rootDir);
+  return seen;
 }
 
 // NOTICE.md（导入生成）：来源 URL、原作者、许可证三字段 + 粉丝自制免责声明模板。
@@ -95,6 +139,8 @@ function importPetPack({ sourceDir, targetRoot, id, source, author, license, for
     throw new PetImportError('SOURCE_MISSING', `来源目录不存在: ${sourceDir}`);
   }
   if (!targetRoot) throw new PetImportError('SOURCE_MISSING', '缺少 targetRoot（目标根目录）');
+  // 在任何 stat/cpSync 跟随链接之前先审计源树：链接条目一律拒绝（见 auditNoSymlinks）。
+  auditNoSymlinks(sourceDir);
 
   const pet = readPetJson(sourceDir);
   const name = pet.displayName || pet.display_name || pet.name || id || path.basename(sourceDir);
@@ -190,7 +236,9 @@ function listStagingPacks(stagingRoot = DEFAULT_STAGING_ROOT) {
 
 // 把 staging 包目录名解析为绝对路径。只接受单段目录名：绝对路径、盘符、
 // 任何分隔符、. / .. 一律拒绝；再用 path.relative 复核解析结果确落在
-// stagingRoot 之内（防目录穿越，端点入参的唯一入口）。
+// stagingRoot 之内（防目录穿越，端点入参的唯一入口）。词法复核对链接不可见
+// （staging 里的 junction 条目字面名在根内、真实目标在外），故最后用
+// fs.realpathSync 双向比对真实路径，链接逃逸在 stat/cpSync 跟随之前被挡下。
 function resolveStagingSource(source, stagingRoot = DEFAULT_STAGING_ROOT) {
   if (typeof source !== 'string' || !source.trim()) {
     throw new PetImportError('SOURCE_MISSING', '缺少 source（staging 内的包目录名）');
@@ -208,19 +256,39 @@ function resolveStagingSource(source, stagingRoot = DEFAULT_STAGING_ROOT) {
   if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
     throw new PetImportError('OUTSIDE_STAGING', `source 解析后越出 staging 根: ${source}`);
   }
+  let realRoot, realDir;
+  try {
+    realRoot = fs.realpathSync(root);
+    realDir = fs.realpathSync(dir);
+  } catch {
+    throw new PetImportError('SOURCE_MISSING', `staging 内不存在该包目录: ${source}`);
+  }
+  const relReal = path.relative(realRoot, realDir);
+  if (relReal === '' || relReal.startsWith('..') || path.isAbsolute(relReal)) {
+    throw new PetImportError('OUTSIDE_STAGING', `source 真实路径越出 staging 根（链接?）: ${source}`);
+  }
   return dir;
 }
 
-// 导入端点中间件。两道防线：
+// 导入端点中间件。三道防线：
 // 1) 自定义首部 X-Zcode-Monitor-Import: 1 —— 跨源“简单 POST”无法携带自定义首部，
 //    本服务也不回 preflight，可挡住恶意网页诱导的跨站写入；
-// 2) body.source 只接受 staging 内的包目录名（resolveStagingSource 强制包含关系）。
+// 2) Host 闸：DNS rebinding 让恶意页与 127.0.0.1「同源」从而能携带自定义首部，
+//    但请求的 Host 头仍是攻击者域名——只接受回环形态的 Host；
+// 3) body.source 只接受 staging 内的包目录名（resolveStagingSource 强制包含关系，
+//    词法 + 真实路径双重复核），导入前源树再做 symlink/junction 审计。
+const LOOPBACK_HOST_RE = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/;
 function importEndpointMiddleware({ petsRoot, stagingRoot } = {}) {
   const staging = stagingRoot || DEFAULT_STAGING_ROOT;
   return (req, res) => {
     if (req.get(IMPORT_HEADER) !== '1') {
       return res.status(403).json({ ok: false, error: 'forbidden',
         message: '缺少 X-Zcode-Monitor-Import 首部：该端点只接受本地图鉴页发起的请求。' });
+    }
+    const host = String(req.get('host') || '').toLowerCase();
+    if (!LOOPBACK_HOST_RE.test(host)) {
+      return res.status(403).json({ ok: false, error: 'forbidden',
+        message: `拒绝非回环 Host「${host}」：该端点只接受 127.0.0.1/localhost 发起（防 DNS rebinding）。` });
     }
     const body = req.body || {};
     const { source, id, sourceUrl, author, license, force } = body;
