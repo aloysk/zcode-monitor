@@ -132,6 +132,23 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
 - `trace_id` 贯穿整棵请求树
 - `tool_call_id` 连接工具调用 ↔ 输出 ↔ 事件
 
+## 隐私提示
+
+有第三方报告称 ZCode 可能会在后台上传工作区快照到云端（涉及本机 `~/.zcode/v2/checkpoints/` 目录）。
+**该说法为第三方报告，未经我们验证**，本项目不下断言、也不复现该行为，仅汇总公开来源供参考：
+
+- 第三方项目：HumanAILoop/zemote 的停更声明、Masterchiefm/zcode-speed-panel 的「快照防护」说明
+- 社区报道：Hacker News「Zcode silent workspace snapshot upload」讨论串、知乎文章《智谱ZCode，你打包上传我的代码仓库干什么》、开源中国 2026-09 相关报道
+
+如需自查，可在 Windows 上以只读方式列出该目录（只列目录，不做任何改动）：
+
+- PowerShell：`Get-ChildItem "$env:USERPROFILE\.zcode\v2\checkpoints"`
+- Git Bash：`ls ~/.zcode/v2/checkpoints`
+
+目录存在与否都属于正常的自查结果：目录存在仅说明本机生成了快照数据，不足以据此推断云端行为。
+
+无论自查结果如何，本工具（zcode-monitor）对 `~/.zcode/` 全程只读，不会写入或改动任何 ZCode 数据。
+
 ## 故障排查
 
 ### 启动后页面一直显示"检查 ZCode 是否在运行" / health 报 `ok:false`

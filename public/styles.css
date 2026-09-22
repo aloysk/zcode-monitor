@@ -476,3 +476,14 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .kv { display: grid; grid-template-columns: 130px 1fr; gap: 4px 12px; font-size: 12px; }
 .kv .k { color: var(--fg-4); }
 .kv .v { color: var(--fg-1); font-family: var(--font-mono); word-break: break-all; }
+
+/* ── privacy notice bar（WP5 快照上传第三方报告提示，可关闭）── */
+.privacy-notice { display: flex; align-items: flex-start; gap: 10px; margin: 10px 14px 0; padding: 8px 12px; border-radius: var(--radius); border: 1px solid color-mix(in srgb, var(--sev-warn) 35%, transparent); background: color-mix(in srgb, var(--sev-warn) 8%, transparent); font-size: 12.5px; color: var(--fg-2); line-height: 1.7; }
+/* display:flex 会盖过 [hidden] 的 UA 默认 display:none，需显式还原 */
+.privacy-notice[hidden] { display: none; }
+.privacy-notice code { font-family: var(--font-mono); font-size: 12px; color: var(--sev-warn); word-break: break-all; }
+.privacy-notice strong { color: var(--fg-1); font-weight: 600; }
+.privacy-notice-tag { flex: none; font-weight: 700; color: var(--sev-warn); }
+.privacy-notice-text { flex: 1; min-width: 0; }
+.privacy-notice-close { flex: none; background: transparent; border: 0; color: var(--fg-4); font-size: 14px; line-height: 1; padding: 2px 6px; cursor: pointer; border-radius: var(--radius-sm); font-family: inherit; }
+.privacy-notice-close:hover { color: var(--fg-1); background: var(--surface-3); }

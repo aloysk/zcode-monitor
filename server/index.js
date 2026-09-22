@@ -16,6 +16,7 @@ const live = require('./routes/live');
 const transcript = require('./routes/transcript');
 const raw = require('./routes/raw');
 const agents = require('./routes/agents');
+const petImport = require('./pet-import');
 
 const PORT = +process.env.PORT || 7331;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -256,32 +257,28 @@ app.get('/api/widget/recent', (_req, res) => res.json(dbq.completedSince(Date.no
 
 // pet pack registry for the pet page: every public/pets/<id>/ holding
 // pet.json + spritesheet.webp is a selectable pack — drop a folder in and it
-// joins the cycle. The two original packs stay first so the cycle feels
+// joins the cycle. Discovery lives in server/pet-import.js (shared with the
+// import CLI/endpoint); the two original packs stay first so the cycle feels
 // stable as packs are added.
-const fs = require('fs');
+const PETS_ROOT = path.join(__dirname, '..', 'public', 'pets');
+// staging root for candidate packs: imports may only source from inside this
+// directory — the endpoint rejects any source that resolves outside of it.
+const PETS_STAGING_ROOT = path.join(__dirname, '..', 'tools', 'pets-staging');
+
 app.get('/api/pets', (_req, res) => {
-  try {
-    const root = path.join(__dirname, '..', 'public', 'pets');
-    const order = ['yuexinmiao', 'maid-deepseek-whale'];
-    const packs = fs.readdirSync(root, { withFileTypes: true })
-      .filter(d => d.isDirectory()
-        && fs.existsSync(path.join(root, d.name, 'pet.json'))
-        && fs.existsSync(path.join(root, d.name, 'spritesheet.webp')))
-      .map(d => {
-        try {
-          // some galleries emit PowerShell-style JSON: UTF-8 BOM (JSON.parse
-          // throws on it) and snake_case keys — tolerate both
-          const raw = fs.readFileSync(path.join(root, d.name, 'pet.json'), 'utf8').replace(/^\uFEFF/, '');
-          const m = JSON.parse(raw);
-          const name = m.displayName || m.display_name || m.name || d.name;
-          return { id: d.name, name, sheet: '/pets/' + d.name + '/spritesheet.webp' };
-        } catch { return null; }
-      })
-      .filter(Boolean)
-      .sort((a, b) => (order.indexOf(a.id) + 1 || 90 + a.id.charCodeAt(0)) - (order.indexOf(b.id) + 1 || 90 + b.id.charCodeAt(0)));
-    res.json(packs);
-  } catch { res.json([]); }
+  try { res.json(petImport.listPetPacks(PETS_ROOT)); }
+  catch { res.json([]); }
 });
+
+// staging 包清单：pets-preview 页“从暂存导入”入口的数据源（staging 不存在时返回 []）
+app.get('/api/pets/staging', (_req, res) => {
+  res.json(petImport.listStagingPacks(PETS_STAGING_ROOT));
+});
+
+// 导入端点：缺 X-Zcode-Monitor-Import 首部一律 403（跨源简单 POST 无法携带自定义首部）。
+// body: { source: <staging 内的包目录名>, id?, sourceUrl?, author?, license?, force? }
+app.post('/api/pets/import',
+  petImport.importEndpointMiddleware({ petsRoot: PETS_ROOT, stagingRoot: PETS_STAGING_ROOT }));
 
 // SPA fallback: any non-api route → index.html
 app.get(/^\/(?!api).*/, (_req, res) => {

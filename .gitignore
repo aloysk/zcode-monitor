@@ -34,3 +34,17 @@ tools/scratch/
 
 # task acceptance artifacts (local evidence, not for distribution)
 artifacts/
+
+# imported pet packs stay local-only (IP/非默认分发主张, Spec WP1 需求5/A1-5)；
+# 精选 10 包白名单（目录名与 public/pets 现状一一对应）
+public/pets/*
+!public/pets/chiikawa/
+!public/pets/firefly/
+!public/pets/guga/
+!public/pets/hutao/
+!public/pets/maid-deepseek-whale/
+!public/pets/miku/
+!public/pets/nezukocoder/
+!public/pets/pikachu-local/
+!public/pets/xilian/
+!public/pets/yuexinmiao/

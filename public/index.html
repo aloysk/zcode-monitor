@@ -43,6 +43,32 @@
       <span id="theme-icon">🌙</span>
     </button>
   </header>
+  <div class="privacy-notice" id="privacy-notice" hidden>
+    <span class="privacy-notice-tag">隐私提示</span>
+    <span class="privacy-notice-text">
+      有第三方报告称 ZCode 可能会在后台上传工作区快照（涉及 <code>~/.zcode/v2/checkpoints/</code>）。
+      该说法<strong>未经我们验证</strong>；本工具对 <code>~/.zcode/</code> 全程只读，不会上传任何数据。
+      自查（只读列目录，PowerShell）：<code>Get-ChildItem "$env:USERPROFILE\.zcode\v2\checkpoints"</code>，来源汇总见 README「隐私提示」。
+    </span>
+    <button class="privacy-notice-close" id="privacy-notice-close" type="button" title="不再显示" aria-label="关闭隐私提示">×</button>
+  </div>
+  <script>
+    // 隐私提示条：默认隐藏，未关闭过则展示；点击关闭写入 localStorage，之后不再出现。
+    // localStorage 不可用（隐私模式等）时仅影响记忆，本次会话仍可关闭。
+    (function () {
+      var KEY = 'zc-privacy-notice-dismissed';
+      var bar = document.getElementById('privacy-notice');
+      var btn = document.getElementById('privacy-notice-close');
+      if (!bar || !btn) return;
+      try {
+        if (localStorage.getItem(KEY) !== '1') bar.hidden = false;
+      } catch (e) { bar.hidden = false; }
+      btn.addEventListener('click', function () {
+        bar.hidden = true;
+        try { localStorage.setItem(KEY, '1'); } catch (e) { /* ignore */ }
+      });
+    })();
+  </script>
   <main id="root"></main>
 </div>
 <div id="toast" class="toast" hidden></div>
