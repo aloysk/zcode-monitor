@@ -48,7 +48,11 @@ CREATE TABLE turn_usage (
   error_type TEXT, error_code TEXT);
 CREATE TABLE message (
   id INTEGER PRIMARY KEY, session_id TEXT, time_created INTEGER,
+  time_updated INTEGER,
   sequence INTEGER, data TEXT);
+-- time_updated 是 server/livegen.js 主查询的在飞判据（真实库实测列序
+-- id, session_id, time_created, time_updated, data, sequence），缺了它
+-- livegen 每个 tick 抛 "no such column" 提前返回，下游边事件全灭。
 CREATE INDEX idx_message_session ON message(session_id);
 CREATE TABLE part (
   id INTEGER PRIMARY KEY, message_id INTEGER, sequence INTEGER,
@@ -138,9 +142,11 @@ function createFixtureDb() {
           context_exceeded: 0 },
       ]);
       buildMessage(conn, [
-        { id: 1, session_id: 's1', time_created: now - 300e3, sequence: 1,
+        { id: 1, session_id: 's1', time_created: now - 300e3,
+          time_updated: now - 300e3, sequence: 1,
           data: JSON.stringify({ role: 'user', tokens: 12 }) },
-        { id: 2, session_id: 's1', time_created: now - 290e3, sequence: 2,
+        { id: 2, session_id: 's1', time_created: now - 290e3,
+          time_updated: now - 290e3, sequence: 2,
           data: JSON.stringify({ role: 'assistant', modelID: 'glm-5',
             time: { completed: now - 290e3 } }) },
       ]);

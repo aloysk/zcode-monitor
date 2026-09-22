@@ -24,6 +24,14 @@
 //     minutes; an older never-completed assistant row is a zombie, not a turn.
 //   - time_updated > now-90s: ZCode keeps touching time_updated while the row
 //     is being driven; 90s of silence means nothing is writing it anymore.
+//
+// Tool-failure edges (T5): the same tick also watermark-scans the newest
+// tool_usage rows (recentToolRows hits the tool_usage_started_tool_idx —
+// real-DB EXPLAIN: SEARCH ... (started_at>?), no table scan) and emits
+// phase:'tool_error' for rows with status='error'. Consumers: the gen SSE
+// (/api/gen/events forwards any emitter event verbatim) drives the desktop
+// pet's failed animation; state() carries lastToolError for pollers. Boot
+// watermark = MAX(started_at), so historical errors are never replayed.
 const EventEmitter = require('events');
 
 const POLL_MS = 1000;
@@ -62,6 +70,14 @@ function createGenWatcher(dbq, { pollMs = POLL_MS } = {}) {
   let sessions = 0;       // distinct sessions currently in flight
   let inflight = 0;       // in-flight assistant rows (≥ sessions)
   let lastSessions = 0;   // last value emitted to consumers (lane-change memory)
+  // tool-error watermark: newest tool_usage.started_at already inspected
+  // (epoch ms, same unit as the ts()-mapped rows once Date.parse'd). MAX at
+  // boot = no historical replay; on failure fall back to "now" so a broken
+  // boot can never replay old errors (watermark 0 would rescan from ASC head).
+  let lastErrStartedAt = (() => {
+    try { return dbq.latestToolStartedAt(); } catch { return Date.now(); }
+  })();
+  let lastToolError = null; // { tool, at } — newest observed failure, for state()
   let stopped = false;
   let lastErrorLogAt = 0;
 
@@ -99,6 +115,31 @@ function createGenWatcher(dbq, { pollMs = POLL_MS } = {}) {
     inflight = row.inflight || 0;
     const nowGenerating = inflight > 0;
 
+    // Tool-failure edge scan: same started_at watermark + ASC LIMIT pattern as
+    // routes/live.js. Strictly-increasing watermark means several failures in
+    // the SAME millisecond collapse into one — a best-effort visual signal,
+    // accepted truncation (comment kept per plan). The scan sits outside the
+    // main query's try/catch, so it carries its own guard: a busy/damaged DB
+    // must skip the tick, not crash the poll interval (watermark untouched →
+    // the rows are simply retried next tick).
+    try {
+      for (const r of dbq.recentToolRows(lastErrStartedAt, 50)) {
+        const t = Date.parse(r.started_at);
+        if (!(t > lastErrStartedAt)) continue; // null/NaN started_at: skip, keep watermark
+        if (r.status === 'error') {
+          lastToolError = { tool: r.tool_name, at: Date.now() };
+          emitter.emit('gen', { phase: 'tool_error', tool: r.tool_name,
+            session: r.session_id, at: Date.now() });
+        }
+        lastErrStartedAt = t;
+      }
+    } catch (e) {
+      if (Date.now() - lastErrorLogAt >= ERROR_LOG_INTERVAL_MS) {
+        lastErrorLogAt = Date.now();
+        console.error(`[livegen] tool-error scan failed (tick skipped): ${e.message}`);
+      }
+    }
+
     // Edge detection: boolean transitions stay pure edges (start/end). A
     // lane-count CHANGE while generating is its own 'lanes' event — the
     // widget's ×N badge must move the moment a session joins or leaves an
@@ -128,7 +169,7 @@ function createGenWatcher(dbq, { pollMs = POLL_MS } = {}) {
     // Subscribe to start/end edge events; returns an unsubscribe function so
     // short-lived consumers (one SSE response) can detach on close.
     onEvent(cb) { emitter.on('gen', cb); return () => emitter.off('gen', cb); },
-    state() { return { generating, sessions, inflight }; },
+    state() { return { generating, sessions, inflight, lastToolError }; },
     stop() { stopped = true; clearInterval(timer); },
   };
 }
