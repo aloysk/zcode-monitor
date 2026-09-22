@@ -11,7 +11,16 @@ const {
 } = require('../server/pet-import');
 
 const args = process.argv.slice(2);
-const positional = args.find(a => !a.startsWith('--'));
+// 位置参数识别须排除「已知名选项的值」：`node tools/import-pet.js --id foo`
+// （漏写包名）若把 'foo' 当包名送进 staging 解析，会报 OUTSIDE_STAGING 而非
+// 用法提示，误导排障。
+const VALUE_OPTS = ['id', 'source', 'author', 'license', 'root', 'staging'];
+const consumed = new Set();
+for (const name of VALUE_OPTS) {
+  const i = args.indexOf('--' + name);
+  if (i >= 0 && i + 1 < args.length) consumed.add(i + 1);
+}
+const positional = args.find((a, i) => !a.startsWith('--') && !consumed.has(i));
 const opt = (name) => {
   const i = args.indexOf('--' + name);
   return i >= 0 ? args[i + 1] : undefined;

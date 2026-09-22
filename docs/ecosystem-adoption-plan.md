@@ -3,7 +3,7 @@
 - 日期：2026-09-21（v1 修订：2026-09-22）
 - 状态：**v1（已通过三视角评审并修订）** —— 架构 / 对抗性 / 事实核查三视角的评审共识已逐条落实
 - 输入：4 路并行子代理调研（ZCode 生态、Claude Code 生态、桌宠引擎与素材、桌面 widget 与壁纸框架），共核实约 60 个仓库的 README 与许可证
-- 性质：**计划文档，本轮不实施**。评审已通过，按里程碑逐项开工
+- 性质：**计划文档（已实施）**。评审已通过；WP0–WP5 已于分支 `feature/ecosystem-adoption-plan`（worktree `F:/project/zcode-monitor-plan`）按 T1–T6 顺序实施并逐任务提交（实施状态注记，2026-09-23：HEAD `abead5a`，分支未合并回主仓 main——主仓库代码尚未含本计划改动，勿以主仓代码对照本文档验收）。实施与计划的提交结构差异见 `docs/plans/ecosystem-adoption-v1.md` 的实施留痕。
 
 ---
 
@@ -25,7 +25,7 @@
 | Masterchiefm/zcode-speed-panel | 20★ MIT | 三形态桌宠 + 速度仪表盘，与我们的 widget 几乎同构；t/s 用进程 IO 实测；"快照防护"是快照上传警示的出处之一 |
 | xiufengsun/TokenTracker | 1.7k★ MIT | 多工具用量追踪（已支持 ZCode），排除非 GLM 子代理的过滤逻辑可借鉴 |
 | arvelvale/orrery | 19★ MIT | token 记账语义最严谨（cache/reasoning 归属、`turn_usage` 漏 side call） |
-| ccusage/ccusage | 18.7k★ MIT | 用量报告事实标准，已支持 ZCode 数据源；fork better-ccusage 明确解析 `~/.zcode/cli/db/db.sqlite` 并内置 GLM 定价；WP2 的对账基准 |
+| ccusage/ccusage | 18.7k★ MIT | 用量报告事实标准，已支持 ZCode 数据源；fork better-ccusage 明确解析 `~/.zcode/cli/db/db.sqlite` 并内置 GLM 定价；WP2 的对账基准。**勘误（2026-09-23，实施后回填）**：WP2 实测主线 ccusage / fork / statusbar 均不可用于对账（详见 docs/usage-accounting.md §5.1），实际以第 4 级「纯 SQL 交叉核对」收口 |
 | rullerzhou-afk/clawd-on-desk | 6.3k★ **AGPL-3.0** | 桌宠交互设计标杆（12 态状态机、权限气泡、连击、入睡），ZCode 一等公民；**只学设计，不抄代码** |
 | hoangsonww/Claude-Code-Agent-Monitor | 1k★ MIT | 同款产品架构范本：JSONL 字节偏移增量解析的混合摄取 |
 | backnotprop/codex-pets-react | 39★ MIT | `pet.json + spritesheet.webp` 声明式渲染实现，可整段借鉴 |
@@ -69,7 +69,7 @@
 | `server/livegen.js` + `routes/live.js` | 并发 lane（xN）实时引擎 |
 | `server/log-tail.js` / `transcript.js` | JSONL 追踪（轮询式，WP3 强化对象） |
 | `public/pets/`（10 个包） | 精选图鉴：**已全部是 Codex 格式**，含每包 NOTICE |
-| `tools/` | 已抓取 codex-pet.org / codex-pets.net / petscodex 三份目录 JSON；`webp-size.js` 可读 webp 尺寸；`pets-staging/`（gitignored）已暂存约 23 个包（其中 18 个已含 pet.json，其余仅有素材待规范化） |
+| `tools/` | 已抓取 codex-pet.org / codex-pets.net / petscodex 三份目录 JSON；`webp-size.js` 可读 webp 尺寸；`pets-staging/`（gitignored）已暂存约 23 个包（其中 18 个已含 pet.json，其余仅有素材待规范化）。**勘误（2026-09-23 实测）**：暂存区内容随时间变化，当时实测为 14 个目录、其中 8 个含 pet.json（docs/specs/ecosystem-adoption-v1.md WP1 现状锚点以此为准） |
 | `shell/` | WinForms + WebView2 无边框壳，三形态（胶囊 / 迷你宠 / 正常宠），吸附 ZCode 窗口 |
 
 结论：**Codex 单格式兼容的事实基础已经就位**（现有 10 包即 Codex 格式，`/api/pets` 已按此扫描），WP1 是把"手工放目录"升级为"校验 + 一键导入"的正式能力；WP0 先补测试基建，其余 WP 的验收都跑在上面。
@@ -107,7 +107,7 @@
 - **第一步（原 WP8）**：对照 zai-org/ZCode 开源源码核实 `db.sqlite` schema。重点**澄清 `computed_total_tokens` 与官方总量公式（input + output + reasoning + cache_creation）的关系**——它是官方预计算的权威总量还是派生列，决定我们直接取用还是自行计算。核实后给 `db.js` 中每条表 / 列假设补官方源码出处注释
 - **来源**：zai-org/ZCode（schema 权威）、zcode-token-usage-statusbar、arvelvale/orrery（记账语义）、better-ccusage（GLM 定价表）
 - **改动面**：`server/db.js` 用量查询按核实后的口径修正（input 含 cache-read 的展示拆分、总量公式、`parent_id` 归组、`turn_usage` side call 缺口标注）；前端数字标注来源（官方口径 / 本地估算）。**不做对外 JSON 口径端点**（对外暴露非本轮目标）
-- **验收**：同一时段 our 数字与 **ccusage 单方对账**通过；无法对齐的差异逐条留痕（口径文档注明出处与原因）
+- **验收**：同一时段 our 数字与 **ccusage 单方对账**通过；无法对齐的差异逐条留痕（口径文档注明出处与原因）。**勘误（2026-09-23，实施后回填）**：ccusage 对 ZCode 数据源的支持形态经实测不可用（主线/fork/statusbar 三路均不满足），对账改以纯 SQL 交叉核对收口并留痕（docs/usage-accounting.md §5.1）；本验收条的「与 ccusage 对账」按此口径解释
 - **风险**：中（一次性改动约 8 个用量查询函数的语义——input 含 cache-read 拆分、总量公式、`parent_id` 去重、side call 标注——全部前端数字随之变动；对账基准依赖 ccusage 对 ZCode 数据源的支持形态，实施时实测，不可用时回退 zcode-token-usage-statusbar 的 JSON CLI 或纯 SQL 交叉核对。2026-09-22 规格评审由"低"上调）；官方仓库刚开源（2 commits），内容可能不完整——以核实结果为准，不确定处留痕
 
 ### WP3（P1，lite）JSONL 实时性强化（零写入）
@@ -143,7 +143,7 @@
 
 ## 6. 性能回归红线
 
-- 真实库 `~/.zcode/cli/db/db.sqlite` 约 **14.6GB**
+- 真实库 `~/.zcode/cli/db/db.sqlite` 约 **14.6GB**（早期基线；库持续增长，现行实测锚点以 docs/specs/ecosystem-adoption-v1.md §4.1 为准——红线按其中更大的实测值执行）
 - 历史事故：对 message 表的**全表扫描**曾导致事件循环饿死（约 **2.4s/次**），视为回归、**一票否决**
 - 规则：任何新查询必须命中 `started_at` 索引或 rowid 尾界；本计划各项涉及 `db.js` 的改动（WP2）与一切后续查询均适用
 - 验证：涉及新查询的 WP，验收时必须在真实库上以只读方式实测（`EXPLAIN QUERY PLAN` 确认命中索引 + 计时），结果记入验收记录
@@ -152,7 +152,7 @@
 
 | 里程碑 | 内容 | 出口判据 |
 |---|---|---|
-| M1 基建 · 格式 · 口径 · 提示 | WP0 + WP1 + WP2 + WP5 | `node --test` 就绪；Codex 包一键导入可用；用量与 ccusage 对账通过（差异留痕）；隐私提示发布 |
+| M1 基建 · 格式 · 口径 · 提示 | WP0 + WP1 + WP2 + WP5 | `node --test` 就绪；Codex 包一键导入可用；用量与 ccusage 对账通过（差异留痕）；隐私提示发布。（M1 已达成；「与 ccusage 对账」按 WP2 勘误的纯 SQL 交叉核对口径收口） |
 | M2 行为与实时性 | WP4 + WP3-lite | 新桌宠状态上线（error / 入睡 / 连击）；JSONL 实时性提升且全程零写入 |
 | backlog | 附录 A（原 M3：WP6 / WP7） | 由实验结论决定是否立项 |
 

@@ -19,7 +19,7 @@
 - **依赖门槛**：`dependencies` 保持恰为 `better-sqlite3` + `express`（A0-6 守护）；新能力优先 Node 内置模块。WP1 服务端校验不得引入图像解码依赖（像素级检测留在页面 `scanRow`）。
 - **9 行动画契约不动**：`ROW_ANIMS = ['idle','running_right','running_left','waving','jumping','failed','waiting_permission','running','review']`（`public/pet.html:186-187`），不新增动画行；入睡复用 idle 行。
 - **平台与可测性**：Windows + Git Bash；被测路径一律注入（env 或参数），不依赖 cwd；不引入浏览器自动化框架（页面级行为走纯函数抽取 + 实机评审）。
-- **IP 与分发**：导入产物不得被 git 跟踪（A1-5）；NOTICE 三要素强制；不建对外宠物包索引；不与账号切换 / 反代项目互链；AGPL 项目（clawd-on-desk）只学交互设计不抄代码素材。
+- **IP 与分发**：导入产物不得被 git 跟踪（A1-5）；NOTICE 三要素缺省留痕（来源/作者/许可证缺失时写占位 `<未提供>`/`<未提供>`/`unknown` 并输出警告、导入不阻断——Spec A1-4 与 server/pet-import.js 的既定语义；对无许可证的粉丝自制包记录占位属合理取舍）；不建对外宠物包索引；不与账号切换 / 反代项目互链；AGPL 项目（clawd-on-desk）只学交互设计不抄代码素材。
 - **气泡默认不展示 agent 原始文本**（`public/pet.html:419-431` 气泡渲染区现状：内容仅为速度数字、单位与 ×N 徽章，全页无 agent 文本来源——SSE 消费只见 phase/sessions/tps）；本计划只交付消毒模块 + 单测，不改默认展示行为。
 - **提交规范**：中文主题行 + 前缀（`docs:`/`feat:`/`fix:`/`test:`/`chore:`）；**不要 push**（收尾阶段统一处理）。
 
@@ -79,6 +79,7 @@
 ### 回滚方式
 
 - 每个任务独立成 commit，回滚 = `git -C "F:/project/zcode-monitor-plan" revert <sha>`。多个 commit 时按**从新到旧**的顺序 revert（先 revert 依赖方、后 revert 被依赖方，例如 T2 的三连提交先 revert `test:`、再 `feat: 端点`、最后 `feat: 模块`）。
+- **实施留痕（2026-09-23，终审修订）**：实际提交结构偏离上表——T2+T3 合并为单个 commit `3938525`（宠物一键导入与隐私提示同 commit），其余任务主题行亦与上表措辞不同（实际序列：`6d52633` T1 → `3938525` T2+T3 → `3c0b563` T4 → `9885bd5` T5 → `fda97bd`/`ab26fb7`/`abead5a` T6 及后续修订）。回滚剧本相应修正：T2/T3 已不可按上表三连提交逐个 revert，整体 revert `3938525` 即同时撤两任务（两者文件面不相交、整体回滚语义不变）；T6 的三个后续 commit 需一并 revert。
 - 本计划全程不产生持久化数据迁移（server 无落盘状态），回滚后重启进程即恢复。
 - T6 特例：watch 路径自带回退态，功能回滚也可只关 watch（R3）；T2 的导入产物是 gitignored 本地文件，revert 后仍留在磁盘上，属无害残留，可保留或自行清理。
 - 证据载体（Spec §4.6）：各 WP 的验收证据（EXPLAIN 输出、计时、对账记录、评审截图路径）统一放 `docs/acceptance/`（本计划新建目录），随对应任务的 commit 提交。

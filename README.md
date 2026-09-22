@@ -18,7 +18,7 @@
 
 `zcode-monitor` 是一个跑在 `127.0.0.1` 的本地观测面板。它会读取 ZCode 客户端在磁盘上落下的数据（SQLite 主库、`transcript.jsonl` 事件流、日志、Bash 输出），把一次 agent 运行里发生的所有事——模型请求、token 消耗、工具调用、子 agent 派生、推理链——整理成可视、可查、可追溯的界面。
 
-全程**只读**，不修改、不删除任何 ZCode 数据，也不和 ZCode 的写事务抢锁。
+监控读路径全程**只读**，不修改、不删除任何 ZCode 数据，也不和 ZCode 的写事务抢锁（唯一例外是 WAL checkpoint 功能，完整边界见下文「隐私提示」之后的说明）。
 
 视觉对齐 kimi-vis 参考页面：分层暗色背景、分类色编码、左列表 + 右详情（7 标签）。
 
@@ -66,7 +66,7 @@ npm run dev          # node --watch，文件改动自动重启
 | `PORT`     | `7331`                      | 监听端口                 |
 | `HOST`     | `127.0.0.1`                 | 监听地址（出于安全默认只绑本地）     |
 | `ZCODE_DB` | `~/.zcode/cli/db/db.sqlite` | SQLite 主库路径          |
-| `OPEN`     | `1`                         | 启动时是否自动打开浏览器（`0` 关闭） |
+| `OPEN_BROWSER` | `1`（未设即开）          | 启动时是否自动打开浏览器（设 `0` 关闭） |
 
 示例：
 
@@ -137,7 +137,7 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
 有第三方报告称 ZCode 可能会在后台上传工作区快照到云端（涉及本机 `~/.zcode/v2/checkpoints/` 目录）。
 **该说法为第三方报告，未经我们验证**，本项目不下断言、也不复现该行为，仅汇总公开来源供参考：
 
-- 第三方项目：HumanAILoop/zemote 的停更声明、Masterchiefm/zcode-speed-panel 的「快照防护」说明
+- 第三方项目：Masterchiefm/zcode-speed-panel 的「快照防护」说明（早期版本曾引 HumanAILoop/zemote 的「停更声明」，经核实全网查无此项目，已弃用该来源——与 docs/specs/ecosystem-adoption-v1.md WP5 的裁定一致）
 - 社区报道：Hacker News「Zcode silent workspace snapshot upload」讨论串、知乎文章《智谱ZCode，你打包上传我的代码仓库干什么》、开源中国 2026-09 相关报道
 
 如需自查，可在 Windows 上以只读方式列出该目录（只列目录，不做任何改动）：

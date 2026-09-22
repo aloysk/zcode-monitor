@@ -147,12 +147,19 @@ function rethemeCharts() {
   window.dispatchEvent(new CustomEvent('zc-theme-changed'));
 }
 
+// 主题图标：顶栏用主题化单色 SVG（index.html），这里按主题切换月/日显示。
+function syncThemeIcon(theme) {
+  const moon = document.querySelector('#theme-icon .icon-moon');
+  const sun = document.querySelector('#theme-icon .icon-sun');
+  if (moon) moon.hidden = theme !== 'dark';
+  if (sun) sun.hidden = theme === 'dark';
+}
+
 function setTheme(theme) {
   if (theme !== 'light' && theme !== 'dark') theme = 'dark';
   document.documentElement.setAttribute('data-theme', theme);
   try { localStorage.setItem('zc-theme', theme); } catch {}
-  const icon = $('#theme-icon');
-  if (icon) icon.textContent = theme === 'dark' ? '🌙' : '☀️';
+  syncThemeIcon(theme);
   rethemeCharts();
 }
 
@@ -213,8 +220,7 @@ async function healthLoop() {
 
 document.addEventListener('DOMContentLoaded', () => {
   // sync theme icon with the (already-applied) attribute
-  const icon = $('#theme-icon');
-  if (icon) icon.textContent = currentTheme() === 'dark' ? '🌙' : '☀️';
+  syncThemeIcon(currentTheme());
   const toggle = $('#theme-toggle');
   if (toggle) toggle.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); toggleTheme(); });
 
@@ -222,9 +228,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const ckpt = $('#checkpoint-btn');
   if (ckpt) ckpt.addEventListener('click', async (e) => {
     e.preventDefault(); e.stopPropagation();
-    const icon = $('#checkpoint-icon');
-    const old = icon.textContent;
-    icon.textContent = '⏳';
+    // busy 态切换 SVG→spinner（图标为 SVG 后不再有 emoji textContent 可换）
+    const iconSvg = document.querySelector('#checkpoint-icon .icon');
+    let busy = document.getElementById('checkpoint-busy');
+    if (!busy) {
+      busy = document.createElement('span');
+      busy.className = 'spinner';
+      busy.id = 'checkpoint-busy';
+      busy.hidden = true;
+      document.getElementById('checkpoint-icon').appendChild(busy);
+    }
+    iconSvg.hidden = true; busy.hidden = false;
     ckpt.disabled = true;
     try {
       const r = await getJSON('/api/checkpoint?force=1&_=' + Date.now());
@@ -237,7 +251,7 @@ document.addEventListener('DOMContentLoaded', () => {
         toast('checkpoint 失败：' + (r.error || r.message || ''));
       }
     } catch (err) { toast('checkpoint 出错：' + err.message); }
-    finally { icon.textContent = old; ckpt.disabled = false; }
+    finally { iconSvg.hidden = false; busy.hidden = true; ckpt.disabled = false; }
   });
 
   // keyboard shortcut: press "t" to toggle theme (handy when click is flaky)

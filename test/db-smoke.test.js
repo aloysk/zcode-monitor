@@ -10,7 +10,10 @@ const os = require('os');
 const path = require('path');
 const { createFixtureDb } = require('./helpers/fixture-db');
 
-// 查询函数清单按 server/db.js:707-718 导出面逐一点得（23 个）。
+// 查询函数清单按 server/db.js 导出面逐一点得（25 个；行号易漂移，权威以
+// module.exports 为准——触碰导出面时本清单同步修订，见 Spec A0-4）。
+// recentToolRowsAfterRowid/latestToolRowid 的行形状由 test/livegen-error.test.js
+// 集成覆盖（rowid 水位语义），此处只守护可跑通。
 const QUERIES = [
   ['overviewKpis', s => [s]], ['timeseries', () => [24]],
   ['breakdownByModel', s => [s]], ['breakdownByTool', s => [s]],
@@ -24,6 +27,7 @@ const QUERIES = [
   ['slowTools', () => [{}]], ['recentModelRows', () => [0]],
   ['recentToolRows', () => [0]], ['latestModelStartedAt', () => []],
   ['latestToolStartedAt', () => []], ['agentsForest', () => [{}]],
+  ['recentToolRowsAfterRowid', () => [0]], ['latestToolRowid', () => []],
 ];
 
 const fx = createFixtureDb();
@@ -37,6 +41,9 @@ test.after(() => {
   try { dbq.db().close(); } catch { /* already closed */ }
   dbq.invalidateDb();
   fx.cleanup();
+  // A0-7 守护断言：运行中记录的临时路径在钩子内已不存在
+  const fs = require('fs');
+  assert.equal(fs.existsSync(fx.root), false, 'fixture 目录必须已清理: ' + fx.root);
 });
 
 test('冒烟: 注入后 DB_PATH/LOG_DIR/ROLLOUT_DIR 均在 tmpdir 下且不含 .zcode 段', () => {
@@ -50,7 +57,7 @@ test('冒烟: 注入后 DB_PATH/LOG_DIR/ROLLOUT_DIR 均在 tmpdir 下且不含 .
   }
 });
 
-test('冒烟: 23 个查询函数在 fixture 上全部跑通且抽查结构正确', () => {
+test('冒烟: 25 个查询函数在 fixture 上全部跑通且抽查结构正确', () => {
   const since = Date.now() - 3600e3;
   const out = {};
   for (const [name, argf] of QUERIES) {
@@ -76,7 +83,9 @@ test('冒烟: 23 个查询函数在 fixture 上全部跑通且抽查结构正确
   // completedSince 的 2h pad 预过滤等价性（db.js 关键优化）的数值级守护：
   // id4 开始于一小时窗前 90min、完成于窗内 50min——pad 被收紧为 0（预过滤
   // 退化为 started_at >= since）时该行会被漏掉，此处即红。
-  assert.ok(out.completedSince.some(r => r.id === 4),
+  // id 对齐真实库为 TEXT 主键（fixture-db.js 头注），数字种子经 affinity 存为
+  // 字符串，断言按字符串比较。
+  assert.ok(out.completedSince.some(r => r.id === '4'),
     '「开始于窗前、完成于窗内」的载荷行必须计入（2h pad 预过滤等价性）');
   // overviewSpeed 数值口径：started_at >= since 过滤下 id4 不参与（90min 前开始），
   // 分子 = 200 + (100+50) = 350，分母 = (10000+8000)/1000 = 18s → 350/18 = 19.4

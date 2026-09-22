@@ -1,22 +1,15 @@
 'use strict';
 // test/pet-page.test.js — pet.html/widget.html 的页面契约守护（T5）：
-// 9 行动画契约不被内联改动、消毒模块被两页引用且展示点过闸、心情优先级
-// 阶梯在判定函数里可读。纯静态检查，不启动服务器。
+// 两页对共享模块的引用齐备、内联脚本可编译、可视接线（CSS/SSE 分派）在页面上。
+// 行为语义（ROW_ANIMS 契约、心情优先级、事件→状态、手势不变量）已随共享模块
+// 抽取移至 test/pet-state.test.js 的行为单测（A4-1~A4-6），本文件不再用正则
+// 守护内联字面量——那曾对文件后段任意出现的目标串误报/漏报。
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 
 const readPage = (name) => fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8');
-
-test('契约: ROW_ANIMS 恒等 9 行且顺序固定（含 failed/waiting_permission）', () => {
-  const html = readPage('pet.html');
-  const m = html.match(/const ROW_ANIMS = (\[[^\]]+\]);/);
-  assert.ok(m, 'pet.html 必须内联声明 ROW_ANIMS（无构建器，本页是权威版本）');
-  const rows = JSON.parse(m[1].replace(/'/g, '"'));
-  assert.deepEqual(rows, ['idle', 'running_right', 'running_left', 'waving', 'jumping',
-                          'failed', 'waiting_permission', 'running', 'review']);
-});
 
 test('契约: 两页都引入 /sanitize.js，气泡展示点过消毒闸', () => {
   const pet = readPage('pet.html');
@@ -30,26 +23,20 @@ test('契约: 两页都引入 /sanitize.js，气泡展示点过消毒闸', () =>
   assert.ok(pet.includes('SanitizeSpeech.sanitizeSpeech'), 'pet.html 保留消毒闸契约注释');
 });
 
-test('契约: 心情优先级阶梯 error > tantrum > gen > (permission 预留) > sleep > cruise', () => {
-  const html = readPage('pet.html');
-  // 用花括号配平截取函数体而非 ([\s\S]*?)\n\} 正则：后者遇函数体内任何顶格
-  // 右花括号即静默截断（重排/嵌套函数后假绿或误报）
-  const start = html.indexOf('function computeMood() {');
-  assert.ok(start >= 0, 'computeMood 单一判定函数必须存在');
-  let depth = 0, end = -1;
-  for (let i = html.indexOf('{', start); i >= 0 && i < html.length; i++) {
-    if (html[i] === '{') depth++;
-    else if (html[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
-  }
-  assert.ok(end > start, 'computeMood 花括号配平（函数体完整可截取）');
-  const body = html.slice(start, end);
-  const idx = (re) => { const r = body.search(re); assert.ok(r >= 0, re); return r; };
-  const order = [
-    idx(/errorHoldUntil/), idx(/comboHoldUntil/), idx(/gen\)/), idx(/SLEEP_AFTER_MS/),
-  ];
-  assert.deepEqual([...order].sort((a, b) => a - b), order, '优先级必须按阶梯顺序排列');
-  // waiting_permission 未接线（无信号源），但预留位次必须有注释留痕
-  assert.ok(/预留/.test(html), 'permission 预留说明必须留痕');
+test('契约: pet.html 消费 pet-state.js 共享模块且无内联副本（A4-6 页面侧）', () => {
+  const pet = readPage('pet.html');
+  assert.ok(pet.includes('<script src="/pet-state.js"></script>'),
+    'pet.html 必须以 <script src> 引入 pet-state.js（守护页面实际加载的那份）');
+  assert.ok(pet.includes('window.PetState'), '页面从全局取决策模块');
+  // 内联副本禁令：契约常量与决策逻辑不得回迁页面（行为单测在 pet-state.test.js）
+  assert.ok(!/const ROW_ANIMS = \[/.test(pet), '无 ROW_ANIMS 内联副本');
+  assert.ok(!/function computeMood\(now/.test(pet), '无 computeMood 内联实现（页面侧只包装取材）');
+});
+
+test('契约: widget.html 的 gen 分派显式处理 tool_error（不把它当 end 清零呼吸/徽章）', () => {
+  const widget = readPage('widget.html');
+  assert.ok(widget.includes("m.phase === 'tool_error'"),
+    'widget 的 gen 事件分派必须显式认得 tool_error phase（livegen 在同一条 SSE 上发射）');
 });
 
 test('契约: pet.html 内联脚本可编译（无构建器，页面即交付物）', () => {
@@ -60,14 +47,24 @@ test('契约: pet.html 内联脚本可编译（无构建器，页面即交付物
     .filter(m => !/\bsrc\s*=/.test(m[1]));
   assert.ok(scripts.length >= 1, '内联脚本存在');
   for (const s of scripts) assert.doesNotThrow(() => new Function(s[2]), '内联脚本语法错误');
+  // widget.html 同法（它在同一条 SSE 契约上）
+  const widgetScripts = [...readPage('widget.html').matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)]
+    .filter(m => !/\bsrc\s*=/.test(m[1]));
+  for (const s of widgetScripts) assert.doesNotThrow(() => new Function(s[2]), 'widget 内联脚本语法错误');
 });
 
-test('契约: 睡眠与错误态的可视接线齐备（静帧+呼吸+zzz / failed 行 / SSE 分派）', () => {
-  const html = readPage('pet.html');
-  assert.ok(html.includes('body.state-sleep #pet'), '睡眠呼吸 CSS');
-  assert.ok(html.includes('content: "zzz"'), 'zzz 角标');
-  assert.ok(html.includes("m.phase === 'tool_error'"), 'SSE tool_error 分派');
-  assert.ok(/animFor\([^)]*\)[\s\S]*'failed'/.test(html), 'failed 行由 animFor 分派');
-  // 语义正则而非字面串：容忍空白/重排（60_000 形态仍不支持——改写法须同步改本断言）
-  assert.ok(/\bSLEEP_AFTER_MS\s*=\s*60\s*\*\s*1000\b/.test(html), '60s 入睡阈值');
+test('契约: 睡眠与错误态的可视接线齐备（静帧+呼吸+zzz / SSE 分派 / 60s 阈值来源）', () => {
+  const pet = readPage('pet.html');
+  assert.ok(pet.includes('body.state-sleep #pet'), '睡眠呼吸 CSS');
+  assert.ok(pet.includes('content: "zzz"'), 'zzz 角标');
+  // 页面把 gen 事件整体交给共享 reducer（phase 分派——含 tool_error——在
+  // pet-state.js 内，由 pet-state.test.js 的 A4-1/A4-2 行为测试守护）
+  assert.ok(pet.includes('PS.applyGenEvent'), '事件→状态决策走共享 reducer');
+  assert.ok(pet.includes('PS.classifyGesture'), '手势不变量判定走共享纯函数');
+  // 阈值常量唯一权威在 pet-state.js（行为单测守护其值），页面解构消费
+  assert.ok(pet.includes('const { SLEEP_AFTER_MS'), '页面阈值取自共享模块');
+  // permission 预留说明随决策逻辑住在 pet-state.js（接线注记三步俱在）
+  const psSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'pet-state.js'), 'utf8');
+  assert.ok(psSrc.includes('预留'), 'permission 预留说明必须留痕（pet-state.js）');
+  assert.ok(psSrc.includes('waiting_permission'), 'waiting_permission 行映射齐备');
 });

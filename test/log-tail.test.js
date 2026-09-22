@@ -1,11 +1,13 @@
 'use strict';
 // test/log-tail.test.js — log-tail watch 实时化（T6 / WP3-lite，fs.watch + 偏移增量 + 双重兜底）。
-// 平台差异容忍协议（任务书）：偏移守恒（恰 N、无重复、无丢失）是硬判据、一票否决；
-// 「短延迟可见」是时序目标——watch 未命中或慢平台下允许退化到对账/短轮询兜底，
-// 时序超标只记 console.warn 注记、不断言失败（Windows fs.watch 抖动实测常见）。
-// 相对计划 A3-1 的「1s 硬判据 + 整组重跑 2 次 + 3s 带注记」协议的调整理由：自主门禁
-// 无法人工重跑整组，按任务书「慢平台允许退化但不断言失败」把时序降为注记级。
-// 全部用例注入 todayFile 绑定各自 tmpdir 路径：与 cwd 无关、与真实 ~/.zcode 无关。
+// 平台差异容忍协议（任务书 + 终审修订）：偏移守恒（恰 N、无重复、无丢失）是硬判据、
+// 一票否决；「短延迟可见」的 1s 目标在慢平台允许退化到对账/短轮询兜底，超标只记
+// console.warn 注记、不按 1s 判失败（Windows fs.watch 抖动实测常见）——但为保留
+// 回归能力，设 3s（A3-1 每行）/15s（A3-2 全组）的宽松上界硬断言：兜底路径正常
+// 工作时远达不到上界，上界触发即视为 watch+兜底机制严重回归（A3-1 的「3s 复测
+// 带注记」协议的可执行化，Spec v1.2 字面的「仍不过则记不通过」由此落进套件）。
+// 全部用例注入 todayFile 绑定各自 tmpdir 路径：与 cwd 无关、与真实 ~/.zcode 无关；
+// 各 finally 清理后断言临时路径已消失（A0-7 守护断言）。
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -57,13 +59,19 @@ test('A3-1: 临时目录追加 10 行 → 恰 10 个事件（偏移守恒硬判�
     // ——硬判据：偏移守恒（一票否决）——
     assert.equal(got.length, 10);
     assert.equal(new Set(got.map(e => e.i)).size, 10); // 无重复
-    // ——时序目标（容忍协议）：超标只注记，不判失败——
+    // ——时序目标（容忍协议）：1s 超标只注记；3s 宽松上界为硬断言（防严重回归）——
     const maxLat = Math.max(...latencies);
     console.log(`[A3-1] latencies(ms): ${latencies.join(',')} max=${maxLat}`);
     if (maxLat > 1000) {
-      console.warn(`[A3-1] 慢平台/watch 未命中退化注记: max=${maxLat}ms（经兜底路径送达，按容忍协议不判失败）`);
+      console.warn(`[A3-1] 慢平台/watch 未命中退化注记: max=${maxLat}ms（经兜底路径送达，按容忍协议不按 1s 判失败）`);
     }
-  } finally { w.stop(); fs.rmSync(root, { recursive: true, force: true }); }
+    assert.ok(maxLat < 3000,
+      `[A3-1] 3s 宽松上界（A3-1 协议「3s 复测不过则记不通过」的套件化）：max=${maxLat}ms`);
+  } finally {
+    w.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+    assert.equal(fs.existsSync(root), false, 'A0-7: 临时目录已清理'); // 守护断言
+  }
 });
 
 test('A3-2: watch 失效（删除被监视目录，本机实测静默无 error）后追加仍 ≤10s 全量可见、无重复', async () => {
@@ -83,13 +91,19 @@ test('A3-2: watch 失效（删除被监视目录，本机实测静默无 error�
     const ok = await waitFor(() => got.length >= 5, 10000); // error→1s 短轮询；静默→5s 对账
     assert.equal(got.length, 5);                      // 轮询兜底继续产出（缺失 = 硬失败）
     assert.equal(new Set(got.map(e => e.i)).size, 5); // 无重复
-    // ——时序目标（容忍协议）：超标只注记，不判失败——waitFor 自身预算之后才
-    // 从返回时刻起算，避免把兜底路径的正常耗时错判成时序违规
+    // ——时序目标（容忍协议）：waitFor 自身预算之后才从返回时刻起算，避免把
+    // 兜底路径的正常耗时错判成时序违规；15s 宽松上界为硬断言（防严重回归）
     const durMs = Date.now() - t0;
     if (!ok || durMs > 10000) {
-      console.warn(`[A3-2] 慢平台时序注记: 10s 内全量可见未达（ok=${ok}, ${durMs}ms），按容忍协议不判失败`);
+      console.warn(`[A3-2] 慢平台时序注记: 10s 内全量可见未达（ok=${ok}, ${durMs}ms），按容忍协议不按 10s 判失败`);
     }
-  } finally { w.stop(); fs.rmSync(root, { recursive: true, force: true }); }
+    assert.ok(ok && durMs < 15000,
+      `[A3-2] 15s 宽松上界（兜底机制严重回归判定）：ok=${ok}, ${durMs}ms`);
+  } finally {
+    w.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+    assert.equal(fs.existsSync(root), false, 'A0-7: 临时目录已清理'); // 守护断言
+  }
 });
 
 test('A3-2b: fs.watch 同步抛错（目录缺失）→ 退回短轮询 + 告警恰好一次，追加仍可见', async () => {
@@ -113,7 +127,11 @@ test('A3-2b: fs.watch 同步抛错（目录缺失）→ 退回短轮询 + 告警
     assert.equal(new Set(got.map(e => e.i)).size, 3);
     assert.equal(warns.filter(s => s.includes('fs.watch 不可用')).length, 1,
       '降级应告警恰好一次: ' + JSON.stringify(warns));
-  } finally { console.warn = origWarn; w.stop(); fs.rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    console.warn = origWarn; w.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+    assert.equal(fs.existsSync(root), false, 'A0-7: 临时目录已清理'); // 守护断言
+  }
 });
 
 test('A3-4: 100 行连续追加最终一致（恰 100）+ UTC 日切换（新文件从偏移 0 起读）', async () => {  const { root, logDir } = makeLogRoot('zcmon-pv-');
@@ -147,7 +165,11 @@ test('A3-4: 100 行连续追加最终一致（恰 100）+ UTC 日切换（新文
     await waitFor(() => got.length >= 110, 10000);
     assert.equal(got.length, 110); // 跨日事件仍可见
     assert.ok(got.every(e => e.day === 1 || e.day === 2));
-  } finally { w.stop(); fs.rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    w.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+    assert.equal(fs.existsSync(root), false, 'A0-7: 临时目录已清理'); // 守护断言
+  }
 });
 
 // 单次读上限（maxBytesPerPump 可注入以便测试）：一次性追加远超上限的大块增量
@@ -167,7 +189,11 @@ test('A3-5: 超单次读上限的大块增量分片追平（不丢不重，偏�
     await waitFor(() => got.length >= N, 15000);
     assert.equal(got.length, N);                      // 恰 N：分片追平不丢
     assert.equal(new Set(got.map(e => e.i)).size, N); // 无重复
-  } finally { w.stop(); fs.rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    w.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+    assert.equal(fs.existsSync(root), false, 'A0-7: 临时目录已清理'); // 守护断言
+  }
 });
 
 // 残行按原始字节保存、完整行才解码：多字节 UTF-8 序列跨分片切分时不得产生
@@ -187,5 +213,9 @@ test('A3-6: 多字节 UTF-8 跨分片不产生 U+FFFD（残行字节化，完整
     await waitFor(() => got.length >= 1, 15000);
     assert.equal(got.length, 1);
     assert.equal(got[0].text, text, '跨片切分的行必须完整解码（无 U+FFFD 丢行）');
-  } finally { w.stop(); fs.rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    w.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+    assert.equal(fs.existsSync(root), false, 'A0-7: 临时目录已清理'); // 守护断言
+  }
 });

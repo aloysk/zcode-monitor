@@ -26,7 +26,7 @@
                + CSS breathing + zzz (no dedicated row: 9-row contract)
        cruise  (activity inside the sleep window) → row8 review loop
      waiting_permission keeps a reserved rung between gen and sleep — no
-     signal source exists yet (see computeMood() for the wiring note).
+     signal source exists yet (wiring note lives in pet-state.js).
      Upstream rule kept verbatim: switch animations only at the END of a full
      row cycle, so the cat never pops mid-motion.
      Data: poll GET /api/widget/recent every 5 s → rolling tps over the
@@ -61,7 +61,9 @@
   --text-disabled: light-dark(#8f8f8f, #6d6d6d);
   --negative: light-dark(#d73220, #df3422);
   --accent: light-dark(#3b63fb, #8ea5fb); /* Spectrum 2 blue — the ×N lane badge */
-  --notice: light-dark(#fc7d00, #e06400);
+  /* --notice 浅色档是该数字在白底的唯一速度读数：#fc7d00 对白底仅 ~2.6:1，
+     加深到 #b35600（~4.9:1，AA）；深色档 #e06400 本就 ~4.6:1，不动 */
+  --notice: light-dark(#b35600, #e06400);
   --positive: light-dark(#05834e, #068850);
 
   --bubble-bg: light-dark(#ffffff, #303030);
@@ -197,19 +199,24 @@ body.state-sleep .bubble-zone::after {
   <div class="bubble" id="bubble"><span id="bnum">…</span><span class="bunit" id="bunit">t/s</span><span class="blanes" id="blanes" hidden></span></div>
 </div>
 
-<!-- 消毒模块：气泡类展示的文本闸门（当前气泡只显示数值，见 render() 内契约注释；
+<!-- 行为纯决策模块（ROW_ANIMS 契约 / 心情判定 / 事件→状态 / 手势判定）：
+     本页只消费全局、不保留内联副本——node:test require 的就是这份文件
+     （test/pet-state.test.js），页面接线走评审（A4-6 契约守护）。
+     消毒模块：气泡类展示的文本闸门（当前气泡只显示数值，见 render() 内契约注释；
      任何未来文本展示必须经 SanitizeSpeech.sanitizeSpeech） -->
+<script src="/pet-state.js"></script>
 <script src="/sanitize.js"></script>
 <script>
 'use strict';
 const IN_WEBVIEW = !!(window.chrome && window.chrome.webview);
+// 行为阈值与决策函数来自 pet-state.js（共享模块，单测守护那份文件）：
+// SLEEP_AFTER_MS（60s 无 agent 活动入睡）· ERROR_HOLD_MS（failed 行可见时长）
+// · COMBO_HOLD_MS（连击发脾气时长）· GESTURE_WINDOW_MS（手势判定窗口）。
 // 统一活动时钟：入睡只有这一个判定（旧 IDLE_AFTER 2 分钟 idle 态由 sleep 取代，
-// 两套计时器合一）。lastActive 由三个来源共同推进——完成的流量（poll）、生成/
-// 失败边（SSE）、用户手势（点击）——任何一个都能惊醒或续命。
-const SLEEP_AFTER_MS = 60 * 1000;  // 60s 无 agent 活动入睡
-const ERROR_HOLD_MS  = 4 * 1000;   // 工具失败后 failed 行的可见时长
-const COMBO_HOLD_MS  = 1500;       // 连击发脾气（failed 行）的可见时长
-const GESTURE_WINDOW_MS = 500;     // click 手势判定窗口（≈Windows 默认双击时长）
+// 两套计时器合一）。st.lastActive 由三个来源共同推进——完成的流量（poll）、
+// 生成/失败边（SSE）、用户手势（点击）——任何一个都能惊醒或续命。
+const PS = window.PetState;
+const { SLEEP_AFTER_MS, ERROR_HOLD_MS, COMBO_HOLD_MS, GESTURE_WINDOW_MS } = PS;
 const GEN_STALE  = 10 * 60 * 1000; // see staleness guard in poll()
 
 const $ = id => document.getElementById(id);
@@ -222,8 +229,8 @@ const reduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
 //    Double-click the pet cycles packs; choice persists in localStorage. ──
 const CELL_W = 192, CELL_H = 208, COLS = 8, FRAME_MS = 160;
 // standard contract: the first 9 rows are these anims, in this order
-const ROW_ANIMS = ['idle', 'running_right', 'running_left', 'waving', 'jumping',
-                   'failed', 'waiting_permission', 'running', 'review'];
+// （契约常量唯一权威在 pet-state.js 的 PS.ROW_ANIMS——本页无内联副本，A4-6）
+const ROW_ANIMS = PS.ROW_ANIMS;
 // hand-tuned exceptions the pixel scan can't see (cells that are non-blank
 // but visually broken/oversized); everything else is derived from the sheet
 const PACK_OVERRIDES = {
@@ -408,12 +415,16 @@ reduceMQ.addEventListener('change', () => {
 
 // ── rolling state ─────────────────────────────────────────────────────────
 let tps = null;              // rolling tps over the last-5-min population, or null
-let lastActive = Date.now(); // 统一活动时钟（epoch ms）：流量/生成边/失败/点击都推进它
-let gen = false;         // true between SSE gen:start and gen:end
-let lanes = 0;           // concurrent in-flight sessions (≥2 → ×N badge)
-let genLastAt = 0;       // time of the last gen event, for the staleness guard
-let errorHoldUntil = 0;  // 工具失败后 failed 行的 hold 截止时刻
-let comboHoldUntil = 0;  // 连击发脾气（failed 行）的 hold 截止时刻
+let genLastAt = 0;           // time of the last gen event, for the staleness guard
+// 决策状态收拢为一个对象：SSE 事件经 PS.applyGenEvent（纯 reducer）产出补丁，
+// 手势/轮询侧直接写字段——决策逻辑全部在 pet-state.js（单测面），页面只存取。
+const st = {
+  lastActive: Date.now(), // 统一活动时钟（epoch ms）：流量/生成边/失败/点击都推进它
+  gen: false,             // true between SSE gen:start and gen:end
+  lanes: 0,               // concurrent in-flight sessions (≥2 → ×N badge)
+  errorHoldUntil: 0,      // 工具失败后 failed 行的 hold 截止时刻
+  comboHoldUntil: 0,      // 连击发脾气（failed 行）的 hold 截止时刻
+};
 let asleep = false;      // render() 派生；step() 据此冻结在 idle 首帧
 let sseSeenEvent = false;
 let es = null;
@@ -426,39 +437,13 @@ function tierOf(t) { // same boundaries as widget.html speedClass()
   return 'tier-green';
 }
 
-// 单一心情判定（优先级从高到低，见文件头注）：
-//   error > tantrum > generating > waiting_permission（预留位次）> sleep > cruise
-// 入睡只查这一个时钟（now - lastActive），与旧 IDLE_AFTER 2 分钟判定合并——
-// 不存在第二套计时器。
-// waiting_permission 预留说明（未接线）：/api/live 与 /api/gen/state 目前都
-// 拿不到权限信号——2026-09-22 只读实测：tool_usage.approval_status 尾部取值
-// 全 'none'、permission 表 max rowid 0（与计划核实门快照一致）。出现信号源后
-// 接线三步：SSE 分派里加 permHoldUntil = Date.now() + ERROR_HOLD_MS；本函数
-// gen 之后插入 `if (now < permHoldUntil) return 'permission';`；animFor 已备好
-// 'waiting_permission' 行，无需再改。
+// 单一心情判定与心情→行映射在 pet-state.js（PS.computeMood / PS.animFor，纯
+// 函数、行为单测守护）；这里只做页面取材：当前时刻 + 状态对象 + 阈值注入。
 function computeMood() {
-  const now = Date.now();
-  if (now < errorHoldUntil) return 'error';   // 系统报错：优先于一切（生成中也先报错）
-  if (now < comboHoldUntil) return 'tantrum'; // 用户互动反馈，短暂压过后台生成画面
-  if (gen) return 'gen';
-  if (now - lastActive >= SLEEP_AFTER_MS) return 'sleep';
-  return 'cruise';
+  return PS.computeMood(Date.now(), { ...st, sleepAfterMs: SLEEP_AFTER_MS });
 }
-
-// 心情 → 行映射。gen 档位沿用上游词汇（3 档）：low → running、mid → jumping、
-// high → running_right（每整帧循环与 running_left 交替）；无数字 → 中速 running。
-// error 与 tantrum 共用 failed 行：系统报错与「被惹恼了」在这批像素包里是同一
-// 个懊恼动画，语义都成立，不新增行（9 行契约不动）。
 function animFor(mood) {
-  if (mood === 'error' || mood === 'tantrum') return 'failed';
-  if (mood === 'permission') return 'waiting_permission'; // 预留，见 computeMood
-  if (mood === 'gen') {
-    if (tps == null || !isFinite(tps) || tps < 30) return 'running';
-    if (tps <= 80) return 'jumping';
-    return 'running_right';
-  }
-  if (mood === 'sleep') return 'idle'; // step() 冻结在首帧 + CSS 呼吸，非循环
-  return 'review';                     // cruise
+  return PS.animFor(mood, tps);
 }
 
 function ariaLabel(s) {
@@ -492,8 +477,8 @@ function render() {
   // Readability floor (vision-caught): the mini form's bubble clamps to 8px,
   // where a 0.72em ×N is a 4px-tall blob — below 10px number size the badge
   // hides instead of smearing. Normal form (13.5px) always qualifies.
-  blanesEl.hidden = lanes < 2 || parseFloat(getComputedStyle(bnumEl).fontSize) < 10;
-  if (!blanesEl.hidden) blanesEl.textContent = '×' + lanes;
+  blanesEl.hidden = st.lanes < 2 || parseFloat(getComputedStyle(bnumEl).fontSize) < 10;
+  if (!blanesEl.hidden) blanesEl.textContent = '×' + st.lanes;
   bubbleEl.classList.add('on');
 }
 
@@ -516,7 +501,7 @@ async function poll() {
           ms += q.duration_ms;
         }
       }
-      lastActive = Math.max(lastActive, lastEnd); // 完成的流量推进统一活动时钟
+      st.lastActive = Math.max(st.lastActive, lastEnd); // 完成的流量推进统一活动时钟
       tps = rows.length && ms > 0 ? tok / (ms / 1000) : null;
     }
   } catch (e) {
@@ -526,7 +511,7 @@ async function poll() {
   // Staleness guard: if the gen stream died right after a 'start', don't let
   // the cat run forever. 10 min without any gen event demotes to cruise —
   // long enough that a real marathon generation isn't visually cut short.
-  if (gen && Date.now() - genLastAt > GEN_STALE) { gen = false; lanes = 0; }
+  if (st.gen && Date.now() - genLastAt > GEN_STALE) { st.gen = false; st.lanes = 0; }
   // idle demotion is time-based, so it must run even when the fetch failed
   render();
 }
@@ -539,19 +524,12 @@ function openSSE() {
       let m; try { m = JSON.parse(e.data); } catch { return; }
       sseSeenEvent = true;
       genLastAt = Date.now();
-      if (m.phase === 'start') { gen = true; lanes = Math.max(1, m.sessions || 1); lastActive = genLastAt; }
-      else if (m.phase === 'lanes') { lanes = m.sessions || 0; lastActive = genLastAt; }
-      else if (m.phase === 'end') {
-        gen = false; lanes = 0;
-        lastActive = Math.max(lastActive, genLastAt); // an end IS traffic
-      }
-      else if (m.phase === 'tool_error') {
-        // 错误态接线：信号源是 server/livegen.js 的工具失败水位扫描（经
-        // /api/gen/events SSE 透传，index.js 的 onEvent 原样转发）。failed 行
-        // hold ERROR_HOLD_MS——优先级最高，生成中也被短暂盖过（见 computeMood）。
-        lastActive = genLastAt; // 失败也是活动：惊醒
-        errorHoldUntil = genLastAt + ERROR_HOLD_MS;
-      }
+      // 事件→状态决策走 pet-state.js 的纯 reducer（A4-1/A4-2 的单测面）：
+      // start/lanes/end/tool_error 各自产出补丁，活动事件一律惊醒
+      // （patch.lastActive = 事件时刻）；tool_error 只置 errorHold，不动
+      // gen/lanes——工具失败不是生成结束。
+      const { patch } = PS.applyGenEvent(st, m, genLastAt);
+      Object.assign(st, patch);
       render();
     });
     // The endpoint may not exist yet. Native EventSource retries every ~3 s
@@ -611,15 +589,16 @@ document.addEventListener('pointermove', e => {
 document.addEventListener('click', e => {
   if (e.button !== 0) return;
   if (dragMoved) { dragMoved = false; return; } // 拖动后的补发 click 不计入手势
-  lastActive = Date.now(); // 戳一下也是活动：惊醒/续命
+  st.lastActive = Date.now(); // 戳一下也是活动：惊醒/续命
   clickTimes.push(performance.now());
   if (!clickTimer) clickTimer = setTimeout(() => {
-    const ts = clickTimes.slice().sort((a, b) => a - b);
-    const n = ts.length ? ts.filter(t => t - ts[0] <= GESTURE_WINDOW_MS).length : 0;
+    // 不变量判定在 pet-state.js 的 PS.classifyGesture（A4-4 单测面，纯函数）：
+    // 1 击 none、2-3 击 switch、≥4 击 combo（combo 消费整次手势，不切包）
+    const g = PS.classifyGesture(clickTimes, GESTURE_WINDOW_MS);
     clickTimes = []; clickTimer = 0;
-    if (n >= 4) {         // combo：发脾气，不切包
-      comboHoldUntil = Date.now() + COMBO_HOLD_MS;
-    } else if (n >= 2) {  // switch：双击/三击切下一个宠物
+    if (g.action === 'combo') {         // combo：发脾气，不切包
+      st.comboHoldUntil = Date.now() + COMBO_HOLD_MS;
+    } else if (g.action === 'switch') { // switch：双击/三击切下一个宠物
       cyclePack();
     }
     render();             // 发脾气立即上屏，不等下一次轮询

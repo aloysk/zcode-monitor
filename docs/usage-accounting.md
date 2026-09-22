@@ -222,7 +222,8 @@ ccusage 主线/fork 与 statusbar 包（降级链 1–3 级）均不支持 ZCode
 
 ## 6. 红线实测（A2-3，真实库 EXPLAIN + 计时）
 
-环境：真实库 14.6GB，model_usage 30 天 381,548 行；窗口 `since = now − 24h`；
+环境：真实库（早期基线约 14.6GB；现行规模持续增长，实测锚点见
+docs/specs/ecosystem-adoption-v1.md §4.1），model_usage 30 天 381,548 行；窗口 `since = now − 24h`；
 命令形态 `EXPLAIN QUERY PLAN <sql>` + `console.time`（better-sqlite3 readonly）。
 
 | 查询 | 改动前 | 改动后 |
@@ -291,10 +292,12 @@ fixture 组：边界行在改动前后各跑一次（`git stash` 切换），脚
 | USAGE | apps/zcode-cli/packages/adapters/src/storage/session-store/repositories/usage.ts |
 | OBS | apps/zcode-cli/packages/core/src/runtime/methods/usage-observability.ts |
 
-带标注的查询（13 处）：overviewKpis（×3 段）、timeseries、breakdownByModel、
-breakdownByTool、overviewSpeed、recentSpeed、completedSince、todayUsage、
-errorsList(model)、errorSummary、recentModelRows、recentToolRows、
-sessionList、sessionTurns（含 side call 下界标注）、sessionChildren、agentsForest。
+带标注的查询（16 处；2026-09-23 按 server/db.js 逐查询 "schema source:" 注释实测
+复核，段头另有 1 条全路径版总注不计入）：overviewKpis、timeseries、
+breakdownByModel、breakdownByTool、overviewSpeed、recentSpeed、completedSince、
+todayUsage、sessionList、sessionTurns（含 side call 下界标注）、sessionActivity、
+sessionChildren、sessionReasoning、recentModelRows、recentToolRows、agentsForest。
+（初稿曾写「13 处」并误列 errorsList/errorSummary——二者实无逐查询标注——本行已按实测修正。）
 抽查 5 处与本文档一致性核验：见 commit 说明。
 
 ## 10. 与计划文件的对应关系

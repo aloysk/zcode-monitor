@@ -277,6 +277,11 @@ function resolveStagingSource(source, stagingRoot = DEFAULT_STAGING_ROOT) {
 //    但请求的 Host 头仍是攻击者域名——只接受回环形态的 Host；
 // 3) body.source 只接受 staging 内的包目录名（resolveStagingSource 强制包含关系，
 //    词法 + 真实路径双重复核），导入前源树再做 symlink/junction 审计。
+// 防护边界（显式声明）：三道防线针对浏览器侧 CSRF / DNS rebinding 设计。若以
+// HOST=0.0.0.0 覆写监听（server/index.js 的 HOST 环境变量），非浏览器直连客户端
+// 可伪造回环 Host 与自定义首部绕过前两道闸——这与整个面板的无鉴权回环姿态一致
+// （默认只绑 127.0.0.1 即是主防线），写入面亦已限定在 staging → public/pets；
+// 对外暴露场景须自行加鉴权层，而非依赖本中间件。
 const LOOPBACK_HOST_RE = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/;
 function importEndpointMiddleware({ petsRoot, stagingRoot } = {}) {
   const staging = stagingRoot || DEFAULT_STAGING_ROOT;

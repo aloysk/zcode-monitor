@@ -43,7 +43,7 @@ function inFlightMessage({ id, session, created, updated }) {
     id, session_id: session,
     time_created: created ?? now,
     time_updated: updated ?? now,
-    sequence: id,
+    sequence: Number(id), // sequence 列是 INTEGER，id（TEXT 主键）只作行标识
     data: JSON.stringify({ role: 'assistant', time: {} }), // 无 time.completed → 在飞
   }]);
 }
@@ -57,6 +57,8 @@ test.after(() => {
   try { dbq.db().close(); } catch { /* already closed */ }
   dbq.invalidateDb();
   fx.cleanup();
+  // A0-7 守护断言：运行中记录的临时路径在钩子内已不存在
+  assert.equal(require('fs').existsSync(fx.root), false, 'A0-7: fixture 目录已清理');
 });
 
 test('tool_error: boot 不回放历史错误，新失败行才发射（带 tool 名）', async () => {
@@ -64,7 +66,7 @@ test('tool_error: boot 不回放历史错误，新失败行才发射（带 tool 
   try {
     const now = Date.now();
     buildToolUsage(fx.conn, [
-      { id: 1, session_id: 's1', tool_name: 'Read', status: 'error', started_at: now - 60e3 },
+      { id: '1', session_id: 's1', tool_name: 'Read', status: 'error', started_at: now - 60e3 },
     ]);
     const events = [];
     const watcher = createGenWatcher(dbq, { pollMs: 20 });
@@ -73,7 +75,7 @@ test('tool_error: boot 不回放历史错误，新失败行才发射（带 tool 
     assert.equal(events.filter(e => e.phase === 'tool_error').length, 0, 'boot 不得回放历史错误');
 
     buildToolUsage(fx.conn, [
-      { id: 2, session_id: 's1', tool_name: 'Bash', status: 'error', started_at: Date.now() },
+      { id: '2', session_id: 's1', tool_name: 'Bash', status: 'error', started_at: Date.now() },
     ]);
     await waitFor(() => events.some(e => e.phase === 'tool_error'), 3000);
     const errs = events.filter(e => e.phase === 'tool_error');
@@ -92,14 +94,14 @@ test('tool_error: 已完成行不发射；state().lastToolError 记录最近一�
     const events = [];
     const off = watcher.onEvent(ev => events.push(ev));
     buildToolUsage(fx.conn, [
-      { id: 1, session_id: 's1', tool_name: 'Bash', status: 'completed', started_at: Date.now() },
+      { id: '1', session_id: 's1', tool_name: 'Bash', status: 'completed', started_at: Date.now() },
     ]);
     await waitTicks();
     assert.equal(events.filter(e => e.phase === 'tool_error').length, 0, '成功行不是失败边');
     assert.equal(watcher.state().lastToolError, null);
 
     buildToolUsage(fx.conn, [
-      { id: 2, session_id: 's1', tool_name: 'Read', status: 'error', started_at: Date.now() },
+      { id: '2', session_id: 's1', tool_name: 'Read', status: 'error', started_at: Date.now() },
     ]);
     await waitFor(() => events.some(e => e.phase === 'tool_error'), 3000);
     assert.equal(events.filter(e => e.phase === 'tool_error').length, 1);
@@ -120,7 +122,7 @@ test('tool_error: 同毫秒批量失败超过单 tick LIMIT 也全量发射（ro
     // 永久跳过；rowid 水位下一 tick 续扫，60 行全见。
     const t = Date.now();
     buildToolUsage(fx.conn, Array.from({ length: 60 }, (_, i) => ({
-      id: i + 1, session_id: 's1', tool_name: 'T' + i, status: 'error', started_at: t,
+      id: 'tu-' + i, session_id: 's1', tool_name: 'T' + i, status: 'error', started_at: t,
     })));
     await waitFor(() => events.filter(e => e.phase === 'tool_error').length >= 60, 5000);
     const errs = events.filter(e => e.phase === 'tool_error');
@@ -139,14 +141,14 @@ test('tool_error: 启动前开始、启动后才落库的行仍发射（rowid �
     // 比 boot 已见行更老——started_at 水位会永久跳过它，rowid 水位照常发射。
     const now = Date.now();
     buildToolUsage(fx.conn, [
-      { id: 1, session_id: 's1', tool_name: 'Read', status: 'completed', started_at: now - 60e3 },
+      { id: '1', session_id: 's1', tool_name: 'Read', status: 'completed', started_at: now - 60e3 },
     ]);
     const watcher = createGenWatcher(dbq, { pollMs: 20 });
     const events = [];
     const off = watcher.onEvent(ev => events.push(ev));
     await waitTicks();
     buildToolUsage(fx.conn, [
-      { id: 2, session_id: 's1', tool_name: 'Bash', status: 'error', started_at: now - 90e3 },
+      { id: '2', session_id: 's1', tool_name: 'Bash', status: 'error', started_at: now - 90e3 },
     ]);
     await waitFor(() => events.some(e => e.phase === 'tool_error'), 3000);
     assert.equal(events.filter(e => e.phase === 'tool_error').length, 1);
@@ -166,14 +168,14 @@ test('gen 边: 在飞 assistant 行 → start（带 sessions/inflight），补�
     assert.equal(watcher.state().generating, false);
     assert.equal(events.filter(e => e.phase === 'start').length, 0);
 
-    inFlightMessage({ id: 1, session: 's1' });
+    inFlightMessage({ id: '1', session: 's1' });
     await waitFor(() => events.some(e => e.phase === 'start'), 3000);
     const start = events.find(e => e.phase === 'start');
     assert.equal(start.sessions, 1);
     assert.equal(start.inflight, 1);
     assert.equal(watcher.state().generating, true);
 
-    completeMessage(1);
+    completeMessage('1');
     await waitFor(() => events.some(e => e.phase === 'end'), 3000);
     assert.equal(watcher.state().generating, false);
     off();
@@ -187,11 +189,11 @@ test('gen 边: 第二会话在飞 → lanes 事件（sessions=2，×N 徽章信�
     const watcher = createGenWatcher(dbq, { pollMs: 20 });
     const events = [];
     const off = watcher.onEvent(ev => events.push(ev));
-    inFlightMessage({ id: 1, session: 's1' });
+    inFlightMessage({ id: '1', session: 's1' });
     await waitFor(() => events.some(e => e.phase === 'start'), 3000);
     assert.equal(events.filter(e => e.phase === 'lanes').length, 0, '首会话不额外发 lanes');
 
-    inFlightMessage({ id: 2, session: 's2' });
+    inFlightMessage({ id: '2', session: 's2' });
     await waitFor(() => events.some(e => e.phase === 'lanes'), 3000);
     const lanes = events.find(e => e.phase === 'lanes');
     assert.equal(lanes.sessions, 2);
@@ -208,8 +210,8 @@ test('僵尸窗: time_created 超过 5min 或 time_updated 沉默超过 90s 的�
     const events = [];
     const off = watcher.onEvent(ev => events.push(ev));
     const now = Date.now();
-    inFlightMessage({ id: 1, session: 's1', created: now - 6 * 60e3, updated: now }); // 老僵尸：创建超窗
-    inFlightMessage({ id: 2, session: 's2', created: now, updated: now - 2 * 60e3 }); // 新僵尸：沉默超窗
+    inFlightMessage({ id: '1', session: 's1', created: now - 6 * 60e3, updated: now }); // 老僵尸：创建超窗
+    inFlightMessage({ id: '2', session: 's2', created: now, updated: now - 2 * 60e3 }); // 新僵尸：沉默超窗
     await waitTicks(10);
     assert.equal(watcher.state().generating, false, '僵尸行不得计入在飞');
     assert.equal(watcher.state().sessions, 0);

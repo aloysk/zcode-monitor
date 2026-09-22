@@ -143,7 +143,15 @@
   function renderSeries(series, w) {
     $('#series-range').textContent = w === '7d' ? '近 7 天·按小时' : '近 24 小时';
     if (!series.length) return;
-    const labels = series.map(s => fmtTime(s.bucket));
+    // 轴刻度统一带日期（M/D HH:MM）：fmtTime 的 sameDay 分支只出时间，24h 窗的
+    // 末档与其余档呈两种格式、读轴易误判（截图实测）；桶恒为小时对齐。
+    const fmtAxis = iso => {
+      const d = new Date(iso);
+      if (isNaN(d)) return iso;
+      const hh = String(d.getHours()).padStart(2, '0');
+      return `${d.getMonth() + 1}/${d.getDate()} ${hh}:00`;
+    };
+    const labels = series.map(s => fmtAxis(s.bucket));
     const P = chartPalette();
     charts.calls && charts.calls.destroy();
     charts.tokens && charts.tokens.destroy();

@@ -32,9 +32,22 @@ function makePack(parent, { petJson = {}, webp = vp8xSheet(LEGAL.w, LEGAL.h), pe
   return dir;
 }
 
-function tmp(tag) { return fs.mkdtempSync(path.join(os.tmpdir(), 'zcmon-pet-' + tag + '-')); }
+// A0-7：记录本文件全部临时根，after 钩子断言已清理（用例中途抛错时由 finally
+// 兜底清理；崩溃残留由本断言在正常路径上暴露为红）。
+const TMP_ROOTS = [];
+function tmp(tag) {
+  const p = fs.mkdtempSync(path.join(os.tmpdir(), 'zcmon-pet-' + tag + '-'));
+  TMP_ROOTS.push(p);
+  return p;
+}
 
-test('合法包导入成功：三件套落位、NOTICE 齐备、无临时残留', () => {
+test.after(() => {
+  for (const p of TMP_ROOTS) {
+    assert.equal(fs.existsSync(p), false, 'A0-7: 临时目录已清理: ' + p);
+  }
+});
+
+test('合法包导入成功：三件套落位、NOTICE 齐备、无临时残留、webp-size CLI 判 OK', async () => {
   const root = tmp('ok');
   try {
     const src = makePack(root);
@@ -55,6 +68,14 @@ test('合法包导入成功：三件套落位、NOTICE 齐备、无临时残留'
     assert.deepEqual(r.warnings, []);
     // 原子性：目标根无 .import-* 临时目录残留
     assert.equal(fs.readdirSync(targetRoot).some(n => n.startsWith('.import-')), false);
+    // A1-1 的 webp-size CLI 子断言：落位 webp 上跑 node tools/webp-size.js 输出含 OK
+    //（同时守护 CLI 的 1536×208n×rows≥9 判据，A1-9 判据的套件内回归）
+    const { execFile: execFileCb } = require('child_process');
+    const { promisify: pms } = require('util');
+    const cli = await pms(execFileCb)(process.execPath,
+      [path.join(REPO, 'tools', 'webp-size.js'), path.join(r.dir, 'spritesheet.webp')]);
+    assert.ok(/rows=9 OK/.test(cli.stdout),
+      'webp-size CLI 须对落位 webp 判 OK: ' + cli.stdout.trim());
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -196,7 +217,7 @@ test('junction 逃逸防护：包目录树内的嵌套链接条目被拒', () =>
 });
 
 test('导入端点：非回环 Host（DNS rebinding 形态）403，回环 Host 过闸进入后续校验', () => {
-  const staging = fs.mkdtempSync(path.join(os.tmpdir(), 'zcmon-host-'));
+  const staging = tmp('host'); // 同入 A0-7 收集面（等价目录名）
   try {
     const mw = importEndpointMiddleware({
       petsRoot: path.join(staging, 'unused-pets'), stagingRoot: staging,

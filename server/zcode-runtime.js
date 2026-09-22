@@ -28,8 +28,17 @@ const Database = require('better-sqlite3');
 // Matches the Electron app binary path (cross-platform-ish) and the CLI helper.
 function isZCodeRunning() {
   try {
+    if (process.platform === 'win32') {
+      // Git Bash 的 ps 是 MSYS 迷你实现，不支持 -o（2026-09-23 实测每次探测
+      // 以 `ps: unknown option -- x` 失败退出 → 恒走乐观回退、health 恒报
+      // "运行中"）。win32 改用 tasklist 按镜像名精确匹配桌面端进程。
+      const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq ZCode.exe', '/NH'],
+        { encoding: 'utf8', maxBuffer: 1 << 20, stdio: ['ignore', 'pipe', 'pipe'] });
+      return /ZCode\.exe/i.test(out);
+    }
     // `ps -axo comm` gives the executable path; matching is robust to args.
-    const out = execFileSync('ps', ['-axo', 'comm'], { encoding: 'utf8', maxBuffer: 1 << 20 });
+    const out = execFileSync('ps', ['-axo', 'comm'],
+      { encoding: 'utf8', maxBuffer: 1 << 20, stdio: ['ignore', 'pipe', 'pipe'] });
     const lines = out.split('\n');
     return lines.some(line => {
       const l = line.trim();
@@ -40,8 +49,9 @@ function isZCodeRunning() {
           || /(^|\/)ZCode(\.exe)?$/.test(l);
     });
   } catch {
-    // ps failed (non-unix?) — fall back to optimistic: assume running so we
-    // stay in safe read-only mode rather than risk a contended checkpoint.
+    // probe failed (non-unix, tasklist missing?) — fall back to optimistic:
+    // assume running so we stay in safe read-only mode rather than risk a
+    // contended checkpoint.
     return true;
   }
 }

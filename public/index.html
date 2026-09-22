@@ -37,10 +37,12 @@
     <div class="spacer"></div>
     <div class="meta" id="topbar-meta">—</div>
     <button class="btn ghost" id="checkpoint-btn" title="把 WAL 数据合并进主库，确保 ZCode 关闭后历史可读" aria-label="合并 WAL">
-      <span id="checkpoint-icon">💾</span>
+      <!-- 顶栏图标为主题化单色 SVG（currentColor 随主题）：emoji 字形跨主题
+           亮度不可控（💾 在深色顶栏渲染成亮白方块，与 🌙 一亮一暗并列突兀） -->
+      <span id="checkpoint-icon"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><ellipse cx="8" cy="3.6" rx="5.4" ry="2.1"/><path d="M2.6 3.6v8.8c0 1.16 2.42 2.1 5.4 2.1s5.4-.94 5.4-2.1V3.6"/><path d="M2.6 8c0 1.16 2.42 2.1 5.4 2.1S13.4 9.16 13.4 8"/></svg></span>
     </button>
     <button class="btn ghost theme-toggle" id="theme-toggle" title="切换主题" aria-label="切换主题">
-      <span id="theme-icon">🌙</span>
+      <span id="theme-icon"><svg class="icon icon-moon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M13.6 9.6A6.1 6.1 0 1 1 6.4 2.4a4.9 4.9 0 0 0 7.2 7.2z"/></svg><svg class="icon icon-sun" viewBox="0 0 16 16" aria-hidden="true" focusable="false" hidden><circle cx="8" cy="8" r="3"/><path d="M8 1.2v1.8M8 13v1.8M1.2 8H3M13 8h1.8M3.2 3.2l1.3 1.3M11.5 11.5l1.3 1.3M12.8 3.2l-1.3 1.3M4.5 11.5l-1.3 1.3"/></svg></span>
     </button>
   </header>
   <div class="privacy-notice" id="privacy-notice" hidden>

@@ -24,17 +24,17 @@ test('A2-1: 口径边界行（cache 并存 / reasoning NULL / parent_id 组 / SU
     // 边界1：cache_read 与 cache_creation 并存；reasoning 为 NULL（COALESCE 路径）；
     // computed_total_tokens 故意 ≠ 分项和（1400 vs 1300），模拟官方预计算与
     // 自造公式的差异——分支 A / 分支 B 的期望值由此可区分。
-    { id: 1, session_id: 'p1', status: 'completed', started_at: Date.now() - 60e3,
+    { id: '1', session_id: 'p1', status: 'completed', started_at: Date.now() - 60e3,
       duration_ms: 1000, query_source: 'main_turn', input_tokens: 1000,
       output_tokens: 200, reasoning_tokens: null, cache_read_input_tokens: 400,
       cache_creation_input_tokens: 100, computed_total_tokens: 1400 },
     // 边界2：子代理组（parent_id 归组语义的 fixture 面）
-    { id: 2, session_id: 'c1', status: 'completed', started_at: Date.now() - 50e3,
+    { id: '2', session_id: 'c1', status: 'completed', started_at: Date.now() - 50e3,
       duration_ms: 1000, query_source: 'subagent', input_tokens: 500,
       output_tokens: 100, reasoning_tokens: 50, cache_read_input_tokens: 0,
       cache_creation_input_tokens: 0, computed_total_tokens: 650 },
     // 边界3：NULL token 列全空（SUM 稳健性）
-    { id: 3, session_id: 'p1', status: 'error', started_at: Date.now() - 40e3,
+    { id: '3', session_id: 'p1', status: 'error', started_at: Date.now() - 40e3,
       duration_ms: null, query_source: 'main_turn' },
   ]);
   process.env.ZCODE_DB = fx.dbPath;
@@ -68,5 +68,7 @@ test('A2-1: 口径边界行（cache 并存 / reasoning NULL / parent_id 组 / SU
     try { dbq.db().close(); } catch { /* already closed */ }
     dbq.invalidateDb();
     fx.cleanup();
+    // A0-7 守护断言：运行中记录的临时路径已不存在
+    assert.equal(require('fs').existsSync(fx.root), false, 'A0-7: fixture 目录已清理');
   }
 });

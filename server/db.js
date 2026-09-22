@@ -200,8 +200,12 @@ function overviewKpis(sinceMs) {
   // 范围 + 小集合去重，结果一致（510=510）、50ms（docs/usage-accounting.md §红线实测）。
   // 该索引名来自官方 migration 0010：缺它的库（旧版 ZCode、外部 ZCODE_DB）会抛
   // "no such index"，错误中间件不匹配 SQLITE_ERROR → Overview 整页 500。故先查
-  // sqlite_master，缺失时回退不加 INDEXED BY 的原查询（慢但可用）；结果按连接
+  // sqlite_master，缺失时回退不加 INDEXED BY 的原查询；结果按连接
   // 记忆（连接被 invalidateDb 换掉后自然重查）。
+  // 回退路径量级（2026-09-23 真实库只读计时）：单次 1.4-1.8s 全索引扫、同步阻塞
+  // 事件循环（INDEXED BY 路径 0.6ms、结果一致 49=49）。「慢但可用」是既定取舍：
+  // 本服务自身的库恒有官方索引，该路径只服务旧版/外部 ZCODE_DB，不为罕见形态
+  // 引入缓存/限频复杂度。
   const conn = db();
   if (conn._hasStartedModelIdx === undefined) {
     conn._hasStartedModelIdx = !!conn.prepare(
@@ -733,11 +737,18 @@ function recentToolRows(afterStartedAt, limit = 50) {
 // livegen 工具失败扫描专用：水位是 rowid 而非 started_at。started_at 单键水位
 // 有两个盲区——同毫秒批量新行超过 LIMIT 时截断点之后的同毫秒行被 WHERE
 // started_at > 水位永久跳过；boot 取 MAX(started_at) 后，启动前开始、启动后才
-// 落库的行也永不发射。rowid（id INTEGER PRIMARY KEY 的别名，追加行恒单调）作
-// 水位后两个盲区同时消失：>LIMIT 的余量下一 tick 续扫，晚落库的旧行 rowid 更大
-// 照常发射。rowid > ? 命中隐式行 id 的 O(log n) 尾界寻址（性能红线允许的两条
-// 路径之一），不碰 started_at 索引、绝不全表扫。返回原始 epoch ms 的 started_at
-//（本查询的唯一消费者 livegen 做数值比较，无需 ISO 化）。
+// 落库的行也永不发射。rowid 水位后两个盲区同时消失：>LIMIT 的余量下一 tick
+// 续扫，晚落库的旧行 rowid 更大照常发射。rowid 不变量（2026-09-23 只读实测真实
+// 库 sqlite_master）：tool_usage.id 是 `text primary key`——TEXT 主键**不是**
+// rowid 别名，本水位用的是独立的隐式 rowid；append-only 表新行按 max(rowid)+1
+// 分配，故隐式 rowid 随写入单调递增。`WHERE rowid > ?` 命中隐式 rowid 的
+// O(log n) 尾界寻址（EXPLAIN QUERY PLAN 实测 SEARCH tool_usage USING INTEGER
+// PRIMARY KEY (rowid>?)；性能红线允许的两条路径之一），不碰 started_at 索引、
+// 绝不全表扫。勿以 TEXT 的 id 列替代 rowid 做水位/排序——TEXT 序是字典序、
+// ≠ 写入序，那才是真 bug。残余前提：append-only——若上游未来删除最大 rowid
+// 行，复用分配会让新行 ≤ 水位被跳过（fixture 的同表 id 已对齐为 TEXT 主键，
+// test/helpers/fixture-db.js）。返回原始 epoch ms 的 started_at（本查询的唯一
+// 消费者 livegen 做数值比较，无需 ISO 化）。
 function recentToolRowsAfterRowid(afterRowid, limit = 50) {
   return db().prepare(`
     SELECT rowid AS rid, id, session_id, tool_name, status

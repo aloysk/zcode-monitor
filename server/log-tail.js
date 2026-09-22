@@ -151,6 +151,11 @@ function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
   let watcher = null, reconcileTimer = 0, pollTimer = 0, stopped = false;
   let pending = 0;
   let degradedWarned = false;
+  // 首文件尾部锚定完成标记：锚定失败（readdir 已见文件、紧随的 stat 抛错的窄窗）
+  // 时若直接进入增量读，会从偏移 0 整文件回放历史（真实日志 ~295MB/日）——
+  // 违反「起点对账不回放历史」。未锚定前每次 pump 先补做尾部锚定。
+  // 日切换（换名）到的新文件无历史，从 0 起读即视为已锚定。
+  let anchoredToTail = false;
 
   function warnDegraded(why) {
     if (degradedWarned || stopped) return;
@@ -167,9 +172,26 @@ function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
       const isFirst = curFile === null;
       curFile = file; offset = 0; remainder = Buffer.alloc(0); // 日切换（换名）→ 新文件从偏移 0 起读
       if (isFirst) { // 起点对账：已存在的当日文件从尾部开始，不回放历史
-        try { offset = fs.statSync(curFile).size; } catch { /* 文件未生成，等下次 */ }
+        try {
+          offset = fs.statSync(curFile).size;
+        } catch (e) {
+          if ((e && e.code) !== 'ENOENT') return; // 文件在但 stat 瞬时失败（EPERM/EBUSY）：
+                                                  // 历史未知、保持未锚定，下次 pump 先补锚定，
+                                                  // 绝不从 0 整文件回放
+          // ENOENT = 启动时文件还不存在 = 启动前无历史 → 从 0 增量读即安全
+          // （不能等下次"补锚定"：那会锚掉启动后已写入的新行、直接丢事件）
+        }
+        anchoredToTail = true;
         return;
       }
+      anchoredToTail = true; // 日切换的新文件无历史可回放，从 0 增量读即安全
+    }
+    if (!anchoredToTail) { // 首次非 ENOENT 失败过的补锚定（再失败则继续等）
+      try {
+        offset = fs.statSync(curFile).size;
+        anchoredToTail = true;
+      } catch { return; }
+      return;
     }
     let stat;
     try { stat = fs.statSync(curFile); }

@@ -5,6 +5,13 @@
 // 「过了消毒」不等于「可安全展示」。既定决策：气泡默认不展示 agent 原始文本
 // （pet 气泡只显示数值），本模块是文本类展示点（现有与未来）进入气泡前的
 // 必经闸门——任何新敏感样式须先在这里加规则再有单测。
+//
+// 已知盲区（2026-09-23 实测，均在覆盖外、须按上面的流程新增规则）：
+// Basic 认证的短 base64 头（<40 位不触发长 base64 规则）、AWS AccessKeyId
+// （AKIA…，20 位）、UNC 路径（\\host\share）、%ENV% 环境变量路径、/etc 与
+// /var 等 POSIX 系统路径、data:/javascript: 内联 URL、HTML 事件属性（如
+// <img onerror>——本模块是隐私剥除闸、不是 HTML 消毒器；消费方一律
+// textContent 渲染，无 XSS 面）。
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
   else root.SanitizeSpeech = factory();
@@ -21,6 +28,11 @@
     { re: new RegExp('\\b(?:https?|file|ftp|wss?):\\/\\/[^' + PUNCT + ']+', 'gi'), sub: '[链接]' },
     // Bearer 头 + 凭证串
     { re: /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, sub: '[凭证]' },
+    // JWT 三段整体剥除：规范 JWT（如 36/27/42 三段）每段都可能短于长 base64
+    // 的 40 位下限，长 base64 规则只剥掉签名段、头与载荷原样残留（可 base64url
+    // 解出 claims）。必须排在长 hex/base64 规则之前——否则签名段先被剥、三段
+    // 整体匹配失配。第二段不要求 eyJ 开头（payload 首字节非 { 时不成立）。
+    { re: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g, sub: '[凭证]' },
     // 绝对路径·Windows 盘符（C:\... 与 C:/... 两种斜杠都算）
     { re: new RegExp('[A-Za-z]:[\\\\/][^' + PUNCT + ']*', 'g'), sub: '[本地路径]' },
     // 绝对路径·用户目录波浪号（~/.zcode/...、~\foo）
