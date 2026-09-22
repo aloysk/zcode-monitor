@@ -31,3 +31,6 @@ tools/pets-staging/
 tools/*-catalog.json
 tools/scratch/
 .serena/
+
+# task acceptance artifacts (local evidence, not for distribution)
+artifacts/
