@@ -359,13 +359,13 @@
     }
     if (t === 'step-finish') {
       const tk = d.tokens || {};
-      return `<div class="part step-finish">step-finish · ${d.reason||''} · in ${fmtNum(tk.input)} / out ${fmtNum(tk.output)} / think ${fmtNum(tk.reasoning)} · cache r${fmtNum(tk.cache?.read)} w${fmtNum(tk.cache?.write)}</div>`;
+      return `<div class="part step-finish">step-finish · ${escapeHtml(d.reason||'')} · in ${fmtNum(tk.input)} / out ${fmtNum(tk.output)} / think ${fmtNum(tk.reasoning)} · cache r${fmtNum(tk.cache?.read)} w${fmtNum(tk.cache?.write)}</div>`;
     }
     if (t === 'timeline') {
-      return `<div class="part step-finish">⎯ ${escapeHtml(d.timelineType||'timeline')} ${d.fromModel?.modelID||''} → ${d.toModel?.modelID||''} ${d.toModel?.variant||''} ${statusBadge(d.status)}</div>`;
+      return `<div class="part step-finish">⎯ ${escapeHtml(d.timelineType||'timeline')} ${escapeHtml(d.fromModel?.modelID||'')} → ${escapeHtml(d.toModel?.modelID||'')} ${escapeHtml(d.toModel?.variant||'')} ${statusBadge(d.status)}</div>`;
     }
     if (t === 'compaction') {
-      return `<div class="part step-finish">⌘ compaction (${d.trigger||''}) · ${fmtNum(d.preCompactTokenCount)} → ${fmtNum(d.postCompactTokenCount)} tok ${statusBadge(d.timelineStatus)}</div>`;
+      return `<div class="part step-finish">⌘ compaction (${escapeHtml(d.trigger||'')}) · ${fmtNum(d.preCompactTokenCount)} → ${fmtNum(d.postCompactTokenCount)} tok ${statusBadge(d.timelineStatus)}</div>`;
     }
     if (t === 'file') {
       const url = d.url || '';

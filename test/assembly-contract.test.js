@@ -42,6 +42,36 @@ test('装配契约：/pets 收紧 static 先于通用 static（注册序即命�
     '/pets 收紧 static 须挂在通用 static 之前——挂晚则 /pets/* 由通用 static 以默认 Content-Type 命中，非图片强制下载防线失效');
 });
 
+// R5 T3：错误翻译层的挂载位置守护。Express 按注册顺序选中错误处理器——先注册
+// 的翻译层罩不住后注册路由抛出的错误（曾致 /api/widget/today、/api/widget/
+// recent 出错时 500 而非契约 503）。不变量：makeErrorTranslator 晚于全部 /api
+// 路由（六条 app.use('/api/<router>') 与全部内联 app.get/app.post('/api/…')）
+// 且早于 SPA fallback 的 app.get(/^\/(?!api)/。
+test('装配契约：makeErrorTranslator 晚于全部 /api 路由、早于 SPA fallback', () => {
+  const translator = firstIndexOf(/app\.use\(makeErrorTranslator\(/, 'makeErrorTranslator 错误翻译中间件');
+
+  // 全部 app.use('/api/<router>')：挂晚即罩不住该路由抛出的 SQLITE_BUSY。
+  // 下界断言防「路由被删后守护空转」——R5 时点 7 条（overview/sessions/trace/
+  // live/transcript/raw/agents）。
+  const uses = [...src.matchAll(/app\.use\('\/api\/[a-z]+',/g)].map(m => m.index);
+  assert.ok(uses.length >= 6, `app.use('/api/<router>') 须 ≥6 条（实测 ${uses.length}）`);
+  for (const pos of uses) {
+    assert.ok(pos < translator, `app.use('/api/<router>')@${pos} 须在错误翻译层之前`);
+  }
+
+  // 全部内联 /api 端点（checkpoint/health/gen/widget/pets 等，含 POST 形态）
+  const gets = [...src.matchAll(/app\.(get|post|put|delete|all)\('\/api\/[^']+',/g)].map(m => m.index);
+  assert.ok(gets.length >= 4, `内联 /api 端点须 ≥4 条（实测 ${gets.length}）`);
+  for (const pos of gets) {
+    assert.ok(pos < translator, `内联 /api 端点@${pos} 须在错误翻译层之前`);
+  }
+
+  // SPA fallback（非 /api 路径回 index.html）：翻译层必须在其之前
+  const spa = firstIndexOf(/app\.get\(\s*\/\^\\\/\(\?!api\)/, 'SPA fallback');
+  assert.ok(translator < spa,
+    'makeErrorTranslator 须早于 SPA fallback——挂晚则兜底路由的错误不再被翻译成 503 契约形态');
+});
+
 test('依赖冻结：dependencies 恰为 better-sqlite3 + express（deepEqual 等值）', () => {
   const pkg = require(path.join('..', 'server', '..', 'package.json'));
   assert.deepStrictEqual(

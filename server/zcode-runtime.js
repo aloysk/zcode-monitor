@@ -132,4 +132,67 @@ function checkpointNow(dbPath) {
   }
 }
 
-module.exports = { probeZCodeRunning, walStatus, walIdleMs, checkpointNow };
+// ── 探测回调：running→stopped 转移 + 自动 checkpoint ──────────────────────
+// 自 server/index.js 抽出为可注入工厂（依赖全参数化，供测试直接 stub 覆盖转移
+// 语义；index.js 只保留节流与定时器）。
+//
+// 首探测播种语义（R4 修-medium，git 考古 b66842f 回归）：runtimeState.running
+// 乐观初始化为 true，boot 即发出首个异步探测。若首次探测回调直接进入转移判断，
+// 「服务启动前 ZCode 就已退出（-wal 静默 ≥ 窗口）」会命中 wasRunning&&!running
+// → 启动即同步 checkpoint——违背 7dd5cbc 原实现「用同步探测结果播种 running、
+// boot 不 checkpoint」的语义。故首次回调只播种 runtimeState.running 并跳过转移
+// 判断；此后（第二次回调起）running→stopped 转移才触发 checkpoint。
+// checkpointRetryPending 与转移判断同住此处：上次自动 checkpoint 因 busy 未完成
+// 时，下个探测周期（仍判定未运行）重试一次。
+function makeRuntimeProbeHandler({ dbPath, runtimeState, activeWindowMs, invalidateDb, runtime = null } = {}) {
+  const rt = runtime || { walIdleMs, walStatus, checkpointNow };
+  let firstProbeDone = false;
+  let checkpointRetryPending = false;
+  return function handleProbeResult(probedRunning) {
+    let running = probedRunning;
+    if (running === false) {
+      const idle = rt.walIdleMs(dbPath);
+      if (idle != null && idle < activeWindowMs) running = true; // 误报否决
+    }
+    runtimeState.watchError = null;
+
+    if (!firstProbeDone) {
+      firstProbeDone = true;
+      runtimeState.running = running; // 只播种，不判转移（见函数头注）
+      return;
+    }
+
+    // Transition: running → stopped → fold the WAL so history stays readable.
+    // Also retry once per probe cycle after a busy attempt: the one-shot
+    // transition would otherwise give up forever on a transient lock.
+    const wasRunning = runtimeState.running;
+    runtimeState.running = running;
+    const shouldCheckpoint = (wasRunning && !running)
+      || (checkpointRetryPending && !running);
+    if (!shouldCheckpoint) return;
+    console.log('[runtime] ZCode exited — checkpointing WAL to preserve history…');
+    const before = rt.walStatus(dbPath);
+    const result = rt.checkpointNow(dbPath);
+    checkpointRetryPending = !!(result.ok && result.busy === 1); // busy=1：锁被占，下个周期再试一次
+    if (result.ok && !checkpointRetryPending) {
+      const after = result.after;
+      runtimeState.lastCheckpoint = {
+        at: new Date().toISOString(),
+        ok: true,
+        walBefore: before ? before.walBytes : null,
+        walAfter: after ? after.walBytes : null,
+        folded: before && after ? (before.walBytes - after.walBytes) : null,
+      };
+      console.log(`[runtime] checkpoint done: WAL ${before ? before.walBytes : '?'} → ${after ? after.walBytes : '?'} bytes`);
+    } else {
+      runtimeState.lastCheckpoint = { at: new Date().toISOString(), ok: false,
+        error: checkpointRetryPending ? 'checkpoint_busy' : result.error, retryable: true };
+      console.warn(`[runtime] checkpoint ${checkpointRetryPending ? 'busy（下个探测周期重试一次）' : 'failed'}: ${result.error || 'lock busy'}`);
+    }
+    // Drop our read-only connection cache so the next read sees the folded db.
+    if (typeof invalidateDb === 'function') invalidateDb();
+  };
+}
+
+module.exports = { probeZCodeRunning, walStatus, walIdleMs, checkpointNow,
+                   makeRuntimeProbeHandler };

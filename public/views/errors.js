@@ -26,7 +26,7 @@
         <div class="card tight" style="overflow-x:auto"><h3 style="padding:10px 14px 0">工具失败</h3><table id="er-tool"><thead></thead><tbody></tbody></table></div>
       </div>
 
-      <h2>最慢工具调用 Top 30</h2>
+      <h2>最慢工具调用 Top 30 <span class="sub" id="er-slow-scope"></span></h2>
       <div class="card tight" style="overflow-x:auto"><table id="er-slow"><thead></thead><tbody></tbody></table></div>
 
       <h2>Trace 链路还原 <span class="sub">输入 trace_id 还原事件瀑布</span></h2>
@@ -64,8 +64,17 @@
     } catch (e) { $('#er-summary').innerHTML = errorCard(e); }
     try {
       const slow = await getJSON(`/api/trace/slow-tools?window=${w}&limit=30`);
-      renderSlow(slow.items);
+      renderSlow(slow.items, slow.meta);
     } catch {}
+  }
+
+  // 「全部」窗口的实际统计口径（R5）：服务端为守住性能红线把候选集钳为
+  // 「近 30d 且最新 10 万行」（见 server/db.js slowTools），meta.slow_tools_scope
+  // 如实带回——raw.js metaBits 同款形态，用户选「全部」时知道实际口径。
+  function slowScopeLabel(scope) {
+    const m = /^recent_(\d+)d_capped_(\d+)_rows$/.exec(scope || '');
+    if (!m) return scope || '';
+    return `近 ${m[1]} 天 · 最新 ${Number(m[2]).toLocaleString()} 行内取最慢`;
   }
 
   function renderSummary(s) {
@@ -101,7 +110,12 @@
     </tr>`).join('') || '<tr><td colspan="7" class="empty">无失败</td></tr>';
   }
 
-  function renderSlow(items) {
+  function renderSlow(items, meta) {
+    const scopeEl = $('#er-slow-scope');
+    if (scopeEl) {
+      scopeEl.textContent = meta && meta.slow_tools_scope
+        ? `（「全部」口径：${slowScopeLabel(meta.slow_tools_scope)}）` : '';
+    }
     $('#er-slow').querySelector('thead').innerHTML = `<tr><th>时间</th><th>会话</th><th>工具</th><th>状态</th><th class="num">时延</th><th>错误</th></tr>`;
     $('#er-slow').querySelector('tbody').innerHTML = items.map(t => `<tr data-trace="${escapeHtml(t.trace_id||'')}">
       <td class="mono faint">${fmtTime(t.started_at)}</td>

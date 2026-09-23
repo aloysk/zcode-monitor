@@ -11,7 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const Database = require('better-sqlite3');
-const { checkpointNow, walStatus } = require(path.join(__dirname, '..', 'server', 'zcode-runtime.js'));
+const { checkpointNow, walStatus, makeRuntimeProbeHandler } = require(path.join(__dirname, '..', 'server', 'zcode-runtime.js'));
 
 function makeWalDb(root, name) {
   const dbPath = path.join(root, name);
@@ -110,4 +110,104 @@ test('checkpointNow 失败路径：路径不可达 → ok:false 带错误信息'
   } finally {
     rmRoot(root);
   }
+});
+
+// ── R4 修-medium：makeRuntimeProbeHandler 的首探测播种语义（b66842f 回归守护）──
+// runtime 依赖全部注入 stub；probe 回调直接调用（index.js 只保留节流/定时器）。
+function stubRuntime({ idleMs = null, busy = 0, fail = false } = {}) {
+  return {
+    walIdleMs: () => idleMs,
+    walStatus: () => ({ walBytes: 10, shmBytes: 0, mainBytes: 100 }),
+    checkpointNow: () => ({ ok: !fail, busy, error: fail ? 'boom' : undefined,
+      after: { walBytes: 2, shmBytes: 0, mainBytes: 108 } }),
+  };
+}
+
+test('makeRuntimeProbeHandler: 首探测只播种 running——boot 前 ZCode 已退出不触发 checkpoint', () => {
+  const rt = stubRuntime();
+  const calls = [];
+  rt.checkpointNow = () => { calls.push(1); return { ok: true, busy: 0, after: { walBytes: 0 } }; };
+  const state = { running: true, lastCheckpoint: null };
+  let invalidated = 0;
+  const h = makeRuntimeProbeHandler({
+    dbPath: 'unused', runtimeState: state, activeWindowMs: 60 * 1000,
+    invalidateDb: () => { invalidated++; }, runtime: rt,
+  });
+
+  // 回归形态：乐观 running=true + 首探测 false（ZCode 启动前已退出、-wal 静默）
+  //——修前 wasRunning&&!running 在 boot 即同步 checkpoint；修后只播种。
+  h(false);
+  assert.equal(state.running, false, '首探测播种探测结果');
+  assert.equal(calls.length, 0, '首探测不得触发 checkpoint（don\'t checkpoint at boot）');
+  assert.equal(state.lastCheckpoint, null);
+  assert.equal(invalidated, 0);
+
+  // 后续探测无转移（false→false）：仍不 checkpoint
+  h(false);
+  assert.equal(calls.length, 0);
+});
+
+test('makeRuntimeProbeHandler: 真实转移（running→stopped）触发 checkpoint；busy 置重试、下周期仍停时重试', () => {
+  const state = { running: true, lastCheckpoint: null };
+  let invalidated = 0;
+  let busyNow = 0;
+  const results = [];
+  const rt = {
+    walIdleMs: () => null,
+    walStatus: () => ({ walBytes: 10, shmBytes: 0, mainBytes: 100 }),
+    checkpointNow: () => { results.push(busyNow); return {
+      ok: true, busy: busyNow, after: { walBytes: 2, shmBytes: 0, mainBytes: 108 } }; },
+  };
+  const h = makeRuntimeProbeHandler({
+    dbPath: 'unused', runtimeState: state, activeWindowMs: 60 * 1000,
+    invalidateDb: () => { invalidated++; }, runtime: rt,
+  });
+
+  h(true);                       // 播种：running
+  assert.equal(results.length, 0);
+  h(true);                       // running→running：无转移
+  assert.equal(results.length, 0);
+
+  busyNow = 0;
+  h(false);                      // 真实转移 → checkpoint 成功
+  assert.equal(results.length, 1);
+  assert.equal(state.lastCheckpoint.ok, true);
+  assert.equal(state.lastCheckpoint.walBefore, 10);
+  assert.equal(state.lastCheckpoint.walAfter, 2);
+  assert.equal(invalidated, 1);
+
+  h(true);                       // 回到 running（播种后正常转移判断）
+  busyNow = 1;
+  h(false);                      // 转移 → checkpoint busy=1 → 记录失败 + 置重试
+  assert.equal(results.length, 2);
+  assert.equal(state.lastCheckpoint.ok, false);
+  assert.equal(state.lastCheckpoint.error, 'checkpoint_busy');
+  h(false);                      // 仍停止 → busy 重试一次
+  assert.equal(results.length, 3);
+
+  // R5（测试质量补测 T4）：busy 重试成功后 pending 清零——下个无转移周期不再
+  // checkpoint（results 计数稳定），lastCheckpoint 停留在成功形态。
+  busyNow = 0;
+  h(false);                      // pending → 重试成功一次
+  assert.equal(results.length, 4, 'busy 后的下个周期恰好重试一次');
+  assert.equal(state.lastCheckpoint.ok, true);
+  h(false);                      // 无转移 + pending 已清零 → 不再 checkpoint
+  assert.equal(results.length, 4, '重试成功后不得继续 checkpoint（计数稳定）');
+  assert.equal(state.lastCheckpoint.ok, true, 'lastCheckpoint 保持在成功形态');
+});
+
+test('makeRuntimeProbeHandler: 进程探测误报被 -wal 活跃否决（不与真实 writer 抢锁）', () => {
+  const rt = stubRuntime({ idleMs: 1000 }); // -wal 1s 前有写入 < 60s 窗口
+  const calls = [];
+  rt.checkpointNow = () => { calls.push(1); return { ok: true, busy: 0, after: { walBytes: 0 } }; };
+  const state = { running: true, lastCheckpoint: null };
+  const h = makeRuntimeProbeHandler({
+    dbPath: 'unused', runtimeState: state, activeWindowMs: 60 * 1000,
+    invalidateDb: () => {}, runtime: rt,
+  });
+
+  h(false); // 首探测播种：误报否决后播种 true
+  assert.equal(state.running, true);
+  h(false); // 后续：running→running（否决后仍 true），无转移
+  assert.equal(calls.length, 0, '-wal 活跃时绝不 checkpoint');
 });

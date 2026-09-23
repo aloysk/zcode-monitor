@@ -104,6 +104,10 @@ async function eventsForTrace(traceId) {
 // Build a span tree from a flat list of events. Each event has
 // spanId, parentSpanId, event, timestamp, durationMs, context.
 // Returns a forest (array of roots). Each node: { event, children:[] }.
+// 同 spanId 的多个事件归并为单节点，且节点只落位一次（R4 修-low）：首个可解析
+// 父引用的事件决定其挂载位置，其余事件不再重复入 roots/重复挂 children——修前
+// 同 span 双事件会把同一节点 push 两次。parentSpanId 指向不存在的 span → 根；
+// 无 spanId 的事件各自成根（按事件在数组中的位置区分）。
 function buildSpanForest(events) {
   const bySpan = new Map();
   for (const e of events) {
@@ -111,12 +115,16 @@ function buildSpanForest(events) {
     if (!bySpan.has(key)) bySpan.set(key, { node: e, children: [] });
   }
   const roots = [];
+  const placed = new Set(); // span key → 已挂载（roots 或某父的 children）
   for (const e of events) {
     const key = e.spanId || ('ev_' + events.indexOf(e));
+    if (placed.has(key)) continue; // 同 span 的后续事件：节点已落位，不重复挂
     const node = bySpan.get(key);
     if (e.parentSpanId && bySpan.has(e.parentSpanId)) {
+      placed.add(key);
       bySpan.get(e.parentSpanId).children.push(node);
     } else {
+      placed.add(key);
       roots.push(node);
     }
   }

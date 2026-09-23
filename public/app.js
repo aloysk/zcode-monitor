@@ -58,10 +58,12 @@ function statusBadge(status) {
 async function getJSON(url, opts = {}) {
   // Retry on 503 retryable (SQLite busy while ZCode writes). The backend
   // self-heals the connection; a brief backoff usually clears the lock.
+  // opts.headers：透传自定义首部（如 checkpoint force 闸的
+  // X-Zcode-Monitor-Checkpoint——跨源简单请求带不了，同源 fetch 恒可带）。
   const maxRetries = opts.retries != null ? opts.retries : 3;
   for (let i = 0; i <= maxRetries; i++) {
     let r;
-    try { r = await fetch(url); }
+    try { r = await fetch(url, { headers: opts.headers || {} }); }
     catch (e) {
       if (i < maxRetries) { await new Promise(x => setTimeout(x, 300 * Math.pow(2, i))); continue; }
       throw e;
@@ -241,7 +243,9 @@ document.addEventListener('DOMContentLoaded', () => {
     iconSvg.hidden = true; busy.hidden = false;
     ckpt.disabled = true;
     try {
-      const r = await getJSON('/api/checkpoint?force=1&_=' + Date.now());
+      // 首部闸（防跨站 <img> 触发 force checkpoint）：面板同源 fetch 恒可携带
+      const r = await getJSON('/api/checkpoint?force=1&_=' + Date.now(),
+        { headers: { 'X-Zcode-Monitor-Checkpoint': '1' } });
       if (r.ok) {
         const folded = r.before && r.after ? (r.before.walBytes - r.after.walBytes) : null;
         toast(folded != null ? `已合并 WAL：${(folded/1024/1024).toFixed(1)}MB 数据并入主库` : 'checkpoint 完成');

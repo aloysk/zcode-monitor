@@ -28,6 +28,7 @@
 // residuals R-13。
 const express = require('express');
 const dbq = require('../db');
+const { clampLimit, clampAtLeast } = require('../http-hardening');
 
 const router = express.Router();
 
@@ -193,8 +194,12 @@ router.get('/:table', (req, res) => {
   if (!ALLOWED.has(table)) {
     return res.status(400).json({ error: `table '${table}' not allowed` });
   }
-  const limit = Math.min(+req.query.limit || 100, 1000);
-  const offset = +req.query.offset || 0;
+  // limit/offset 双侧钳界（R4 修-high，R5 起走 http-hardening 共用 helper）：
+  // `Math.min(+q.limit || 100, 1000)` 对 ?limit=-1 产出 -1，SQLite 的负
+  // LIMIT = 无上限 → SELECT * 整表同步物化（message 72万行实测事件循环冻结）。
+  // 下界钳 1/0 后：负值与 NaN（?limit=abc）都回落缺省或安全值，上限 1000 不变。
+  const limit = clampLimit(req.query.limit, 100, 1000);
+  const offset = clampAtLeast(req.query.offset, 0);
   const desc = req.query.desc === '1' ? 'DESC' : 'ASC';
   // 列白名单大小写不敏感（R3 修-low）：PRAGMA 的列名与用户输入两侧都取小写比对，
   // SQL 引用仍用输入原大小写（SQLite 标识符本就大小写不敏感）

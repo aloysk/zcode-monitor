@@ -4,8 +4,9 @@
 //    面板无鉴权、默认只绑 127.0.0.1；DNS rebinding 让恶意页与 127.0.0.1「同源」
 //    后即可携带同源凭据读全部 /api（整库转录外传）。请求的 Host 头仍是攻击者
 //    域名——只接受回环形态（127.0.0.1 / localhost / [::1]，可带端口）。
-//    写操作端点（/api/pets/import）另要求自定义首部 X-Zcode-Monitor-Import
-//    （跨源简单 POST 带不了），两闸叠加。
+//    写操作端点另要求自定义首部：/api/pets/import 要求 X-Zcode-Monitor-Import、
+//    /api/checkpoint?force=1 要求 X-Zcode-Monitor-Checkpoint（均跨源简单请求
+//    带不了，首部名常量见 pet-import.js / checkpoint-route.js），两闸叠加。
 // 2) securityHeaders：全站 CSP + X-Content-Type-Options: nosniff。
 // 3) petsStaticOptions：/pets 静态服务的收紧选项（非图片强制下载，防导入面
 //    夹带的 .html/.svg 以面板同源执行）。
@@ -69,4 +70,61 @@ function petsStaticOptions() {
   };
 }
 
-module.exports = { LOOPBACK_HOST_RE, loopbackHostGate, CSP, securityHeaders, petsStaticOptions };
+// ── 查询参数钳界（R5 修-high，阻断-1 横向覆盖）──────────────────────────────
+// 缺陷形态：`Math.min(+q.limit || 默认, 上限)` 只有上界——?limit=-1 产出 -1，
+// SQLite 的负 LIMIT = 无上限 → SELECT 整表同步物化（真实库实测 slowTools 8.8s /
+// sessionList 6.4s / errorsList 1.8s，better-sqlite3 同步查询即事件循环冻结）。
+// c69a145 只修了 raw.js；本组 helper 统一双侧钳界后应用到全部同类端点：
+//   - clampLimit(value, fallback, max) → [1, max]：行数/条数类参数（与 raw.js
+//     既有钳界语义逐字一致：负值钳 1、0/NaN 回落缺省、超上限钳 max）；
+//   - clampAtLeast(value, fallback, max) → [0, max]：0 是有意义取值的形态
+//     （transcript 的「取前 0 条」、raw 的 offset），负值钳 0 防 slice(0,-1)
+//     静默丢尾行；max 缺省不设上界。NaN/Infinity 回落缺省。
+function clampLimit(value, fallback, max) {
+  const n = +value || fallback; // 0 / NaN / 缺省 → 缺省值（raw.js 既有语义）
+  return Math.max(1, Math.min(n, max));
+}
+
+function clampAtLeast(value, fallback, max = Infinity) {
+  const n = +value; // 0 在此是合法取值，不与缺省混淆；仅 NaN/±Infinity 回落
+  return Number.isFinite(n) ? Math.max(0, Math.min(n, max)) : fallback;
+}
+
+// 锁竞争/连接损伤错误翻译中间件工厂（R4 修-low，自 server/index.js 内联逻辑抽出
+// 供测试挂载，行为不变）：SQLite busy/locked → 503 database_busy（可重试），
+// 连接损伤（CORRUPT/NOTADB/IOERR）→ 503 database_unavailable，均先 invalidateDb
+// 丢弃只读连接缓存让下次请求重开；其余错误 next(err) 透传。
+// 挂载位置约定（index.js）：必须注册在所有会碰 DB 的 /api 路由之后（Express 按
+// 注册顺序选中错误处理器——先注册的翻译层罩不住后注册路由抛出的错误，曾致
+// /api/widget/today、/api/widget/recent 出错时 500 而非契约 503）。
+function makeErrorTranslator({ invalidateDb } = {}) {
+  return (err, _req, res, next) => {
+    const msg = (err && err.message) || String(err);
+    const code = err && (err.code || err.errno);
+    const isLock = code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED'
+      || /database is locked|unable to open database|database table is locked/i.test(msg);
+    if (isLock) {
+      if (typeof invalidateDb === 'function') invalidateDb(); // force a fresh connection next time
+      return res.status(503).json({
+        error: 'database_busy',
+        message: 'ZCode 正在写入数据库，请稍后重试。',
+        retryable: true,
+      });
+    }
+    // connection damage → 503 too, the next request will reopen
+    const broken = code === 'SQLITE_CORRUPT' || code === 'SQLITE_NOTADB' || code === 'SQLITE_IOERR'
+      || /bad database|file is not a database|disk i\/o/i.test(msg);
+    if (broken) {
+      if (typeof invalidateDb === 'function') invalidateDb();
+      return res.status(503).json({
+        error: 'database_unavailable',
+        message: '数据库连接异常，正在自动重连。',
+        retryable: true,
+      });
+    }
+    next(err);
+  };
+}
+
+module.exports = { LOOPBACK_HOST_RE, loopbackHostGate, CSP, securityHeaders, petsStaticOptions,
+                   makeErrorTranslator, clampLimit, clampAtLeast };

@@ -9,8 +9,9 @@ const express = require('express');
 const dbq = require('./db');
 const { createGenWatcher } = require('./livegen');
 const runtime = require('./zcode-runtime');
-const { loopbackHostGate, securityHeaders, petsStaticOptions } = require('./http-hardening');
+const { loopbackHostGate, securityHeaders, petsStaticOptions, makeErrorTranslator } = require('./http-hardening');
 const { makeCheckpointRoute } = require('./checkpoint-route');
+const { makeHealthRoute } = require('./health-route');
 const overview = require('./routes/overview');
 const sessions = require('./routes/sessions');
 const trace = require('./routes/trace');
@@ -83,7 +84,8 @@ if (warm.ok) {
 // （进程探测只认桌面端镜像名，覆盖不了 node 跑的 CLI 形态），否决「已退出」并
 // 回置运行中——绝不与真实 writer 抢锁。
 const runtimeState = {
-  running: true,                       // optimistic until the first probe lands
+  running: true,                       // optimistic until the first probe SEEDS it
+                                         // (首探测只播种不判转移，见 makeRuntimeProbeHandler)
   lastCheckpoint: null,                // { at, folded, walBefore, walAfter }
   watchError: null,
 };
@@ -92,55 +94,28 @@ const PROBE_MIN_INTERVAL_MS = 30 * 1000; // 探测节流 ≥ 单次子进程延�
 const WAL_ACTIVE_WINDOW_MS = 60 * 1000;  // -wal 静默不足此时长即视为 writer 在场
 let lastProbeAt = 0;
 
-let checkpointRetryPending = false; // 上次自动 checkpoint 因 busy 未完成：下个探测周期（仍判定未运行时）重试一次
+// 探测回调（转移判断 + 自动 checkpoint）抽在 server/zcode-runtime.js 的
+// makeRuntimeProbeHandler——首探测只播种 running 不判转移（boot 前 ZCode 就已
+// 退出不是「刚退出」，启动即 checkpoint 是 b66842f 异步化引入的回归），依赖全
+// 参数化供测试直接 stub。
+const handleProbeResult = runtime.makeRuntimeProbeHandler({
+  dbPath: dbq.DB_PATH,
+  runtimeState,
+  activeWindowMs: WAL_ACTIVE_WINDOW_MS,
+  invalidateDb: () => dbq.invalidateDb(),
+});
 
 function pollZCodeRuntime() {
   if (Date.now() - lastProbeAt < PROBE_MIN_INTERVAL_MS) return; // 结果沿用上次
   lastProbeAt = Date.now();
-  runtime.probeZCodeRunning(running => {
-    if (running === false) {
-      const idle = runtime.walIdleMs(dbq.DB_PATH);
-      if (idle != null && idle < WAL_ACTIVE_WINDOW_MS) running = true; // 误报否决
-    }
-    runtimeState.watchError = null;
-
-    const wasRunning = runtimeState.running;
-    runtimeState.running = running;
-
-    // Transition: running → stopped → fold the WAL so history stays readable.
-    // Also retry once per probe cycle after a busy attempt: the one-shot
-    // transition would otherwise give up forever on a transient lock.
-    const shouldCheckpoint = (wasRunning && !running)
-      || (checkpointRetryPending && !running);
-    if (shouldCheckpoint) {
-      console.log('[runtime] ZCode exited — checkpointing WAL to preserve history…');
-      const before = runtime.walStatus(dbq.DB_PATH);
-      const result = runtime.checkpointNow(dbq.DB_PATH);
-      checkpointRetryPending = !!(result.ok && result.busy === 1); // busy=1：锁被占，下个周期再试一次
-      if (result.ok && !checkpointRetryPending) {
-        const after = result.after;
-        runtimeState.lastCheckpoint = {
-          at: new Date().toISOString(),
-          ok: true,
-          walBefore: before ? before.walBytes : null,
-          walAfter: after ? after.walBytes : null,
-          folded: before && after ? (before.walBytes - after.walBytes) : null,
-        };
-        console.log(`[runtime] checkpoint done: WAL ${before ? before.walBytes : '?'} → ${after ? after.walBytes : '?'} bytes`);
-      } else {
-        runtimeState.lastCheckpoint = { at: new Date().toISOString(), ok: false,
-          error: checkpointRetryPending ? 'checkpoint_busy' : result.error, retryable: true };
-        console.warn(`[runtime] checkpoint ${checkpointRetryPending ? 'busy（下个探测周期重试一次）' : 'failed'}: ${result.error || 'lock busy'}`);
-      }
-      // Drop our read-only connection cache so the next read sees the folded db.
-      dbq.invalidateDb();
-    }
-  });
+  runtime.probeZCodeRunning(handleProbeResult);
 }
 
 
-// initial probe (async, doesn't block boot; don't checkpoint at boot — ZCode
-// may already be down and that's fine)
+// initial probe (async, doesn't block boot). The first probe SEEDS
+// runtimeState.running only — no transition check, so a ZCode that was already
+// down before boot does NOT trigger a startup checkpoint (that's fine; the
+// WAL is folded on the next real running→stopped transition instead).
 pollZCodeRuntime();
 setInterval(pollZCodeRuntime, 5000);
 
@@ -156,27 +131,12 @@ app.get('/api/checkpoint', makeCheckpointRoute({
   onSuccess: () => dbq.invalidateDb(),
 }));
 
-app.get('/api/health', (_req, res) => {
-  let ok = false, error = null;
-  try {
-    dbq.db().prepare('SELECT 1').get();
-    ok = true;
-  } catch (e) {
-    error = e.message;
-    // drop a damaged connection so the next request reopens cleanly
-    dbq.invalidateDb();
-  }
-  const zcodeRunning = runtimeState.running;
-  const wal = runtime.walStatus(dbq.DB_PATH);
-  res.json({
-    ok, error,
-    db: dbq.DB_PATH, log_dir: dbq.LOG_DIR,
-    zcode_running: zcodeRunning,
-    wal_bytes: wal ? wal.walBytes : null,
-    wal_pending_checkpoint: wal ? wal.walBytes > 0 : false,
-    last_checkpoint: runtimeState.lastCheckpoint,
-  });
-});
+// /api/health（R5 起抽为 server/health-route.js 工厂，行为不变；探测活连接
+// 而非 boot 快照、dbq.db 抛错时 invalidateDb 自愈等语义见该文件头注）。
+app.get('/api/health', makeHealthRoute({
+  dbq, runtime, runtimeState,
+  dbPath: dbq.DB_PATH, logDir: dbq.LOG_DIR,
+}));
 
 app.use('/api/overview', overview);
 app.use('/api/sessions', sessions);
@@ -185,35 +145,6 @@ app.use('/api/live', live);
 app.use('/api/transcript', transcript);
 app.use('/api/raw', raw);
 app.use('/api/agents', agents);
-
-// Translate SQLite lock/contention errors into 503 retryable responses so the
-// frontend can back off and retry instead of showing a hard error card.
-app.use((err, _req, res, next) => {
-  const msg = (err && err.message) || String(err);
-  const code = err && (err.code || err.errno);
-  const isLock = code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED'
-    || /database is locked|unable to open database|database table is locked/i.test(msg);
-  if (isLock) {
-    dbq.invalidateDb(); // force a fresh connection next time
-    return res.status(503).json({
-      error: 'database_busy',
-      message: 'ZCode 正在写入数据库，请稍后重试。',
-      retryable: true,
-    });
-  }
-  // connection damage → 503 too, the next request will reopen
-  const broken = code === 'SQLITE_CORRUPT' || code === 'SQLITE_NOTADB' || code === 'SQLITE_IOERR'
-    || /bad database|file is not a database|disk i\/o/i.test(msg);
-  if (broken) {
-    dbq.invalidateDb();
-    return res.status(503).json({
-      error: 'database_unavailable',
-      message: '数据库连接异常，正在自动重连。',
-      retryable: true,
-    });
-  }
-  next(err);
-});
 
 // /pets 静态服务收紧（须挂在与下面通用的 express.static 之前，注册顺序即命中
 // 顺序；构成见 server/http-hardening.js petsStaticOptions）：非图片一律
@@ -312,6 +243,14 @@ app.get('/api/pets/staging', (_req, res) => {
 //         ackUnknownLicense? }（许可证缺失/unknown 需 ackUnknownLicense:true 显式确认）
 app.post('/api/pets/import',
   petImport.importEndpointMiddleware({ petsRoot: PETS_ROOT, stagingRoot: PETS_STAGING_ROOT }));
+
+// Translate SQLite lock/contention errors into 503 retryable responses so the
+// frontend can back off and retry instead of showing a hard error card.
+// 注册位置（R4 修-low）：必须在所有会碰 DB 的 /api 路由之后、SPA fallback 之前
+//——Express 按注册顺序选错误处理器，先注册的翻译层罩不住后注册路由
+//（/api/widget/today、/api/widget/recent 曾因此 500 而非契约 503）。工厂本体在
+// server/http-hardening.js（依赖注入便于测试挂载，checkpoint-route.js 先例）。
+app.use(makeErrorTranslator({ invalidateDb: () => dbq.invalidateDb() }));
 
 // SPA fallback: any non-api route → index.html
 app.get(/^\/(?!api).*/, (_req, res) => {

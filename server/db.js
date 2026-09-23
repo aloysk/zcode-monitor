@@ -449,16 +449,8 @@ function todayUsage() {
   return { tokens: r.tokens || 0, requests: r.requests || 0 };
 }
 
-// Newest started_at per table — SSE watermark init. recentModelRows orders
-// ASC, so an "ORDER BY ... LIMIT 1" init picks the OLDEST row and replays the
-// whole table on every server boot; MAX() must be explicit.
-function latestModelStartedAt() {
-  return db().prepare('SELECT MAX(started_at) AS m FROM model_usage').get().m || 0;
-}
-
-function latestToolStartedAt() {
-  return db().prepare('SELECT MAX(started_at) AS m FROM tool_usage').get().m || 0;
-}
+// boot/connect 的 SSE 水位 init 亦是 MAX(rowid)（见 recentModelRowsAfterRowid
+// 头注；旧 latestModelStartedAt/latestToolStartedAt 的 started_at 水位随本改造移除）。
 
 // ───────────────────────── Sessions ─────────────────────────
 
@@ -714,69 +706,108 @@ function errorSummary(sinceMs) {
 }
 
 // Slow tool calls Top N
-function slowTools({ sinceMs = null, limit = 50 } = {}) {
-  const where = sinceMs ? 'WHERE started_at >= @since' : '';
+// ── window=all（sinceMs=null）的候选集钳制（R5 修-med，阻断-2）──────────────
+// 演进：最初的无 WHERE `ORDER BY duration_ms DESC` 是全表扫 + TEMP B-TREE 排序
+//（真实库 tool_usage 52.3万行实测热态 235ms，EXPLAIN: SCAN）；c69a145 钳
+// started_at ≥ now-30d，但真实库时间跨度恰好 30.0 天 → 窗口不裁任何行，全部
+// 52.3万行照旧进排序（实测 254-315ms，与修前无实质差异）。根因是只钳了时间
+// 维度、没钳候选集规模——时间跨度会随使用时长无限增长，规模必须有独立上界。
+// 现行双保险（均命中性能红线允许的路径）：
+//   1) 语义口径：started_at ≥ now-30d（「最慢工具」排查本就聚焦近期）；
+//   2) 规模钳制：rowid 尾部限定最新 SLOW_TOOLS_CANDIDATE_CAP_ROWS 行——
+//      `WHERE rowid > (SELECT MAX(rowid) FROM tool_usage) - @cap` 走隐式
+//      rowid 的 INTEGER PRIMARY KEY 尾界寻址（EXPLAIN QUERY PLAN 实测
+//      SEARCH ... USING INTEGER PRIMARY KEY (rowid>?);TEMP B-TREE 排序的输入
+//      从全表降为 ≤cap 行）。append-only 表 rowid 随写入单调递增（不变量出处
+//      见 recentToolRowsAfterRowid 头注），「最新 N 行」即「最近写入的 N 条」。
+// 实际口径由调用方在响应 meta 如实注明（routes/trace.js 的
+// slow_tools_scope:'recent_30d_capped_<cap>_rows'）。调用方显式给 sinceMs 的
+// 窗口（today/24h/7d）不做规模钳制——那是用户点名的时间窗，真实库 7d ≈ 12万
+// 行的排序在红线内，且隐藏截断会改语义。
+// candidateCapRows 参数是测试缝：小 fixture 注入小 cap 验证裁剪生效，不改
+// 运行时缺省值。
+const SLOW_TOOLS_ALL_SCOPE_MS = 30 * 86400_000;
+const SLOW_TOOLS_CANDIDATE_CAP_ROWS = 100_000;
+function slowTools({ sinceMs = null, limit = 50,
+                     candidateCapRows = SLOW_TOOLS_CANDIDATE_CAP_ROWS } = {}) {
+  if (sinceMs != null) {
+    return db().prepare(`
+      SELECT id, session_id, turn_id, tool_call_id, tool_name, status,
+             started_at, duration_ms, exit_code,
+             substr(COALESCE(error_message,''),1,160) AS err
+      FROM tool_usage
+      WHERE started_at >= @since
+      ORDER BY duration_ms DESC LIMIT @limit
+    `).all({ since: sinceMs, limit }).map(r => ({ ...r, started_at: ts(r.started_at) }));
+  }
+  const since = Date.now() - SLOW_TOOLS_ALL_SCOPE_MS;
   return db().prepare(`
     SELECT id, session_id, turn_id, tool_call_id, tool_name, status,
            started_at, duration_ms, exit_code,
            substr(COALESCE(error_message,''),1,160) AS err
-    FROM tool_usage ${where}
+    FROM tool_usage
+    WHERE rowid > (SELECT MAX(rowid) FROM tool_usage) - @cap
+      AND started_at >= @since
     ORDER BY duration_ms DESC LIMIT @limit
-  `).all({ since: sinceMs, limit }).map(r => ({ ...r, started_at: ts(r.started_at) }));
+  `).all({ since, limit, cap: candidateCapRows }).map(r => ({ ...r, started_at: ts(r.started_at) }));
 }
 
 // ───────────────────────── Live tail ─────────────────────────
 
-// For SSE: rows newer than the given id (primary key ordering via started_at+rowid).
-function recentModelRows(afterStartedAt, limit = 50) {
-  // schema source: zai-org/ZCode MIG 0010_usage_observability
+// SSE 行流的 rowid 水位查询（R4 修-low，三视角交叉印证）：旧 recentModelRows/
+// recentToolRows 用 started_at 单键水位，有 livegen.js:28-34 已定性并修复的同款
+// 盲区——boot 取 MAX(started_at) 后，启动前开始、启动后才落库的行永不发射；
+// 同毫秒批量新行超过 LIMIT 100 时截断点之后的同毫秒行被永久跳过。与
+// recentToolRowsAfterRowid（livegen 工具失败扫描）共享同一不变量：rowid 水位 +
+// ASC + LIMIT，>LIMIT 的余量下个 tick 续扫、晚落库的旧行 rowid 更大照常发射。
+// rowid 不变量与性能路径见 recentToolRowsAfterRowid 头注（隐式 rowid 尾界寻址，
+// 性能红线允许）。行携带 rid（隐式 rowid）供 per-connection 水位推进；started_at
+// 仍 ISO 化（前端时间轴直接消费）。返回按 rowid ASC。
+function recentModelRowsAfterRowid(afterRowid, limit = 50) {
   return db().prepare(`
-    SELECT id, session_id, turn_id, trace_id, status, started_at, duration_ms,
+    SELECT rowid AS rid, id, session_id, turn_id, trace_id, status, started_at, duration_ms,
            query_source, model_id, variant, mode, agent,
            input_tokens, output_tokens, reasoning_tokens, tool_call_count,
            error_type
     FROM model_usage
-    WHERE started_at > ?
-    ORDER BY started_at ASC
+    WHERE rowid > ?
+    ORDER BY rowid ASC
     LIMIT ?
-  `).all(afterStartedAt, limit).map(r => ({ ...r, started_at: ts(r.started_at) }));
+  `).all(afterRowid, limit)
+    .map(r => ({ ...r, started_at: ts(r.started_at) }));
 }
 
-function recentToolRows(afterStartedAt, limit = 50) {
-  // schema source: zai-org/ZCode MIG 0010_usage_observability
-  return db().prepare(`
-    SELECT id, session_id, turn_id, trace_id, tool_call_id, tool_name, status,
-           started_at, duration_ms, exit_code, error_type
-    FROM tool_usage
-    WHERE started_at > ?
-    ORDER BY started_at ASC
-    LIMIT ?
-  `).all(afterStartedAt, limit).map(r => ({ ...r, started_at: ts(r.started_at) }));
+// boot/connect 水位取 MAX(rowid)：只流式发射本连接建立之后的行（无历史回放）。
+function latestModelRowid() {
+  return db().prepare('SELECT MAX(rowid) AS m FROM model_usage').get().m || 0;
 }
 
-// livegen 工具失败扫描专用：水位是 rowid 而非 started_at。started_at 单键水位
-// 有两个盲区——同毫秒批量新行超过 LIMIT 时截断点之后的同毫秒行被 WHERE
-// started_at > 水位永久跳过；boot 取 MAX(started_at) 后，启动前开始、启动后才
-// 落库的行也永不发射。rowid 水位后两个盲区同时消失：>LIMIT 的余量下一 tick
-// 续扫，晚落库的旧行 rowid 更大照常发射。rowid 不变量（2026-09-23 只读实测真实
-// 库 sqlite_master）：tool_usage.id 是 `text primary key`——TEXT 主键**不是**
-// rowid 别名，本水位用的是独立的隐式 rowid；append-only 表新行按 max(rowid)+1
-// 分配，故隐式 rowid 随写入单调递增。`WHERE rowid > ?` 命中隐式 rowid 的
-// O(log n) 尾界寻址（EXPLAIN QUERY PLAN 实测 SEARCH tool_usage USING INTEGER
-// PRIMARY KEY (rowid>?)；性能红线允许的两条路径之一），不碰 started_at 索引、
-// 绝不全表扫。勿以 TEXT 的 id 列替代 rowid 做水位/排序——TEXT 序是字典序、
-// ≠ 写入序，那才是真 bug。残余前提：append-only——若上游未来删除最大 rowid
-// 行，复用分配会让新行 ≤ 水位被跳过（fixture 的同表 id 已对齐为 TEXT 主键，
-// test/helpers/fixture-db.js）。返回原始 epoch ms 的 started_at（本查询的唯一
-// 消费者 livegen 做数值比较，无需 ISO 化）。
+// livegen 工具失败扫描 + live.js SSE 工具行流的共用 rowid 水位扫描（R4 起双消费
+// 者）。started_at 单键水位有两个盲区——同毫秒批量新行超过 LIMIT 时截断点之后的
+// 同毫秒行被 WHERE started_at > 水位永久跳过；boot 取 MAX(started_at) 后，启动
+// 前开始、启动后才落库的行也永不发射。rowid 水位后两个盲区同时消失：>LIMIT 的
+// 余量下一 tick 续扫，晚落库的旧行 rowid 更大照常发射。与 recentModelRowsAfterRowid
+// 共享同一不变量。rowid 不变量（2026-09-23 只读实测真实库 sqlite_master）：
+// tool_usage.id 是 `text primary key`——TEXT 主键**不是** rowid 别名，本水位的
+// 是独立的隐式 rowid；append-only 表新行按 max(rowid)+1 分配，故隐式 rowid 随
+// 写入单调递增。`WHERE rowid > ?` 命中隐式 rowid 的 O(log n) 尾界寻址（EXPLAIN
+// QUERY PLAN 实测 SEARCH tool_usage USING INTEGER PRIMARY KEY (rowid>?)；性能
+// 红线允许的两条路径之一），不碰 started_at 索引、绝不全表扫。勿以 TEXT 的 id
+// 列替代 rowid 做水位/排序——TEXT 序是字典序、≠ 写入序，那才是真 bug。残余前提：
+// append-only——若上游未来删除最大 rowid 行，复用分配会让新行 ≤ 水位被跳过
+//（fixture 的同表 id 已对齐为 TEXT 主键，test/helpers/fixture-db.js）。
+// 返回载荷：livegen 消费 rid/status/tool_name/session_id（其余列不读）；live.js
+// SSE 行流消费完整列（含 ISO 化 started_at 供前端时间轴直接渲染）。
 function recentToolRowsAfterRowid(afterRowid, limit = 50) {
   return db().prepare(`
-    SELECT rowid AS rid, id, session_id, tool_name, status
+    SELECT rowid AS rid, id, session_id, turn_id, trace_id, tool_call_id,
+           tool_name, status, started_at, duration_ms, exit_code, error_type
     FROM tool_usage
     WHERE rowid > ?
     ORDER BY rowid ASC
     LIMIT ?
-  `).all(afterRowid, limit);
+  `).all(afterRowid, limit)
+    .map(r => ({ ...r, started_at: ts(r.started_at) }));
 }
 
 function latestToolRowid() {
@@ -842,13 +873,14 @@ function agentsForest({ projectId = null } = {}) {
 module.exports = {
   DB_PATH, LOG_DIR, ROLLOUT_DIR,
   db, warmDb, invalidateDb,
+  makeRetryingStatement, isBusyErr, isConnBroken, // 测试缝（R4 修-low）：导出供直测，不改变运行时行为
   ts, j, startOfDayMs,
   overviewKpis, timeseries, breakdownByModel, breakdownByTool,
   overviewSpeed, recentSpeed, completedSince, todayUsage,
   sessionList, sessionGet, sessionTurns, sessionConversation,
   sessionActivity, sessionChildren, sessionReasoning,
-  errorsList, errorSummary, slowTools,
-  recentModelRows, recentToolRows, latestModelStartedAt, latestToolStartedAt,
+  errorsList, errorSummary, slowTools, SLOW_TOOLS_CANDIDATE_CAP_ROWS,
+  recentModelRowsAfterRowid, latestModelRowid,
   recentToolRowsAfterRowid, latestToolRowid,
   agentsForest,
 };
