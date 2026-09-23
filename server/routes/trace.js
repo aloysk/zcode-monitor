@@ -3,6 +3,7 @@
 const express = require('express');
 const dbq = require('../db');
 const log = require('../log-tail');
+const { clampLimit } = require('../http-hardening');
 
 const router = express.Router();
 
@@ -19,7 +20,7 @@ router.get('/errors', (req, res) => {
     summary: dbq.errorSummary(sinceMs),
     items: dbq.errorsList({
       sinceMs, kind: req.query.kind || 'both',
-      limit: Math.min(+req.query.limit || 200, 1000),
+      limit: clampLimit(req.query.limit, 200, 1000),
     }),
   });
 });
@@ -33,15 +34,17 @@ router.get('/slow-tools', (req, res) => {
   else if (window === '24h') sinceMs = Date.now() - 24 * 3600_000;
   else if (window === '7d') sinceMs = Date.now() - 7 * 86400_000;
   else {
-    // 'all'：无界 ORDER BY duration_ms DESC 是全表扫 + TEMP B-TREE 排序（真实库
-    // tool_usage 52.3万行实测热态 235ms，性能红线）。与 raw.js 兜底策略对齐改为
-    // started_at 索引限定近 30d 再取最慢；db.js slowTools 对 null 同样钳 30d
-    //（双保险），口径在此注明。
-    sinceMs = Date.now() - 30 * 86400_000;
-    meta = { slow_tools_scope: 'recent_30d' };
+    // 'all'：无界 ORDER BY duration_ms DESC 是全表扫 + TEMP B-TREE 排序（性能
+    // 红线，真实库 tool_usage 52.3万行实测热态 235ms）。R5 起不再只在路由层钳
+    // 30d 时间窗——真实库时间跨度恰好 30.0d 时窗口不裁任何行（实测 254-315ms
+    // 无实质改善）。改为传 null 给 dbq.slowTools，由其在查询层做「时间窗语义
+    // 口径 + rowid 尾部候选集规模钳制」双保险（见 db.js slowTools 头注），meta
+    // 如实注明实际口径。
+    sinceMs = null;
+    meta = { slow_tools_scope: `recent_30d_capped_${dbq.SLOW_TOOLS_CANDIDATE_CAP_ROWS}_rows` };
   }
   const out = { items: dbq.slowTools({
-    sinceMs, limit: Math.min(+req.query.limit || 50, 500),
+    sinceMs, limit: clampLimit(req.query.limit, 50, 500),
   }) };
   if (meta) out.meta = meta;
   res.json(out);

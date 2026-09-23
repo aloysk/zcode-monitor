@@ -19,6 +19,8 @@ const { createFixtureDb } = require('./helpers/fixture-db');
 // 与 test/live-rowid.test.js 集成覆盖（rowid 水位语义），此处只守护可跑通。
 // makeRetryingStatement/isBusyErr/isConnBroken（连接自愈缝）由
 // test/db-retry.test.js 直测。
+// R5：SLOW_TOOLS_CANDIDATE_CAP_ROWS 是常量非查询函数（slowTools 的候选集规模
+// 口径，行为测试在 test/slow-tools.test.js），不进本清单。
 const QUERIES = [
   ['overviewKpis', s => [s]], ['timeseries', () => [24]],
   ['breakdownByModel', s => [s]], ['breakdownByTool', s => [s]],

@@ -70,6 +70,26 @@ function petsStaticOptions() {
   };
 }
 
+// ── 查询参数钳界（R5 修-high，阻断-1 横向覆盖）──────────────────────────────
+// 缺陷形态：`Math.min(+q.limit || 默认, 上限)` 只有上界——?limit=-1 产出 -1，
+// SQLite 的负 LIMIT = 无上限 → SELECT 整表同步物化（真实库实测 slowTools 8.8s /
+// sessionList 6.4s / errorsList 1.8s，better-sqlite3 同步查询即事件循环冻结）。
+// c69a145 只修了 raw.js；本组 helper 统一双侧钳界后应用到全部同类端点：
+//   - clampLimit(value, fallback, max) → [1, max]：行数/条数类参数（与 raw.js
+//     既有钳界语义逐字一致：负值钳 1、0/NaN 回落缺省、超上限钳 max）；
+//   - clampAtLeast(value, fallback, max) → [0, max]：0 是有意义取值的形态
+//     （transcript 的「取前 0 条」、raw 的 offset），负值钳 0 防 slice(0,-1)
+//     静默丢尾行；max 缺省不设上界。NaN/Infinity 回落缺省。
+function clampLimit(value, fallback, max) {
+  const n = +value || fallback; // 0 / NaN / 缺省 → 缺省值（raw.js 既有语义）
+  return Math.max(1, Math.min(n, max));
+}
+
+function clampAtLeast(value, fallback, max = Infinity) {
+  const n = +value; // 0 在此是合法取值，不与缺省混淆；仅 NaN/±Infinity 回落
+  return Number.isFinite(n) ? Math.max(0, Math.min(n, max)) : fallback;
+}
+
 // 锁竞争/连接损伤错误翻译中间件工厂（R4 修-low，自 server/index.js 内联逻辑抽出
 // 供测试挂载，行为不变）：SQLite busy/locked → 503 database_busy（可重试），
 // 连接损伤（CORRUPT/NOTADB/IOERR）→ 503 database_unavailable，均先 invalidateDb
@@ -107,4 +127,4 @@ function makeErrorTranslator({ invalidateDb } = {}) {
 }
 
 module.exports = { LOOPBACK_HOST_RE, loopbackHostGate, CSP, securityHeaders, petsStaticOptions,
-                   makeErrorTranslator };
+                   makeErrorTranslator, clampLimit, clampAtLeast };

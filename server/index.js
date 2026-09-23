@@ -11,6 +11,7 @@ const { createGenWatcher } = require('./livegen');
 const runtime = require('./zcode-runtime');
 const { loopbackHostGate, securityHeaders, petsStaticOptions, makeErrorTranslator } = require('./http-hardening');
 const { makeCheckpointRoute } = require('./checkpoint-route');
+const { makeHealthRoute } = require('./health-route');
 const overview = require('./routes/overview');
 const sessions = require('./routes/sessions');
 const trace = require('./routes/trace');
@@ -130,27 +131,12 @@ app.get('/api/checkpoint', makeCheckpointRoute({
   onSuccess: () => dbq.invalidateDb(),
 }));
 
-app.get('/api/health', (_req, res) => {
-  let ok = false, error = null;
-  try {
-    dbq.db().prepare('SELECT 1').get();
-    ok = true;
-  } catch (e) {
-    error = e.message;
-    // drop a damaged connection so the next request reopens cleanly
-    dbq.invalidateDb();
-  }
-  const zcodeRunning = runtimeState.running;
-  const wal = runtime.walStatus(dbq.DB_PATH);
-  res.json({
-    ok, error,
-    db: dbq.DB_PATH, log_dir: dbq.LOG_DIR,
-    zcode_running: zcodeRunning,
-    wal_bytes: wal ? wal.walBytes : null,
-    wal_pending_checkpoint: wal ? wal.walBytes > 0 : false,
-    last_checkpoint: runtimeState.lastCheckpoint,
-  });
-});
+// /api/health（R5 起抽为 server/health-route.js 工厂，行为不变；探测活连接
+// 而非 boot 快照、dbq.db 抛错时 invalidateDb 自愈等语义见该文件头注）。
+app.get('/api/health', makeHealthRoute({
+  dbq, runtime, runtimeState,
+  dbPath: dbq.DB_PATH, logDir: dbq.LOG_DIR,
+}));
 
 app.use('/api/overview', overview);
 app.use('/api/sessions', sessions);

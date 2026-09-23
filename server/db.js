@@ -706,23 +706,50 @@ function errorSummary(sinceMs) {
 }
 
 // Slow tool calls Top N
-// window=all（sinceMs=null）的旧形态是无 WHERE 的 `ORDER BY duration_ms DESC`
-// ——全表扫 + TEMP B-TREE 排序（真实库 tool_usage 52.3万行实测热态 235ms，
-// EXPLAIN: SCAN；性能红线禁止）。与 raw.js 的兜底策略对齐：null 时按
-// started_at 索引限定近 30d（SEARCH 起界）再在其中取最慢；「最慢工具」排查
-// 语义本就聚焦近期，口径由调用方在响应 meta 注明（routes/trace.js
-// slow_tools_scope:'recent_30d'）。24h/7d/today 窗口不受影响。
+// ── window=all（sinceMs=null）的候选集钳制（R5 修-med，阻断-2）──────────────
+// 演进：最初的无 WHERE `ORDER BY duration_ms DESC` 是全表扫 + TEMP B-TREE 排序
+//（真实库 tool_usage 52.3万行实测热态 235ms，EXPLAIN: SCAN）；c69a145 钳
+// started_at ≥ now-30d，但真实库时间跨度恰好 30.0 天 → 窗口不裁任何行，全部
+// 52.3万行照旧进排序（实测 254-315ms，与修前无实质差异）。根因是只钳了时间
+// 维度、没钳候选集规模——时间跨度会随使用时长无限增长，规模必须有独立上界。
+// 现行双保险（均命中性能红线允许的路径）：
+//   1) 语义口径：started_at ≥ now-30d（「最慢工具」排查本就聚焦近期）；
+//   2) 规模钳制：rowid 尾部限定最新 SLOW_TOOLS_CANDIDATE_CAP_ROWS 行——
+//      `WHERE rowid > (SELECT MAX(rowid) FROM tool_usage) - @cap` 走隐式
+//      rowid 的 INTEGER PRIMARY KEY 尾界寻址（EXPLAIN QUERY PLAN 实测
+//      SEARCH ... USING INTEGER PRIMARY KEY (rowid>?);TEMP B-TREE 排序的输入
+//      从全表降为 ≤cap 行）。append-only 表 rowid 随写入单调递增（不变量出处
+//      见 recentToolRowsAfterRowid 头注），「最新 N 行」即「最近写入的 N 条」。
+// 实际口径由调用方在响应 meta 如实注明（routes/trace.js 的
+// slow_tools_scope:'recent_30d_capped_<cap>_rows'）。调用方显式给 sinceMs 的
+// 窗口（today/24h/7d）不做规模钳制——那是用户点名的时间窗，真实库 7d ≈ 12万
+// 行的排序在红线内，且隐藏截断会改语义。
+// candidateCapRows 参数是测试缝：小 fixture 注入小 cap 验证裁剪生效，不改
+// 运行时缺省值。
 const SLOW_TOOLS_ALL_SCOPE_MS = 30 * 86400_000;
-function slowTools({ sinceMs = null, limit = 50 } = {}) {
-  const since = sinceMs != null ? sinceMs : Date.now() - SLOW_TOOLS_ALL_SCOPE_MS;
+const SLOW_TOOLS_CANDIDATE_CAP_ROWS = 100_000;
+function slowTools({ sinceMs = null, limit = 50,
+                     candidateCapRows = SLOW_TOOLS_CANDIDATE_CAP_ROWS } = {}) {
+  if (sinceMs != null) {
+    return db().prepare(`
+      SELECT id, session_id, turn_id, tool_call_id, tool_name, status,
+             started_at, duration_ms, exit_code,
+             substr(COALESCE(error_message,''),1,160) AS err
+      FROM tool_usage
+      WHERE started_at >= @since
+      ORDER BY duration_ms DESC LIMIT @limit
+    `).all({ since: sinceMs, limit }).map(r => ({ ...r, started_at: ts(r.started_at) }));
+  }
+  const since = Date.now() - SLOW_TOOLS_ALL_SCOPE_MS;
   return db().prepare(`
     SELECT id, session_id, turn_id, tool_call_id, tool_name, status,
            started_at, duration_ms, exit_code,
            substr(COALESCE(error_message,''),1,160) AS err
     FROM tool_usage
-    WHERE started_at >= @since
+    WHERE rowid > (SELECT MAX(rowid) FROM tool_usage) - @cap
+      AND started_at >= @since
     ORDER BY duration_ms DESC LIMIT @limit
-  `).all({ since, limit }).map(r => ({ ...r, started_at: ts(r.started_at) }));
+  `).all({ since, limit, cap: candidateCapRows }).map(r => ({ ...r, started_at: ts(r.started_at) }));
 }
 
 // ───────────────────────── Live tail ─────────────────────────
@@ -852,7 +879,7 @@ module.exports = {
   overviewSpeed, recentSpeed, completedSince, todayUsage,
   sessionList, sessionGet, sessionTurns, sessionConversation,
   sessionActivity, sessionChildren, sessionReasoning,
-  errorsList, errorSummary, slowTools,
+  errorsList, errorSummary, slowTools, SLOW_TOOLS_CANDIDATE_CAP_ROWS,
   recentModelRowsAfterRowid, latestModelRowid,
   recentToolRowsAfterRowid, latestToolRowid,
   agentsForest,

@@ -74,7 +74,10 @@ function readTranscript(childSessionId, { limit = null, types = null } = {}) {
       });
     }
   }
-  const events = limit ? out.slice(0, limit) : out;
+  // R5：以 null/非 null 区分「不限」与「取前 0 条」——旧的 truthiness 判断把
+  // limit=0 当作不限，且 route 传入负值时会 slice(0,-1) 静默丢最后一行（路由层
+  // 已钳非负，这里的 Math.max 是直调调用方的兜底）。
+  const events = limit != null ? out.slice(0, Math.max(0, limit)) : out;
   return { events, meta: loc.meta, found: true, count: out.length };
 }
 

@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const tr = require('../transcript');
+const { clampAtLeast } = require('../http-hardening');
 
 const router = express.Router();
 
@@ -15,8 +16,14 @@ const router = express.Router();
 router.get('/:sessionId', (req, res) => {
   const { sessionId } = req.params;
   const types = req.query.types ? req.query.types.split(',') : null;
+  // limit 钳非负（R5 修-high）：旧形态 `+q.limit` 直传，?limit=-1 会变成
+  // out.slice(0,-1) 静默丢最后一行。null（缺省）= 不限；显式 0 = 取前 0 条
+  //（readTranscript 以 null/非 null 区分二者）；负值/NaN 钳 0。
+  const limit = req.query.limit != null && req.query.limit !== ''
+    ? clampAtLeast(req.query.limit, 0)
+    : null;
   const { events, meta, found, count } = tr.readTranscript(sessionId, {
-    limit: req.query.limit ? +req.query.limit : null,
+    limit,
     types,
   });
   if (!found) {

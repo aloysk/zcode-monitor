@@ -184,6 +184,16 @@ test('makeRuntimeProbeHandler: 真实转移（running→stopped）触发 checkpo
   assert.equal(state.lastCheckpoint.error, 'checkpoint_busy');
   h(false);                      // 仍停止 → busy 重试一次
   assert.equal(results.length, 3);
+
+  // R5（测试质量补测 T4）：busy 重试成功后 pending 清零——下个无转移周期不再
+  // checkpoint（results 计数稳定），lastCheckpoint 停留在成功形态。
+  busyNow = 0;
+  h(false);                      // pending → 重试成功一次
+  assert.equal(results.length, 4, 'busy 后的下个周期恰好重试一次');
+  assert.equal(state.lastCheckpoint.ok, true);
+  h(false);                      // 无转移 + pending 已清零 → 不再 checkpoint
+  assert.equal(results.length, 4, '重试成功后不得继续 checkpoint（计数稳定）');
+  assert.equal(state.lastCheckpoint.ok, true, 'lastCheckpoint 保持在成功形态');
 });
 
 test('makeRuntimeProbeHandler: 进程探测误报被 -wal 活跃否决（不与真实 writer 抢锁）', () => {

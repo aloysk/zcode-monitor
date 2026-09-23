@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const dbq = require('../db');
+const { clampLimit } = require('../http-hardening');
 
 const router = express.Router();
 
@@ -41,8 +42,11 @@ function resolveSubdir(base, segment) {
 router.get('/', (req, res) => {
   res.json({
     sessions: dbq.sessionList({
-      limit: Math.min(+req.query.limit || 100, 500),
-      offset: +req.query.offset || 0,
+      // limit/max 双侧钳界（R5 修-high）：旧形态 Math.min(+q || 默认, 上限) 对
+      // ?limit=-1 产出 -1 = SQLite 无上限 LIMIT（真实库 1.77万会话实测 6.4s
+      // 同步冻结）。helper 语义见 http-hardening.js。
+      limit: clampLimit(req.query.limit, 100, 500),
+      offset: +req.query.offset || 0, // SQLite 负 OFFSET 语义即 0，无横面风险
       q: req.query.q || '',
       taskType: req.query.task_type || '',
     }),
@@ -65,7 +69,7 @@ router.get('/:id/turns', (req, res) => {
 router.get('/:id/conversation', (req, res) => {
   res.json({
     messages: dbq.sessionConversation(req.params.id, {
-      maxMessages: Math.min(+req.query.max || 400, 2000),
+      maxMessages: clampLimit(req.query.max, 400, 2000), // R5：负值钳 1，见上
     }),
   });
 });
@@ -74,7 +78,7 @@ router.get('/:id/conversation', (req, res) => {
 router.get('/:id/activity', (req, res) => {
   res.json({
     activity: dbq.sessionActivity(req.params.id,
-      Math.min(+req.query.limit || 200, 1000)),
+      clampLimit(req.query.limit, 200, 1000)),
   });
 });
 
@@ -82,7 +86,7 @@ router.get('/:id/activity', (req, res) => {
 router.get('/:id/reasoning', (req, res) => {
   res.json({
     reasoning: dbq.sessionReasoning(req.params.id,
-      Math.min(+req.query.limit || 50, 500)),
+      clampLimit(req.query.limit, 50, 500)),
   });
 });
 

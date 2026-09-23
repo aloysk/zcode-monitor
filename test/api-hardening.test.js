@@ -1,11 +1,13 @@
 'use strict';
-// test/api-hardening.test.js — R2/R4 加固面的端点测试：
+// test/api-hardening.test.js — R2/R4/R5 加固面的端点测试：
 // 1) /api 全局回环 Host 闸（loopbackHostGate，防 DNS rebinding）；
 // 2) /api/raw where 受限文法（参数化绑定，UNION 等注入面拒绝）+ limit/offset 钳界；
 // 3) /api/checkpoint 四分支（403 force 首部闸 / 409 wal_active / 409 zcode_running
 //    / 503 checkpoint_busy / 放行）；
 // 4) /pets 静态收紧 + CSP/nosniff 响应头；
-// 5) makeErrorTranslator（锁竞争/连接损伤 → 503 契约形态，依赖注入供挂载）。
+// 5) makeErrorTranslator（锁竞争/连接损伤 → 503 契约形态，依赖注入供挂载）；
+// 6) R5 阻断-1：limit/max 负值横向钳界（trace/sessions/transcript/raw 全端点）；
+// 7) R5 T6：makeHealthRoute 工厂（正常/抛错两形态）。
 // fixture 全部在 os.tmpdir() 下构建；db 环境变量在 require 前 注入
 //（server/db.js 在 require 时读 env，连接惰性）。
 const test = require('node:test');
@@ -22,16 +24,28 @@ fx.seed();
 process.env.ZCODE_DB = fx.dbPath;
 process.env.ZCODE_LOG_DIR = fx.logDir;
 process.env.ZCODE_ROLLOUT_DIR = fx.rolloutDir;
+// R5：T1 挂载 sessions/transcript 路由，AGENTS/EXEC 目录在 require 前注入
+// tmpdir（routes/sessions.js / server/transcript.js require 时读取，与
+// ZCODE_DB 同法）——绝不触碰真实 ~/.zcode。
+const envRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'zcmon-apih-'));
+process.env.ZCODE_AGENTS_DIR = path.join(envRoot, 'agents');
+process.env.ZCODE_EXEC_DIR = path.join(envRoot, 'exec');
 
 const { loopbackHostGate, securityHeaders, petsStaticOptions, CSP, makeErrorTranslator } = require('../server/http-hardening');
 const { makeCheckpointRoute, CHECKPOINT_FORCE_HEADER } = require('../server/checkpoint-route');
+const { makeHealthRoute } = require('../server/health-route');
 const raw = require('../server/routes/raw');
+const traceRoutes = require('../server/routes/trace');
+const sessionsRoutes = require('../server/routes/sessions');
+const transcriptRoutes = require('../server/routes/transcript');
 
 test.after(() => {
   try { require('../server/db').db().close(); } catch { /* already closed */ }
   try { require('../server/db').invalidateDb(); } catch { /* ignore */ }
   fx.cleanup();
   assert.equal(fs.existsSync(fx.root), false, 'A0-7: fixture 目录已清理');
+  fs.rmSync(envRoot, { recursive: true, force: true });
+  assert.equal(fs.existsSync(envRoot), false, 'A0-7: env 注入目录已清理');
 });
 
 function listen(app) {
@@ -438,6 +452,140 @@ test('checkpoint force 首部闸：?force=1 无首部 403；带头部进入既�
     assert.equal(plain.status, 409);
     assert.equal(JSON.parse(plain.body).error, 'zcode_running');
   } finally { server.close(); }
+});
+
+// ── R5 阻断-1：负 limit/max 横向钳界（trace/sessions/transcript/raw 全端点）──
+// 旧行为：`Math.min(+q.limit || 默认, 上限)` 对 ?limit=-1 产出 -1 = SQLite 无上限
+// LIMIT（真实库实测 slowTools 8.8s / sessionList 6.4s / errorsList 1.8s 同步冻结）。
+// 钳后 ?limit=-1 / ?max=-1 → 1；fixture 数据量刻意小——断言的是钳界行为不是性能。
+test('limit/max 负值横向钳界：?limit=-1 / ?max=-1 在全部同类端点不再全量返回', async () => {
+  // transcript 侧 found:true 需要真实 agent fixture（2 行事件，供 limit 语义可判）
+  const uuid = '00112233-4455-6677-8899-aabbccddeeff';
+  const agentDir = path.join(process.env.ZCODE_AGENTS_DIR, 'parent-1', 'agent_' + uuid);
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.writeFileSync(path.join(agentDir, 'metadata.json'), JSON.stringify({ agentId: 'agent_x' }));
+  fs.writeFileSync(path.join(agentDir, 'transcript.jsonl'), [
+    { sequenceNumber: 1, type: 'turn_started', timestamp: '2026-09-23T01:00:00.000Z', payload: { input: 'a' } },
+    { sequenceNumber: 2, type: 'model_complete', timestamp: '2026-09-23T01:00:01.000Z', payload: {} },
+  ].map(l => JSON.stringify(l)).join('\n') + '\n');
+  const child = 'sess_subagent_agent_' + uuid;
+
+  const app = express();
+  app.use('/api', loopbackHostGate);
+  app.use('/api/trace', traceRoutes);
+  app.use('/api/sessions', sessionsRoutes);
+  app.use('/api/transcript', transcriptRoutes);
+  app.use('/api/raw', raw);
+  const server = await listen(app);
+  try {
+    const port = server.address().port;
+    // 每端点：路径 + 钳后断言（?limit=-1 → 1：响应数组 ≤1 行即证明未全量返回；
+    // fixture 中会话 2 条/消息 2 条/活动 5 行，全量返回必然 >1）
+    const cases = [
+      ['/api/trace/errors?window=all&limit=-1', j => j.items.model.length <= 1 && j.items.tool.length <= 1],
+      ['/api/trace/slow-tools?window=all&limit=-1', j => j.items.length <= 1],
+      ['/api/sessions?limit=-1', j => j.sessions.length <= 1],
+      ['/api/sessions/s1/conversation?max=-1', j => j.messages.length <= 1],
+      ['/api/sessions/s1/activity?limit=-1', j => j.activity.length <= 1],
+      ['/api/sessions/s1/reasoning?limit=-1', j => j.reasoning.length <= 1],
+      ['/api/raw/session?limit=-1', j => j.rows.length <= 1 && j.limit === 1],
+    ];
+    for (const [p, check] of cases) {
+      const r = await get(port, p);
+      assert.equal(r.status, 200, p);
+      const j = JSON.parse(r.body);
+      assert.ok(check(j), `${p} 负值须钳为 1，不得全量返回`);
+    }
+
+    // transcript：limit 钳非负——?limit=-1 → 0 条（旧行为 slice(0,-1) 静默丢
+    // 最后一行）；?limit=1 → 1 条；缺省 → 不限（2 条）
+    const neg = await get(port, `/api/transcript/${child}?limit=-1`);
+    assert.equal(neg.status, 200);
+    const negJ = JSON.parse(neg.body);
+    assert.equal(negJ.found, true);
+    assert.equal(negJ.events.length, 0, '?limit=-1 须钳为 0，不得 slice(0,-1) 丢尾行');
+    assert.equal(negJ.count, 2, 'count 仍为事件总数（limit 只影响返回集）');
+    const one = await get(port, `/api/transcript/${child}?limit=1`);
+    assert.equal(JSON.parse(one.body).events.length, 1);
+    const all = await get(port, `/api/transcript/${child}`);
+    assert.equal(JSON.parse(all.body).events.length, 2, '缺省 limit = 不限');
+
+    // 正常值不受钳界影响（各端点 limit=1 均可正常返回 1 行）
+    const okSess = await get(port, '/api/sessions?limit=1');
+    assert.equal(JSON.parse(okSess.body).sessions.length, 1);
+    const okConv = await get(port, '/api/sessions/s1/conversation?max=1');
+    assert.equal(JSON.parse(okConv.body).messages.length, 1);
+  } finally { server.close(); }
+});
+
+// ── R5 T6：makeHealthRoute（server/health-route.js 工厂，index.js 装配）──────
+test('makeHealthRoute: 正常路径 ok:true 全字段；dbq.db 抛错 → ok:false + error 透传 + invalidateDb', async () => {
+  const lastCheckpoint = { at: '2026-09-23T00:00:00.000Z', ok: true, walBefore: 10, walAfter: 2 };
+  const runtime = { walStatus: () => ({ walBytes: 4096, shmBytes: 0, mainBytes: 100 }) };
+  const mount = (dbqStub, state) => {
+    const app = express();
+    app.get('/api/health', makeHealthRoute({
+      dbq: dbqStub, runtime, runtimeState: state, dbPath: 'P', logDir: 'L',
+    }));
+    return app;
+  };
+
+  // ① 正常路径：ok:true + 全字段（zcode_running/wal_bytes/wal_pending_checkpoint/
+  //    last_checkpoint/db/log_dir），且 ok 路径不触发 invalidateDb
+  const okDbq = {
+    db: () => ({ prepare: () => ({ get: () => ({ one: 1 }) }) }),
+    invalidateDb: () => { throw new Error('ok path must not invalidate'); },
+  };
+  const s1 = await listen(mount(okDbq, { running: false, lastCheckpoint }));
+  try {
+    const r = await get(s1.address().port, '/api/health');
+    assert.equal(r.status, 200);
+    const j = JSON.parse(r.body);
+    assert.equal(j.ok, true);
+    assert.equal(j.error, null);
+    assert.equal(j.db, 'P');
+    assert.equal(j.log_dir, 'L');
+    assert.equal(j.zcode_running, false);
+    assert.equal(j.wal_bytes, 4096);
+    assert.equal(j.wal_pending_checkpoint, true);
+    assert.deepStrictEqual(j.last_checkpoint, lastCheckpoint);
+  } finally { s1.close(); }
+
+  // ② 抛错形态：dbq.db() 抛错 → ok:false + error 透传 + invalidateDb 被调；
+  //    WAL 态照常上报（walStatus 走 fs stat，不依赖 db 连接）
+  let invalidated = 0;
+  const badDbq = {
+    db: () => { throw new Error('no such file'); },
+    invalidateDb: () => { invalidated++; },
+  };
+  const s2 = await listen(mount(badDbq, { running: true, lastCheckpoint: null }));
+  try {
+    const r = await get(s2.address().port, '/api/health');
+    assert.equal(r.status, 200);
+    const j = JSON.parse(r.body);
+    assert.equal(j.ok, false);
+    assert.equal(j.error, 'no such file');
+    assert.equal(invalidated, 1, '须丢弃缓存连接（下次请求重开自愈）');
+    assert.equal(j.zcode_running, true);
+    assert.equal(j.wal_bytes, 4096);
+    assert.equal(j.wal_pending_checkpoint, true);
+    assert.equal(j.last_checkpoint, null);
+  } finally { s2.close(); }
+
+  // ③ walStatus 缺失（-wal/-shm 不存在或不可 stat）→ wal_bytes:null、pending:false
+  const s3 = await listen((() => {
+    const app = express();
+    app.get('/api/health', makeHealthRoute({
+      dbq: okDbq, runtime: { walStatus: () => null },
+      runtimeState: { running: true, lastCheckpoint: null }, dbPath: 'P', logDir: 'L',
+    }));
+    return app;
+  })());
+  try {
+    const j = JSON.parse((await get(s3.address().port, '/api/health')).body);
+    assert.equal(j.wal_bytes, null);
+    assert.equal(j.wal_pending_checkpoint, false);
+  } finally { s3.close(); }
 });
 
 // ── R4：makeErrorTranslator（server/http-hardening.js 工厂，index.js 装配）───
