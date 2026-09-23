@@ -138,7 +138,7 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
 ## 隐私提示
 
 有第三方报告称 ZCode 可能会在后台上传工作区快照到云端（涉及本机 `~/.zcode/v2/checkpoints/` 目录）。
-**该说法为第三方报告，未经我们验证**，本项目不下断言、也不复现该行为，仅汇总公开来源供参考：
+**该机制在本机已实证（2026-09-23 只读核查）**：该目录存在 21 个工作区目录（共约 1.1GB），其中 5 个滞留加密上传工件（`pending/*.tar.gz.enc`，各带重试失败计数），且多个 `state.json` 的 `lastAcceptedManifestHash` 非空——快照打包与上传机制确实在活动。**仍未验证的部分**：上传目的地与云端用途（未做网络侧取证），本项目对此不下断言；以下来源供参考：
 
 - 第三方项目：Masterchiefm/zcode-speed-panel 的「快照防护」说明（早期版本曾引 HumanAILoop/zemote 的「停更声明」，经核实全网查无此项目，已弃用该来源——与 docs/specs/ecosystem-adoption-v1.md WP5 的裁定一致）
 - 社区报道：Hacker News「Zcode silent workspace snapshot upload」讨论串、知乎文章《智谱ZCode，你打包上传我的代码仓库干什么》、开源中国 2026-09 相关报道
@@ -148,7 +148,7 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
 - PowerShell：`Get-ChildItem "$env:USERPROFILE\.zcode\v2\checkpoints"`
 - Git Bash：`ls ~/.zcode/v2/checkpoints`
 
-目录存在与否都属于正常的自查结果：目录存在仅说明本机生成了快照数据，不足以据此推断云端行为。
+以上均为只读取证；上传目的地与云端处置未经网络侧验证，本项目不对此下断言。
 
 监控读路径对 `~/.zcode/` 全程只读。唯一例外是 WAL checkpoint 功能（ZCode 退出后自动折叠，或经 `/api/checkpoint` 手动触发）：它以短时可写连接执行 `wal_checkpoint(TRUNCATE)`，只把 WAL 日志折叠进主库、清空 `-wal` 文件，不改变任何数据行内容。
 
