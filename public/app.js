@@ -220,6 +220,18 @@ async function healthLoop() {
   setTimeout(healthLoop, 5000);
 }
 
+// 快照绊线告警（语义见 server/snapshot-watch.js）：顶栏红标只在 /api/snapshot
+// 判定 active（面板启动后检测到新增快照活动，闩锁态）时亮起——任何视图下都
+// 可见，点击跳回「实时监控」的绊线卡。fail-safe：接口失败/不可达不告警
+// （绊线只在正面证据下动作，绝不因轮询失败误报）。
+async function snapshotLoop() {
+  let s = null;
+  try { s = await getJSON('/api/snapshot', { retries: 1 }); } catch { /* 静默，下拍再试 */ }
+  const chip = $('#snapshot-alert');
+  if (chip) chip.hidden = !(s && s.status === 'active');
+  setTimeout(snapshotLoop, 30 * 1000);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   // sync theme icon with the (already-applied) attribute
   syncThemeIcon(currentTheme());
@@ -266,6 +278,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   healthLoop();
+  snapshotLoop();
   // If a ?theme= override was used to open the page, persist it so subsequent
   // visits (and the toggle button) start from that choice.
   const q = new URLSearchParams(location.search).get('theme');

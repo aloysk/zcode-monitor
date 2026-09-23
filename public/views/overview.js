@@ -1,7 +1,7 @@
 'use strict';
 // views/overview.js — real-time monitoring dashboard
 (function () {
-  const { registerView, $, fmtInt, fmtNum, fmtMs, fmtTime,
+  const { registerView, $, fmtInt, fmtNum, fmtMs, fmtTime, fmtTimeFull, relTime,
           escapeHtml, statusBadge, getJSON, pct, loading, Chart,
           chartPalette, registerChart, cssVar } = window.ZC;
 
@@ -10,6 +10,7 @@
   let liveRows = [];
   let lastWindow = '24h';
   let themeHandler = null;
+  let snapTimer = null;
 
   function destroyCharts() {
     Object.values(charts).forEach(c => { try { c.destroy(); } catch {} });
@@ -20,6 +21,7 @@
     if (liveEs) { liveEs.close(); liveEs = null; }
     // remove any prior theme listener so re-entry doesn't stack handlers
     if (themeHandler) window.removeEventListener('zc-theme-changed', themeHandler);
+    if (snapTimer) { clearInterval(snapTimer); snapTimer = null; }
     destroyCharts();
     liveRows = [];
     lastWindow = '24h';
@@ -40,6 +42,9 @@
 
         <div class="kpis" id="kpis">${loading()}</div>
         <div class="kpis" id="kpi-speed" style="margin-top:10px">${loading()}</div>
+
+        <h2>快照绊线 <span class="sub">只读监视 ~/.zcode/v2/checkpoints · 快照机制复活即红</span> <span id="snap-status-badge" class="badge dim">…</span></h2>
+        <div class="card snapshot-card" id="snapshot-card">${loading()}</div>
 
         <h2>趋势 <span class="sub" id="series-range"></span></h2>
         <div class="grid cols-2">
@@ -74,11 +79,107 @@
     $('#ov-window').onchange = loadOverview;
     await loadOverview();
     startLive();
+    refreshSnapshot();
+    // 绊线卡轮询：view 存续期间低频刷新（顶栏告警由 app.js snapshotLoop 负责）
+    snapTimer = setInterval(refreshSnapshot, 15 * 1000);
 
     // re-fetch + re-render charts when the theme flips (palette changes)
     themeHandler = async () => { await loadOverview(); };
     window.addEventListener('zc-theme-changed', themeHandler);
   }
+
+  // ── 快照绊线卡（语义见 server/snapshot-watch.js）─────────────────
+  // 四态：clear 静默（目录空/不存在）· static 遗留静止（有内容但零点以来
+  // 无新增）· unreadable 目录不可读（ACL 锁定后属预期，不折叠成静默）·
+  // active 活动告警（闩锁，上传后清理回空也保持）。workspaces 的 path/hash
+  // 均为不可信文本，渲染一律过 escapeHtml（源码契约测试锁住）。
+  const SNAP_VIEW = {
+    clear:      { badge: 'green',  label: '静默' },
+    static:     { badge: 'yellow', label: '遗留静止' },
+    unreadable: { badge: 'yellow', label: '目录不可读' },
+    active:     { badge: 'red',    label: '检测到活动!' },
+  };
+
+  async function refreshSnapshot() {
+    let s;
+    try {
+      s = await getJSON('/api/snapshot', { retries: 1 });
+      renderSnapshot(s);
+    } catch (e) {
+      // getJSON 抛错（接口不可达/非 2xx）与 renderSnapshot 抛错（前后端
+      // 版本错位导致响应形变）共用同一可见出口——后者若不接住，卡片会
+      // 永久停在「首次扫描中…」且只有 console 痕迹。
+      const card = $('#snapshot-card');
+      if (card) card.innerHTML = `<div class="empty">绊线数据异常：${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  function fmtBytes(b) {
+    if (b == null) return '—';
+    if (b >= 1024 * 1024 * 1024) return (b / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+    if (b >= 1024 * 1024) return (b / 1024 / 1024).toFixed(1) + ' MB';
+    if (b >= 1024) return (b / 1024).toFixed(1) + ' KB';
+    return b + ' B';
+  }
+
+  function renderSnapshot(s) {
+    const card = $('#snapshot-card');
+    const badgeEl = $('#snap-status-badge');
+    if (!card) return;
+    const v = SNAP_VIEW[s.status] || { badge: 'dim', label: '…' };
+    if (badgeEl) { badgeEl.className = 'badge ' + v.badge; badgeEl.textContent = v.label; }
+    card.classList.toggle('active', s.status === 'active');
+
+    let head;
+    if (s.status === 'clear') {
+      head = `目录为空或不存在——快照机制未在本机活动（面板运行时段内）。`;
+    } else if (s.status === 'static') {
+      head = `目录有遗留内容：<b>${fmtInt(s.current.workspaces)}</b> 个工作区 · <b>${fmtBytes(s.current.bytes)}</b> 加密工件`
+           + (s.current.lastWriteMs ? ` · 最后活动 <b>${relTime(s.current.lastWriteMs)}</b>` : '')
+           + `<span class="caliber" title="绊线以面板启动时的目录状态为零点：boot 前已有的内容不告警，只如实展示；面板重启后零点重置">绊线零点以来无新增</span>`;
+    } else if (s.status === 'unreadable') {
+      head = `<b>目录不可读</b>（${s.readError ? escapeHtml(s.readError) : '权限被拒'}）——绊线无法扫描该目录。`
+           + `<div class="faint" style="margin-top:4px">若你刚按 README「隐私提示」手动锁定目录，这是预期状态（快照写入已被阻断）；否则请检查目录权限——绊线在此期间不设防。</div>`;
+    } else if (s.status === 'active') {
+      const d = s.activityDetail || {};
+      const parts = [];
+      if (d.added && d.added.length) parts.push(`新增工作区 ${d.added.length}`);
+      if (d.modified && d.modified.length) parts.push(`变化工作区 ${d.modified.length}`);
+      if (d.removed && d.removed.length) parts.push(`移除 ${d.removed.length}`);
+      head = `<b>面板启动后检测到新增快照活动</b>（${fmtTimeFull(s.firstActivityAt)}）`
+           + (parts.length ? ` · ${parts.join(' · ')}` : '')
+           + (d.bytesDelta > 0 ? ` · 净增 <b>${fmtBytes(d.bytesDelta)}</b> 加密工件` : '')
+           + `<div class="faint" style="margin-top:4px">这是 ZCode 快照上传机制复活的迹象——如非预期，可按 README「隐私提示」的目录锁定程序处置。</div>`;
+    } else {
+      head = `首次扫描中…`;
+    }
+
+    const rows = (s.workspaces || []).slice(0, 8).map(w => `<tr>
+        <td class="mono">${escapeHtml(shortHash(w.hash))}</td>
+        <td>${w.path ? escapeHtml(w.path) : '<span class="faint">（state.json 缺失/损坏）</span>'}</td>
+        <td class="num">${fmtBytes(w.encBytes)}</td>
+        <td class="num">${w.failureCount != null ? fmtInt(w.failureCount) : '—'}</td>
+        <td class="num">${relTime(w.lastWriteMs)}</td>
+      </tr>`).join('');
+    const more = (s.workspaces || []).length > 8 ? `<tr><td colspan="5" class="faint">… 共 ${fmtInt(s.workspaces.length)} 个工作区（按最近活动排序，前 8 个）</td></tr>` : '';
+    const table = (s.workspaces || []).length ? `
+      <table style="margin-top:10px"><thead><tr>
+        <th>hash</th><th>工作区</th><th class="num">加密工件</th><th class="num">上传失败</th><th class="num">最后写入</th>
+      </tr></thead><tbody>${rows}${more}</tbody></table>` : '';
+
+    const mode = s.watchMode === 'watch' ? 'fs.watch+轮询'
+      : s.watchMode === 'parent' ? '父目录 watch+轮询'
+      : s.watchMode === 'poll' ? `仅轮询${s.watchError ? `（watch 不可用）` : ''}` : '装配中';
+    card.innerHTML = `
+      <div>${head}</div>${table}
+      <div class="faint" style="margin-top:10px;font-size:11px">
+        <span class="mono">${escapeHtml(s.dir)}</span> · ${mode} · 上次扫描 ${s.scannedAt ? relTime(s.scannedAt) : '—'} · 本卡纯只读（readdir/stat，零写入）
+        ${s.truncated ? ` · <span style="color:var(--sev-warn)">本次扫描被截断（目录异常大），明细不完整</span>` : ''}
+        ${s.scanError ? ` · <span style="color:var(--sev-warn)">扫描异常：${escapeHtml(s.scanError)}</span>` : ''}
+      </div>`;
+  }
+
+  function shortHash(h) { return h ? String(h).slice(0, 12) + '…' : '—'; }
 
   async function loadOverview() {
     const w = $('#ov-window') ? $('#ov-window').value : lastWindow;
