@@ -33,7 +33,7 @@
 -  **双主题** —— Dark（默认）/ Light，三种切换方式。
 - 🐾 **宠物一键导入** —— Codex 格式宠物包（`pet.json + spritesheet.webp`）一键导入，导入时校验 sheet 尺寸 / 行数 / JSON 健全性并生成 NOTICE，且**按白名单复制**（只带走 pet.json / 精灵图 / NOTICE / README·LICENSE 文本，`.html`/`.svg` 等一律跳过并告警）；许可证缺失、或自报值不在已知 SPDX/惯用写法白名单的包**缺省拒绝导入**，需显式确认（CLI `--ack-unlicensed`、图鉴页确认弹窗、API `ackUnknownLicense: true`；确认后照 NOTICE 记录自报值并放行）；CLI（`node tools/import-pet.js <包目录>`）、API（`POST /api/pets/import`）与图鉴页（`pets-preview.html`）三个入口共用同一校验模块。
 - ⚡ **fs.watch 实时增强** —— 日志目录 `fs.watch` 监听 + 字节偏移增量解析，JSONL 追加即触发、大幅降低日志尾部发现延迟；watch 失败自动降级短轮询，周期偏移对账兜底，事件不丢不重。
-- 🚨 **快照绊线（tripwire）** —— 只读监视 `~/.zcode/v2/checkpoints/`（ZCode 工作区快照上传机制的落盘目录，背景见下文「隐私提示」）：实时监控页常驻一张绊线卡，四态呈现（静默 / 遗留静止 / 目录不可读 / **检测到活动**）；快照机制复活、新内容落盘的那一刻卡片转红、顶栏亮出「快照活动!」告警（任何视图可见）。boot 时目录状态即零点，此后新增工作区 / `state.json` 变化 / pending 工件增减都判为活动并闩锁（上传后目录被清理也保持告警）；fs.watch 快路径 + 30s 轮询兜底，全程对 `~/.zcode/` 零写入。
+- 🚨 **快照绊线（tripwire）** —— 只读监视 `~/.zcode/v2/checkpoints/`（ZCode 工作区快照上传机制的落盘目录，背景见下文「隐私提示」）：实时监控页常驻一张绊线卡，四态呈现（静默 / 遗留静止 / 目录不可读 / **检测到活动**，另有首扫未完成的「首扫中」瞬时态）；快照机制复活、新内容落盘的那一刻卡片转红、顶栏亮出「快照活动!」告警（任何视图可见）。boot 时目录状态即零点，此后新增工作区 / `state.json` 变化 / pending 工件增减都判为活动并闩锁（上传后目录被清理也保持告警）；fs.watch 快路径 + 30s 轮询兜底，全程对 `~/.zcode/` 零写入。
 - ✅ **测试套件** —— Node 内置 `node:test`（零新依赖），`npm test` 一键运行；fixture 全部落 `os.tmpdir()`，与真实库完全隔离。
 -  **全程只读** —— 不改 ZCode 一行数据。
 

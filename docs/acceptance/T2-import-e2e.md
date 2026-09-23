@@ -12,7 +12,7 @@
 ## 复现步骤（实机评审时按序执行）
 
 ```bash
-cd "F:/project/zcode-monitor-plan"
+cd "F:/project/zcode-monitor-plan"   # 代码已并入 main（2026-09-23），可等价替换为 F:/project/zcode-monitor
 npm test                                    # 门禁：全绿
 node tools/import-pet.js "F:/project/zcode-monitor/tools/pets-staging/<任一含 pet.json 的包目录>" --source <来源URL> --author <作者> --license <SPDX>
 node -e "console.log(JSON.stringify(require('http').get('http://127.0.0.1:7331/api/pets', r => r.on('data', d => process.stdout.write(d)))))"

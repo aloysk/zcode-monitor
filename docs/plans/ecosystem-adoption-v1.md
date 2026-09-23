@@ -1,6 +1,6 @@
 # 生态采纳 v1 实施计划（ecosystem-adoption）
 
-> **状态：已实施（2026-09-22）** —— T1–T6 全部完成并逐任务提交；实际提交结构与本文规划的偏离、终审修订留痕见「执行顺序与提交总览」一节的实施留痕注记。已知未决：A1-8 与 A4-7 壳内侧待人工实机评审（复现步骤见 docs/acceptance/T2-import-e2e.md、T5-behavior-e2e.md；全部遗留项统一登记于 docs/acceptance/residuals.md）。
+> **状态：已实施（2026-09-22）** —— T1–T6 全部完成并逐任务提交（正文 checkbox 为原稿未回填，任务均已执行，**勿按 checkbox 重放本计划**）；实际提交结构与本文规划的偏离、终审修订留痕见「执行顺序与提交总览」一节的实施留痕注记。已知未决：A1-8 与 A4-7 壳内侧待人工实机评审（复现步骤见 docs/acceptance/T2-import-e2e.md、T5-behavior-e2e.md；全部遗留项统一登记于 docs/acceptance/residuals.md）。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans（顺序执行）或 superpowers:subagent-driven-development（每任务一个子代理）按任务实施本计划。步骤用 checkbox（`- [ ]`）跟踪。**若本机技能清单中不存在 `superpowers:*` 技能，则按本文档 checkbox 顺序逐任务顺序执行、每任务一 commit（放弃子代理并行），不阻塞。**
 
@@ -10,7 +10,7 @@
 
 **Tech Stack:** Node v24.11.1（2026-09-22 实测）、express + better-sqlite3（运行时依赖零新增）、`node:test`（Node 内置测试 runner）、原生 HTML/CSS/JS（无框架无构建）。
 
-**Spec:** `docs/specs/ecosystem-adoption-v1.md`（v1.2 定稿，行号基于 worktree `5933a1f`；经本会话核实，代码文件自该提交以来零改动，行号对当前 HEAD `0160704` 仍然有效）。上游分析：`docs/ecosystem-adoption-plan.md`。执行者须同时读这两份与本计划。
+**Spec:** `docs/specs/ecosystem-adoption-v1.md`（v1.2 定稿，行号基于 worktree `5933a1f`；该有效性仅截至 2026-09-22 开工会话（当时 HEAD `0160704`），其后代码经快照绊线与多轮加固演进，行号可能漂移——引用以函数名/符号为准）。上游分析：`docs/ecosystem-adoption-plan.md`。执行者须同时读这两份与本计划。
 
 ---
 
