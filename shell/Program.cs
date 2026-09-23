@@ -288,6 +288,15 @@ internal sealed class WidgetForm : Form
         new System.Net.Http.HttpClientHandler { UseProxy = false })
     { Timeout = TimeSpan.FromSeconds(2) };
 
+    // restart POST rides a LONGER budget than the 2s probe client: the server is
+    // single-threaded with synchronous sqlite — a cold query queued ahead of the
+    // POST can hold it seconds past 2s, and aborting then leaves the shell
+    // assuming failure while the server still commits the restart (stale page,
+    // no reload). The replacement is slow to boot, not the response.
+    private static readonly System.Net.Http.HttpClient HttpLong = new(
+        new System.Net.Http.HttpClientHandler { UseProxy = false })
+    { Timeout = TimeSpan.FromSeconds(15) };
+
     private IntPtr _zcodeHwnd;
     private uint _zcodePid;
     private IntPtr _winHook;
@@ -309,6 +318,10 @@ internal sealed class WidgetForm : Form
     private bool _restartBusy;     // one restart at a time: a second click in the
                                    // handoff gap would take the was-down branch and
                                    // double-spawn a racing node (EADDRINUSE loser dies silently)
+    private bool _ensureBusy;      // same latch for EnsureServerAsync: Shown's startup
+                                   // bring-up can race a menu restart into a double spawn
+    private int _navRetries;       // failed-Navigation re-attempts (error page has no
+                                   // page script → no menu, no seed — it must not be terminal)
 
     public WidgetForm()
     {
@@ -355,7 +368,7 @@ internal sealed class WidgetForm : Form
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("打开完整面板", null, (s, e) => OpenUrl(DashboardUrl));
         var restartItem = new ToolStripMenuItem("重启面板")
-            { ToolTipText = "重启 127.0.0.1:7331 面板服务（更新代码后用，几秒内自动恢复）" };
+            { ToolTipText = "重启 127.0.0.1:7331 面板服务（更新代码后用；失败时可再点一次）" };
         restartItem.Click += (s, e) => _ = RestartServerAsync();
         _menu.Items.Add(restartItem);
         _menu.Items.Add(new ToolStripSeparator());
@@ -488,6 +501,18 @@ internal sealed class WidgetForm : Form
     // clean exit (menu 退出); hiding with ZCode gone keeps both alive.
     private async Task EnsureServerAsync()
     {
+        // serialized: Shown's startup bring-up and a same-instant menu restart would
+        // both pass the probe phase and both spawn node — the EADDRINUSE loser dies
+        // silently and overwrites _serverProc/_serverJob with the dead child
+        if (_ensureBusy) { Program.Log("server: ensure already in progress — skipping"); return; }
+        _ensureBusy = true;
+        try { await EnsureServerCoreAsync(); }
+        catch (Exception ex) { Program.Log("server: ensure unexpected: " + ex.Message); }
+        finally { _ensureBusy = false; }
+    }
+
+    private async Task EnsureServerCoreAsync()
+    {
         for (int i = 0; i < 3; i++)
         {
             if (await ServerUpAsync()) { Program.Log("server: already up"); return; }
@@ -575,7 +600,10 @@ internal sealed class WidgetForm : Form
                 using var req = new System.Net.Http.HttpRequestMessage(
                     System.Net.Http.HttpMethod.Post, "http://127.0.0.1:7331/api/restart");
                 req.Headers.TryAddWithoutValidation("X-Zcode-Monitor-Restart", "1");
-                using var resp = await Http.SendAsync(req);
+                // HttpLong (15s): a cold sqlite query can hold the single-threaded
+                // server seconds past the 2s probe budget — aborting then would
+                // assume failure while the server still commits the restart
+                using var resp = await HttpLong.SendAsync(req);
                 Program.Log($"restart: endpoint -> {(int)resp.StatusCode}");
                 // HttpClient doesn't throw on 4xx/5xx: a refused restart (403 gate /
                 // 500 spawn_failed — old server stays up) must stop here, not burn
@@ -593,16 +621,23 @@ internal sealed class WidgetForm : Form
             // probe the old listener, "recover" instantly and reload the page
             // against PRE-restart assets — the exact stale-code state this
             // menu item exists to clear
+            bool oldWentDown = false;
             for (int i = 0; i < 16; i++)
             {
-                if (!await ServerUpAsync()) break;
+                if (!await ServerUpAsync()) { oldWentDown = true; break; }
                 await Task.Delay(250);
             }
+            // exhaustion is not fatal (the up-loop may catch the replacement), but
+            // it means the reload below may hit the OLD server — say so in the log
+            if (!oldWentDown) Program.Log("restart: old listener still up after 4s (blocked event loop?) — proceeding");
         }
         else
         {
             await EnsureServerAsync(); // nothing up (e.g. companion idle self-exit)
-            Program.Log("restart: server was down — brought it up");
+            // EnsureServerAsync gives up silently on several paths (repo/node not
+            // found, spawn failure, 12s no-up) — report the OUTCOME, not the intent
+            bool ensured = await ServerUpAsync();
+            Program.Log("restart: server was down — ensure result: " + (ensured ? "up" : "still down (see server: lines above)"));
         }
         // replacement binds after its boot delay + node start; /api/gen/state
         // is in-memory so each probe is cheap
@@ -650,8 +685,30 @@ internal sealed class WidgetForm : Form
             // targets the CURRENT document, so firing it right after Navigate
             // would hit the outgoing page's script context — wait for the new
             // document instead
-            _web.CoreWebView2.NavigationCompleted += (s, e) =>
+            _web.CoreWebView2.NavigationCompleted += async (s, e) =>
             {
+                // a failed navigation (server briefly down mid-handoff) lands
+                // WebView2's error page — it runs no page script, so drag/menu/
+                // seed all die and nothing ever retries. Re-probe and re-Navigate
+                // a bounded number of times; success resets the budget.
+                if (!e.IsSuccess)
+                {
+                    if (_navUrl != null && _navRetries < 3)
+                    {
+                        _navRetries++;
+                        Program.Log($"nav failed (hr=0x{e.HttpStatusCode:X}) — retry {_navRetries}/3 after probe");
+                        for (int i = 0; i < 20; i++)
+                        {
+                            if (await ServerUpAsync()) break;
+                            await Task.Delay(500);
+                        }
+                        if (await ServerUpAsync()) _web.CoreWebView2.Navigate(_navUrl);
+                        else Program.Log("nav retry: server still down, giving up this attempt");
+                    }
+                    else if (_navUrl != null) Program.Log("nav failed and retry budget exhausted");
+                    return;
+                }
+                _navRetries = 0;
                 if (!_cycleOnNav) return;
                 _cycleOnNav = false;
                 _ = _web.CoreWebView2.ExecuteScriptAsync("typeof cyclePack==='function'&&cyclePack()");

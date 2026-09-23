@@ -29,6 +29,14 @@ test('装配契约：全站安全头 → /api 回环 Host 闸 → 全部 API 路
     const pos = firstIndexOf(new RegExp(`app\\.use\\('/api/${route}'`), `/api/${route} 路由`);
     assert.ok(gate < pos, `/api/${route} 须挂在 Host 闸之后`);
   }
+  // POST /api/restart（自重启）：rebinding 同源页带自定义首部过首部闸后，Host
+  // 闸是唯一防线，且它是破坏力最大的端点——显式钉住（首轮测试席）。
+  const restart = firstIndexOf(/app\.post\('\/api\/restart'/, 'POST /api/restart（自重启）');
+  assert.ok(gate < restart, '/api/restart 须挂在 Host 闸之后——挂晚则 rebinding 同源页可触发重启');
+  // express.json 须在闸后：闸前解析会让恶意 Host + 畸形 JSON 落 body-parser
+  // 含栈 400，把框架内部路径泄给 rebinding 页（首轮安全席实锤后重排）。
+  const jsonParser = firstIndexOf(/app\.use\(express\.json\(\)\)/, 'express.json');
+  assert.ok(gate < jsonParser, 'express.json 须挂在 /api Host 闸之后（闸只读头，先闸后解析）');
 });
 
 test('装配契约：/pets 收紧 static 先于通用 static（注册序即命中序）', () => {

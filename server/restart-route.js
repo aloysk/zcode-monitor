@@ -6,8 +6,11 @@
 //   1. 首部闸：缺 X-Zcode-Monitor-Restart: 1 一律 403（跨源简单 POST 带不了
 //      自定义首部，镜像 /api/pets/import 的 X-Zcode-Monitor-Import 机制；
 //      Host 闸与安全头由 server/index.js 的全局中间件负责）。
-//   2. 先 spawn 接替进程，成功后才回 200 并安排退出——spawn 失败如实 500，
-//      绝不出现「答应了重启却谁都没起来」的下线事故。
+//   2. 先 spawn 接替进程，成功后才回 200 并安排退出——spawn 同步抛错如实
+//      500、异步 'error'（ENOENT/EPERM/EMFILE 真实失败形态）撤销退出定时器
+//      并回退受理闩，两种失败旧进程都不退出：绝不出现「答应了重启却谁都没
+//      起来」的下线事故。接替进程 stderr 落盘 logs/restart-child.log（stdout
+//      是每请求 logger，太吵；崩溃栈与监听失败都在 stderr）。
 //   3. 端口交接：接替进程带 ZCODE_RESTART_BOOT_DELAY_MS 延迟 listen（见
 //      server/index.js 尾部），旧进程在响应发出 exitDelayMs 后退出；两次
 //      延迟之和大于端口释放耗时，接替进程不至于 EADDRINUSE 即死。
@@ -19,11 +22,16 @@
 // 覆盖全分支，不必真杀测试进程。
 
 const path = require('path');
+const fs = require('fs');
 
 const RESTART_HEADER = 'X-Zcode-Monitor-Restart';
 const ENTRY = path.join(__dirname, 'index.js');
 // 接替进程的 listen 延迟（旧进程退出需要 exitDelayMs；再留余量）。
 const CHILD_BOOT_DELAY_MS = 600;
+// 接替进程 stderr 的落盘位置（仓内，绝不碰 ~/.zcode）：stdout 是每请求 logger
+// 太吵且无界，只收 stderr——崩溃栈/[db] 警告/监听失败都在这，R-17 场景从
+// 「零观测」变「一次 grep」。健康服务 stderr 基本为空，增长可忽略。
+const CHILD_STDERR_LOG = path.join(__dirname, '..', 'logs', 'restart-child.log');
 
 function makeRestartRoute({
   spawn,        // (execPath, argv, opts) => child；生产直通 child_process.spawn
@@ -32,8 +40,12 @@ function makeRestartRoute({
   exit = (code) => process.exit(code),
   exitDelayMs = 250,
   bootDelayMs = CHILD_BOOT_DELAY_MS,
+  stderrPath = CHILD_STDERR_LOG,
 } = {}) {
   let scheduled = false; // 幂等闩：一次生命周期只安排一次退出
+  let exitTimer = null;  // 已武装的退出定时器句柄——child 异步 error 必须撤销它，
+                         // 否则「回退闩可重试」是空话：旧进程 250ms 后照死（首轮
+                         // 四席评审独立实锤的 CRITICAL）
   return function restartRoute(req, res) {
     if (req.get(RESTART_HEADER) !== '1') {
       return res.status(403).json({
@@ -45,12 +57,23 @@ function makeRestartRoute({
     if (scheduled) {
       return res.json({ ok: true, already: true, message: '重启已受理，接替进程在途。' });
     }
+    // 接替进程 stderr → 仓内日志（打开失败不阻断重启，回退全忽略——重启本身
+    // 比日志落盘更重要）
+    let errFd = 'ignore';
+    let opened = false;
+    try {
+      fs.mkdirSync(path.dirname(stderrPath), { recursive: true });
+      errFd = fs.openSync(stderrPath, 'a');
+      opened = true;
+    } catch (e) {
+      console.error('[restart] stderr 日志打开失败（回退忽略）:', e && e.message ? e.message : e);
+    }
     let child;
     try {
       child = spawn(process.execPath, [ENTRY], {
         detached: true,   // 脱离父进程组：父退出后独立存活（Windows 下仍落入
                           // 壳的 Job 对象——随壳退出的既有契约由 Job 保证，不受影响）
-        stdio: 'ignore',
+        stdio: ['ignore', 'ignore', errFd],
         env: {
           ...process.env,
           OPEN_BROWSER: '0',
@@ -58,21 +81,25 @@ function makeRestartRoute({
         },
       });
     } catch (e) {
+      if (opened) try { fs.closeSync(errFd); } catch {}
       return res.status(500).json({
         ok: false,
         error: 'spawn_failed',
         message: `接替进程启动失败，本进程不退出：${e && e.message ? e.message : e}`,
       });
     }
+    if (opened) try { fs.closeSync(errFd); } catch {} // 子进程持有继承副本，父侧即关
     scheduled = true;
     if (child && typeof child.unref === 'function') child.unref();
-    // spawn 的真实失败（ENOENT/EPERM）经 child 'error' 事件异步到达，不设防会
-    // 以未捕获异常杀掉旧进程——「答应了重启却谁都没起来」正是本模块头注承诺
-    // 不发生的事故。记日志、回退受理闩（旧进程继续服务，下一次点击可重试）。
+    // spawn 的真实失败（ENOENT/EPERM/EMFILE）经 child 'error' 事件异步到达，
+    // 不设防会以未捕获异常杀掉旧进程；即使已回 200，也必须撤销退出定时器、
+    // 回退受理闩——旧进程继续服务，下一次点击可重试（「答应了重启却谁都没
+    // 起来」是本模块头注承诺不发生的事故）。
     if (child && typeof child.on === 'function') {
       child.on('error', (e) => {
         scheduled = false;
-        console.error('[restart] 接替进程启动失败（旧进程继续服务，可重试）:',
+        if (exitTimer) { clearTimeout(exitTimer); exitTimer = null; }
+        console.error('[restart] 接替进程启动失败（已撤销退出、旧进程继续服务，可重试）:',
           e && e.message ? e.message : e);
       });
     }
@@ -81,7 +108,8 @@ function makeRestartRoute({
       message: '重启已受理：接替进程起来后自动恢复（约 1-2 秒）。',
     });
     // 响应先走（连接排空），旧进程随后让出端口
-    setTimeout(() => exit(0), exitDelayMs).unref();
+    exitTimer = setTimeout(() => exit(0), exitDelayMs);
+    exitTimer.unref();
   };
 }
 

@@ -51,3 +51,6 @@ public/pets/*
 !public/pets/pikachu-local/
 !public/pets/xilian/
 !public/pets/yuexinmiao/
+
+# restart 接替进程 stderr 落盘（server/restart-route.js）
+logs/
