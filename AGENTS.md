@@ -36,9 +36,10 @@ npm test                   # node --test test/index.js（聚合入口）
 
 ## 当前状态（2026-09-23）
 
-- main：生态采纳计划 + 四轮多视角加固审查 + 快照绊线（一轮五视角对抗评审：
-  FSWatcher error 监听 / EPERM 分级与零点重锚 / chip [hidden] CSS 兜底 /
-  companion 挂载位 / armWatch 泄漏 + 测试补强）全部合并，测试套件 179 用例全绿。
+- main：生态采纳计划 + 四轮多视角加固审查 + 快照绊线（五视角对抗评审 + 六视角
+  zcode-pr-review-toolkit 终审：子目录读失败 partial 分级 / 截断拍零点拒绝 /
+  README 锁定矛盾修正 / __proto__ 与截断置位 / 测试补强至 29 例）全部合并，
+  测试套件 187 用例全绿。
 - 快照绊线（server/snapshot-watch.js）：只读监视 `~/.zcode/v2/checkpoints/`，
   机制复活即告警；语义（零点/闩锁/unreadable 态/watch 降级）见模块头注，
   已知边界登记 residuals R-14。

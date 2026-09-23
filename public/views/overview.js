@@ -89,18 +89,28 @@
   }
 
   // ── 快照绊线卡（语义见 server/snapshot-watch.js）─────────────────
-  // 四态：clear 静默（目录空/不存在）· static 遗留静止（有内容但零点以来
-  // 无新增）· unreadable 目录不可读（ACL 锁定后属预期，不折叠成静默）·
-  // active 活动告警（闩锁，上传后清理回空也保持）。workspaces 的 path/hash
-  // 均为不可信文本，渲染一律过 escapeHtml（源码契约测试锁住）。
+  // 五态：clear 静默（目录空/不存在）· static 遗留静止（有内容但零点以来
+  // 无新增）· unreadable 目录不可读（读取被拒——仅拒写入的锁定不触发本态）
+  // · active 活动告警（闩锁，上传后清理回空也保持）· pending 首扫中。
+  // 未知 status（前后端版本错位）按异常渲染，不与合法 pending 合流伪装成
+  // 良性暂态。workspaces 的 path/hash 均为不可信文本，渲染一律过 escapeHtml
+  // （源码契约测试锁住）。
   const SNAP_VIEW = {
     clear:      { badge: 'green',  label: '静默' },
     static:     { badge: 'yellow', label: '遗留静止' },
     unreadable: { badge: 'yellow', label: '目录不可读' },
     active:     { badge: 'red',    label: '检测到活动!' },
+    pending:    { badge: 'dim',    label: '首扫中' },
   };
 
   async function refreshSnapshot() {
+    // 视图已离开（card 不在 DOM）：停掉孤儿定时器——否则每 15s 一次空转
+    // fetch，且 catch 出口因选择器落空而完全静默（错误可见性随之失去）
+    const liveCard = $('#snapshot-card');
+    if (!liveCard || !document.body.contains(liveCard)) {
+      if (snapTimer) { clearInterval(snapTimer); snapTimer = null; }
+      return;
+    }
     let s;
     try {
       s = await getJSON('/api/snapshot', { retries: 1 });
@@ -113,7 +123,6 @@
       if (card) card.innerHTML = `<div class="empty">绊线数据异常：${escapeHtml(e.message)}</div>`;
     }
   }
-
   function fmtBytes(b) {
     if (b == null) return '—';
     if (b >= 1024 * 1024 * 1024) return (b / 1024 / 1024 / 1024).toFixed(2) + ' GB';
@@ -126,10 +135,18 @@
     const card = $('#snapshot-card');
     const badgeEl = $('#snap-status-badge');
     if (!card) return;
-    const v = SNAP_VIEW[s.status] || { badge: 'dim', label: '…' };
+    const v = SNAP_VIEW[s.status];
+    if (!v) {
+      // 未知状态 = 前后端契约错位，按异常渲染——不得落入「首次扫描中」的
+      // 良性暂态文案（否则数据链路死亡被伪装成耐心等待）
+      if (badgeEl) { badgeEl.className = 'badge dim'; badgeEl.textContent = '未知'; }
+      card.innerHTML = `<div class="empty">绊线数据异常：未知状态 ${escapeHtml(String(s && s.status))}（前后端版本错位?）</div>`;
+      return;
+    }
     if (badgeEl) { badgeEl.className = 'badge ' + v.badge; badgeEl.textContent = v.label; }
     card.classList.toggle('active', s.status === 'active');
 
+    const wss = s.workspaces || [];
     let head;
     if (s.status === 'clear') {
       head = `目录为空或不存在——快照机制未在本机活动（面板运行时段内）。`;
@@ -139,7 +156,7 @@
            + `<span class="caliber" title="绊线以面板启动时的目录状态为零点：boot 前已有的内容不告警，只如实展示；面板重启后零点重置">绊线零点以来无新增</span>`;
     } else if (s.status === 'unreadable') {
       head = `<b>目录不可读</b>（${s.readError ? escapeHtml(s.readError) : '权限被拒'}）——绊线无法扫描该目录。`
-           + `<div class="faint" style="margin-top:4px">若你刚按 README「隐私提示」手动锁定目录，这是预期状态（快照写入已被阻断）；否则请检查目录权限——绊线在此期间不设防。</div>`;
+           + `<div class="faint" style="margin-top:4px">这是「读取被拒」的信号：若你以拒绝读取式 ACL 锁定了目录属预期；常见的仅拒写入式锁定（README 程序）不会触发本态——出现本态请检查目录权限，绊线在此期间不设防。</div>`;
     } else if (s.status === 'active') {
       const d = s.activityDetail || {};
       const parts = [];
@@ -154,27 +171,31 @@
       head = `首次扫描中…`;
     }
 
-    const rows = (s.workspaces || []).slice(0, 8).map(w => `<tr>
+    const rows = wss.slice(0, 8).map(w => `<tr>
         <td class="mono">${escapeHtml(shortHash(w.hash))}</td>
         <td>${w.path ? escapeHtml(w.path) : '<span class="faint">（state.json 缺失/损坏）</span>'}</td>
         <td class="num">${fmtBytes(w.encBytes)}</td>
         <td class="num">${w.failureCount != null ? fmtInt(w.failureCount) : '—'}</td>
         <td class="num">${relTime(w.lastWriteMs)}</td>
       </tr>`).join('');
-    const more = (s.workspaces || []).length > 8 ? `<tr><td colspan="5" class="faint">… 共 ${fmtInt(s.workspaces.length)} 个工作区（按最近活动排序，前 8 个）</td></tr>` : '';
-    const table = (s.workspaces || []).length ? `
+    const more = wss.length > 8 ? `<tr><td colspan="5" class="faint">… 共 ${fmtInt(wss.length)} 个工作区（按最近活动排序，前 8 个）</td></tr>` : '';
+    const table = wss.length ? `
       <table style="margin-top:10px"><thead><tr>
         <th>hash</th><th>工作区</th><th class="num">加密工件</th><th class="num">上传失败</th><th class="num">最后写入</th>
       </tr></thead><tbody>${rows}${more}</tbody></table>` : '';
 
-    const mode = s.watchMode === 'watch' ? 'fs.watch+轮询'
-      : s.watchMode === 'parent' ? '父目录 watch+轮询'
-      : s.watchMode === 'poll' ? `仅轮询${s.watchError ? `（watch 不可用）` : ''}` : '装配中';
+    let mode;
+    if (s.watchMode === 'watch') mode = 'fs.watch+轮询';
+    else if (s.watchMode === 'parent') mode = '父目录 watch+轮询';
+    else if (s.watchMode === 'poll') mode = `仅轮询${s.watchError ? `（watch 不可用：${escapeHtml(s.watchError)}）` : ''}`;
+    else mode = '装配中';
     card.innerHTML = `
       <div>${head}</div>${table}
       <div class="faint" style="margin-top:10px;font-size:11px">
         <span class="mono">${escapeHtml(s.dir)}</span> · ${mode} · 上次扫描 ${s.scannedAt ? relTime(s.scannedAt) : '—'} · 本卡纯只读（readdir/stat，零写入）
-        ${s.truncated ? ` · <span style="color:var(--sev-warn)">本次扫描被截断（目录异常大），明细不完整</span>` : ''}
+        ${s.truncated ? ` · <span style="color:var(--sev-warn)">本次扫描被截断（目录异常大），明细不完整、此拍不参与判定</span>` : ''}
+        ${s.partial ? ` · <span style="color:var(--sev-warn)">部分内容不可读（${s.readError ? escapeHtml(s.readError) : '权限被拒'}），此拍不参与判定</span>` : ''}
+        ${s.scanStuck ? ` · <span style="color:var(--sev-err)">扫描疑似卡死</span>` : ''}
         ${s.scanError ? ` · <span style="color:var(--sev-warn)">扫描异常：${escapeHtml(s.scanError)}</span>` : ''}
       </div>`;
   }
