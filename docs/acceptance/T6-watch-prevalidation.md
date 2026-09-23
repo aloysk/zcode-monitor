@@ -35,4 +35,5 @@
 `zcode-2026-09-23.jsonl` 自本地午夜起持续增长——ZCode 按**本地日**轮转命名。
 既有 `todayLogFile()` 的 UTC 日映射在本地 00:00–08:00 (SGT) 指向已停写的旧文件。
 本任务保持该既有导出语义不动（行为对外不变），`createLogWatcher` / 探针的缺省
-解析改为「LOG_DIR 内名字最新的匹配文件」，证据与影响详见 `T6-latency-samples.md`。
+解析改为「LOG_DIR 内名字最新的匹配文件」，证据与影响详见 `T6-latency-samples.md`
+（后续读侧已全面修复并销账：`residuals.md` R-2，2026-09-23）。

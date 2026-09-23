@@ -45,7 +45,9 @@ node tools/log-latency-probe.js --mode poll  --samples 7
 00:00–08:00 (SGT) 期间，`tailLog` / `eventsForTrace`（trace 路由）读到的是已停写的
 旧文件，夜间新增行不可见。本任务约束为「行为对外不变」，故仅将 **watch 与探针的
 缺省解析**改为「LOG_DIR 内名字最新的匹配文件」（`defaultTodayFile`，对 UTC/本地
-命名惯例都成立），既有导出语义一律未动；建议后续任务把 `todayLogFile` 一并修正。
+命名惯例都成立），既有导出语义一律未动；建议后续任务把 `todayLogFile` 一并修正
+（已销账：`residuals.md` R-2，2026-09-23——`tailLog` / `eventsForTrace` 已一并切换
+`defaultTodayFile` 的「名字最新」语义，仓内已无读路径依赖 UTC 映射）。
 
 ## 5. 与判据相关的诚实声明
 
