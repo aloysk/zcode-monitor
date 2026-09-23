@@ -31,7 +31,7 @@
 -  **推理可视化** —— 思考型模型的推理链单独呈现，与最终回答分开，点击展开。
 - ️ **原始数据查看器** —— 直接查任意 SQLite 表（`where` / `order` / 降序，JSON 列可展开）。
 -  **双主题** —— Dark（默认）/ Light，三种切换方式。
-- 🐾 **宠物一键导入** —— Codex 格式宠物包（`pet.json + spritesheet.webp`）一键导入，导入时校验 sheet 尺寸 / 行数 / JSON 健全性并生成 NOTICE；CLI（`node tools/import-pet.js <包目录>`）、API（`POST /api/pets/import`）与图鉴页（`pets-preview.html`）三个入口共用同一校验模块。
+- 🐾 **宠物一键导入** —— Codex 格式宠物包（`pet.json + spritesheet.webp`）一键导入，导入时校验 sheet 尺寸 / 行数 / JSON 健全性并生成 NOTICE，且**按白名单复制**（只带走 pet.json / 精灵图 / NOTICE / README·LICENSE 文本，`.html`/`.svg` 等一律跳过并告警）；许可证缺失、或自报值不在已知 SPDX/惯用写法白名单的包**缺省拒绝导入**，需显式确认（CLI `--ack-unlicensed`、图鉴页确认弹窗、API `ackUnknownLicense: true`；确认后照 NOTICE 记录自报值并放行）；CLI（`node tools/import-pet.js <包目录>`）、API（`POST /api/pets/import`）与图鉴页（`pets-preview.html`）三个入口共用同一校验模块。
 - ⚡ **fs.watch 实时增强** —— 日志目录 `fs.watch` 监听 + 字节偏移增量解析，JSONL 追加即触发、大幅降低日志尾部发现延迟；watch 失败自动降级短轮询，周期偏移对账兜底，事件不丢不重。
 - ✅ **测试套件** —— Node 内置 `node:test`（零新依赖），`npm test` 一键运行；fixture 全部落 `os.tmpdir()`，与真实库完全隔离。
 -  **全程只读** —— 不改 ZCode 一行数据。
@@ -152,6 +152,8 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
 
 监控读路径对 `~/.zcode/` 全程只读。唯一例外是 WAL checkpoint 功能（ZCode 退出后自动折叠，或经 `/api/checkpoint` 手动触发）：它以短时可写连接执行 `wal_checkpoint(TRUNCATE)`，只把 WAL 日志折叠进主库、清空 `-wal` 文件，不改变任何数据行内容。
 
+安全姿态（与隐私相关的部分）：面板无鉴权、默认只绑 `127.0.0.1`，全部 `/api` 仅接受回环 Host（`127.0.0.1` / `localhost`，防 DNS rebinding 整库转录）；全站下发 CSP 与 `X-Content-Type-Options: nosniff`，前端脚本零外联（Chart.js 已本地化到 `public/assets/`，仅 pet/widget 两页保留 Google Fonts 字体 CSS 外联，见 `docs/acceptance/residuals.md`）；`/pets` 静态目录内非图片一律强制下载，导入夹带的页面类文件无法以面板同源执行。手动 checkpoint 的拒绝语义：WAL 近 60s 内有写入 → `409 wal_active`（`?force=1` 也不越过，绝不与真实写入方抢锁）；探测显示 ZCode 运行中 → `409 zcode_running`（`?force=1` 可越过）；锁竞争 → `503 checkpoint_busy`（可重试）。
+
 ## 故障排查
 
 ### 启动后页面一直显示"检查 ZCode 是否在运行" / health 报 `ok:false`
@@ -188,7 +190,7 @@ ZCode 用 SQLite 内嵌库（WAL 模式）并持续写入，读时会和它的�
 ## 技术栈
 
 - **后端**：Node 18 + Express + better-sqlite3（只读连接，`readonly: true`）
-- **前端**：原生 HTML/CSS/JS（无框架、无构建步骤）+ Chart.js (CDN)
+- **前端**：原生 HTML/CSS/JS（无框架、无构建步骤）+ Chart.js（已本地化到 `public/assets/`，脚本零外联；仅 pet/widget 两页保留 Google Fonts 字体 CSS 外联，见 `docs/acceptance/residuals.md` R-8）
 - **实时**：Server-Sent Events（SSE）推送新 `model_usage`/`tool_usage` 行
 - 全程只读，只监听 `127.0.0.1`，不修改 / 删除任何 ZCode 数据
 
@@ -198,11 +200,13 @@ ZCode 用 SQLite 内嵌库（WAL 模式）并持续写入，读时会和它的�
 zcode-monitor/
 ├── package.json
 ├── server/
-│   ├── index.js              # 入口：Express + 自动开浏览器
+│   ├── index.js              # 入口：Express + 自动开浏览器 + 安全响应头（CSP/nosniff）
 │   ├── db.js                 # 只读 DB 连接 + 查询函数
 │   ├── zcode-runtime.js      # ZCode 运行状态探测 + WAL checkpoint
+│   ├── livegen.js            # 生成态引擎（呼吸动画/×N 车道的 SSE 边沿）
 │   ├── transcript.js         # 解析 transcript.jsonl + metadata.json
-│   ├── log-tail.js           # 日志读取 + trace 还原
+│   ├── log-tail.js           # 日志读取 + trace 还原 + fs.watch 实时增量
+│   ├── pet-import.js         # 宠物包导入共享模块（校验/白名单复制/端点中间件）
 │   └── routes/
 │       ├── overview.js       # 实时监控
 │       ├── sessions.js       # 会话列表 + 详情 7 端点
@@ -215,6 +219,12 @@ zcode-monitor/
 │   ├── index.html            # 单页 shell
 │   ├── app.js                # 路由 + 辅助函数
 │   ├── styles.css            # 暗色主题（对齐参考页配色 token）
+│   ├── widget.html           # token 速度胶囊页（WebView2 壳常驻）
+│   ├── pet.html              # 桌宠页（精灵动画 + 手势 + 心情）
+│   ├── pets-preview.html     # 宠物候选预览 + 从暂存导入面板
+│   ├── pet-state.js          # 桌宠行为纯决策模块（单测面）
+│   ├── sanitize.js           # 气泡文本消毒共享模块（双端导出）
+│   ├── pets/                 # 宠物包目录（<id>/pet.json + spritesheet.webp）
 │   └── views/                # 各标签渲染逻辑
 │       ├── overview.js
 │       ├── sessions.js       # 7 标签
@@ -223,6 +233,13 @@ zcode-monitor/
 │       ├── errors.js
 │       ├── raw.js
 │       └── how.js            # 运行原理
+├── tools/
+│   ├── import-pet.js         # 宠物包导入 CLI
+│   ├── webp-size.js          # webp 头尺寸读取（导入校验）
+│   ├── log-latency-probe.js  # 日志摄取延迟探针
+│   └── pets-staging/         # 导入暂存区（gitignored）
+├── test/                     # node:test 套件（test/index.js 聚合入口）
+├── docs/                     # 计划/规格/验收记录（acceptance/）
 └── README.md
 ```
 

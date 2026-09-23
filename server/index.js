@@ -9,6 +9,8 @@ const express = require('express');
 const dbq = require('./db');
 const { createGenWatcher } = require('./livegen');
 const runtime = require('./zcode-runtime');
+const { loopbackHostGate, securityHeaders, petsStaticOptions } = require('./http-hardening');
+const { makeCheckpointRoute } = require('./checkpoint-route');
 const overview = require('./routes/overview');
 const sessions = require('./routes/sessions');
 const trace = require('./routes/trace');
@@ -22,8 +24,26 @@ const PORT = +process.env.PORT || 7331;
 const HOST = process.env.HOST || '127.0.0.1';
 const OPEN = process.env.OPEN_BROWSER !== '0';
 
+// pet pack registry for the pet page: every public/pets/<id>/ holding
+// pet.json + spritesheet.webp is a selectable pack — drop a folder in and it
+// joins the cycle. Discovery lives in server/pet-import.js (shared with the
+// import CLI/endpoint); the two original packs stay first so the cycle feels
+// stable as packs are added.
+const PETS_ROOT = path.join(__dirname, '..', 'public', 'pets');
+// staging root for candidate packs: imports may only source from inside this
+// directory — the endpoint rejects any source that resolves outside of it.
+const PETS_STAGING_ROOT = path.join(__dirname, '..', 'tools', 'pets-staging');
+
 const app = express();
 app.use(express.json());
+
+// 全站安全响应头（CSP / nosniff，构成见 server/http-hardening.js）。
+app.use(securityHeaders);
+
+// /api 全局回环 Host 闸（防 DNS rebinding）：面板无鉴权，读 API 面大（整库
+// 转录），rebinding 下唯一可靠的判别就是 Host 头形态。本机 UI/壳都从
+// 127.0.0.1（或 localhost）加载，不受影响。
+app.use('/api', loopbackHostGate);
 
 // tiny request logger
 app.use((req, _res, next) => {
@@ -72,6 +92,8 @@ const PROBE_MIN_INTERVAL_MS = 30 * 1000; // 探测节流 ≥ 单次子进程延�
 const WAL_ACTIVE_WINDOW_MS = 60 * 1000;  // -wal 静默不足此时长即视为 writer 在场
 let lastProbeAt = 0;
 
+let checkpointRetryPending = false; // 上次自动 checkpoint 因 busy 未完成：下个探测周期（仍判定未运行时）重试一次
+
 function pollZCodeRuntime() {
   if (Date.now() - lastProbeAt < PROBE_MIN_INTERVAL_MS) return; // 结果沿用上次
   lastProbeAt = Date.now();
@@ -86,11 +108,16 @@ function pollZCodeRuntime() {
     runtimeState.running = running;
 
     // Transition: running → stopped → fold the WAL so history stays readable.
-    if (wasRunning && !running) {
+    // Also retry once per probe cycle after a busy attempt: the one-shot
+    // transition would otherwise give up forever on a transient lock.
+    const shouldCheckpoint = (wasRunning && !running)
+      || (checkpointRetryPending && !running);
+    if (shouldCheckpoint) {
       console.log('[runtime] ZCode exited — checkpointing WAL to preserve history…');
       const before = runtime.walStatus(dbq.DB_PATH);
       const result = runtime.checkpointNow(dbq.DB_PATH);
-      if (result.ok) {
+      checkpointRetryPending = !!(result.ok && result.busy === 1); // busy=1：锁被占，下个周期再试一次
+      if (result.ok && !checkpointRetryPending) {
         const after = result.after;
         runtimeState.lastCheckpoint = {
           at: new Date().toISOString(),
@@ -101,14 +128,16 @@ function pollZCodeRuntime() {
         };
         console.log(`[runtime] checkpoint done: WAL ${before ? before.walBytes : '?'} → ${after ? after.walBytes : '?'} bytes`);
       } else {
-        runtimeState.lastCheckpoint = { at: new Date().toISOString(), ok: false, error: result.error };
-        console.warn(`[runtime] checkpoint failed: ${result.error}`);
+        runtimeState.lastCheckpoint = { at: new Date().toISOString(), ok: false,
+          error: checkpointRetryPending ? 'checkpoint_busy' : result.error, retryable: true };
+        console.warn(`[runtime] checkpoint ${checkpointRetryPending ? 'busy（下个探测周期重试一次）' : 'failed'}: ${result.error || 'lock busy'}`);
       }
       // Drop our read-only connection cache so the next read sees the folded db.
       dbq.invalidateDb();
     }
   });
 }
+
 
 // initial probe (async, doesn't block boot; don't checkpoint at boot — ZCode
 // may already be down and that's fine)
@@ -117,26 +146,15 @@ setInterval(pollZCodeRuntime, 5000);
 
 // Manual checkpoint endpoint (for a "preserve now" button). Refuses to run
 // while ZCode is running to avoid contending with its writer (unless ?force=1).
-app.get('/api/checkpoint', (req, res) => {
-  if (runtimeState.running && !req.query.force) {
-    return res.status(409).json({
-      ok: false,
-      error: 'zcode_running',
-      message: 'ZCode 正在运行，无法安全 checkpoint。请先关闭 ZCode，或加 ?force=1 强制（可能短暂抢锁）。',
-    });
-  }
-  const before = runtime.walStatus(dbq.DB_PATH);
-  const result = runtime.checkpointNow(dbq.DB_PATH);
-  if (result.ok) {
-    dbq.invalidateDb();
-    runtimeState.lastCheckpoint = {
-      at: new Date().toISOString(), ok: true,
-      walBefore: before ? before.walBytes : null,
-      walAfter: result.after ? result.after.walBytes : null,
-    };
-  }
-  res.json(result);
-});
+// 闸逻辑在 server/checkpoint-route.js（三分支：409 wal_active / 409 zcode_running /
+// 503 checkpoint_busy / 200 放行），依赖注入便于测试挂载。
+app.get('/api/checkpoint', makeCheckpointRoute({
+  dbPath: dbq.DB_PATH,
+  runtime,
+  runtimeState,
+  activeWindowMs: WAL_ACTIVE_WINDOW_MS,
+  onSuccess: () => dbq.invalidateDb(),
+}));
 
 app.get('/api/health', (_req, res) => {
   let ok = false, error = null;
@@ -196,6 +214,11 @@ app.use((err, _req, res, next) => {
   }
   next(err);
 });
+
+// /pets 静态服务收紧（须挂在与下面通用的 express.static 之前，注册顺序即命中
+// 顺序；构成见 server/http-hardening.js petsStaticOptions）：非图片一律
+// octet-stream + attachment，可执行面即使混进 public/pets 也不能以面板同源执行。
+app.use('/pets', express.static(PETS_ROOT, petsStaticOptions()));
 
 // static frontend
 app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -272,16 +295,8 @@ app.get('/pet', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public',
 // exact rolling-window seed for the widget page (no LIMIT cap — see db.js completedSince)
 app.get('/api/widget/recent', (_req, res) => res.json(dbq.completedSince(Date.now() - 5 * 60 * 1000)));
 
-// pet pack registry for the pet page: every public/pets/<id>/ holding
-// pet.json + spritesheet.webp is a selectable pack — drop a folder in and it
-// joins the cycle. Discovery lives in server/pet-import.js (shared with the
-// import CLI/endpoint); the two original packs stay first so the cycle feels
-// stable as packs are added.
-const PETS_ROOT = path.join(__dirname, '..', 'public', 'pets');
-// staging root for candidate packs: imports may only source from inside this
-// directory — the endpoint rejects any source that resolves outside of it.
-const PETS_STAGING_ROOT = path.join(__dirname, '..', 'tools', 'pets-staging');
-
+// pet pack registry for the pet page (PETS_ROOT 见文件头部定义)：/api/pets 与
+// staging/导入端点共用 server/pet-import.js 的发现与校验管线。
 app.get('/api/pets', (_req, res) => {
   try { res.json(petImport.listPetPacks(PETS_ROOT)); }
   catch { res.json([]); }
@@ -293,7 +308,8 @@ app.get('/api/pets/staging', (_req, res) => {
 });
 
 // 导入端点：缺 X-Zcode-Monitor-Import 首部一律 403（跨源简单 POST 无法携带自定义首部）。
-// body: { source: <staging 内的包目录名>, id?, sourceUrl?, author?, license?, force? }
+// body: { source: <staging 内的包目录名>, id?, sourceUrl?, author?, license?, force?,
+//         ackUnknownLicense? }（许可证缺失/unknown 需 ackUnknownLicense:true 显式确认）
 app.post('/api/pets/import',
   petImport.importEndpointMiddleware({ petsRoot: PETS_ROOT, stagingRoot: PETS_STAGING_ROOT }));
 

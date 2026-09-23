@@ -41,10 +41,35 @@ test('A4-5: URL 及查询串（http 与 file 协议）', () => {
   assert.equal(out.indexOf('token=abc'), -1, '查询串必须随 URL 整体剥除');
 });
 
-test('A4-5: 密钥样式·sk- 前缀 token', () => {
-  const out = sanitizeSpeech('密钥 sk-abcdefgh123456 不要外传');
-  assert.equal(out.indexOf('sk-abcdefgh123456'), -1);
-  assert.ok(out.includes('[密钥]'));
+test('A4-5: 密钥样式·sk- 前缀 token（大小写与下界）', () => {
+  assert.equal(sanitizeSpeech('密钥 sk-abcdefgh123456 不要外传'), '密钥 [密钥] 不要外传');
+  // i 标志：'SK-' 大写同形态
+  assert.equal(sanitizeSpeech('密钥 SK-Abcdef123456 不要外传'), '密钥 [密钥] 不要外传');
+  // {5,} 下界：体恰 6 位（首字符 + 5）剥除；5 位不触发（避免吃普通短词）
+  assert.equal(sanitizeSpeech('值 sk-abcdef 尾'), '值 [密钥] 尾');
+  assert.equal(sanitizeSpeech('值 sk-abcde 尾'), '值 sk-abcde 尾');
+});
+
+test('A4-5: 密钥样式·Stripe 形态（sk_/pk_ [live|test] _ ≥16 位）', () => {
+  for (const k of ['sk_live_abc123def456ghi789', 'sk_test_abc123def456ghi789',
+                   'pk_live_abc123def456ghi789', 'sk_abc123def456ghi789jkl']) {
+    const out = sanitizeSpeech('支付 ' + k + ' 泄露');
+    assert.equal(out.indexOf(k), -1, k);
+    assert.ok(out.includes('[密钥]'), k);
+  }
+  // 粘连前缀同 sk- 取舍：从 sk_/pk_ 起剥除，残前缀不是密钥材料
+  const glued = sanitizeSpeech('xpk_live_abc123def456ghi789 end');
+  assert.equal(glued.indexOf('abc123def456ghi789'), -1);
+  assert.ok(glued.includes('[密钥]'));
+});
+
+test('A4-5: 密钥样式·分段 hex 兜底（空格分段合计 ≥32 位）', () => {
+  const hex = 'a3f9c2e81b7d4f60 91c5a8e3d2b4f607'; // 16 + 16（单段都不达 32 位下限）
+  const out = sanitizeSpeech('摘要 ' + hex + ' 记录');
+  assert.equal(out.indexOf('a3f9c2e81b7d4f60'), -1, '分段 hex 不得泄漏');
+  assert.equal(out, '摘要 [密钥] 记录');
+  // 三段以上同理；单段 32 位走长 hex 规则（既有用例覆盖）
+  assert.equal(sanitizeSpeech('k ' + 'aaaaaaaa bbbbbbbb cccccccc dddddddd' + ' k'), 'k [密钥] k');
 });
 
 test('A4-5: 密钥样式·长 hex（≥32 位）', () => {
@@ -95,11 +120,78 @@ test('A4-5: JWT 三段（eyJ 前缀）整体剥除，头/载荷/签名无任何�
 test('A4-5: JWT 规则先于长 hex/base64 规则（顺序不变量）', () => {
   // 顺序敏感的守护：若 RULES 重排致长 base64 规则（≥40 位）先跑，签名段先被
   // 剥、三段整体匹配失配，头与载荷（可解出 claims）将原样残留且无报警。
-  // 构造短签名段 JWT：签名不足 40 位时只有 JWT 规则能整体剥除——重排后本用例必红。
-  const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeK';
+  // 签名段取 ≥40 位：短签名段对重排不敏感（JWT 规则与 base64 规则都各自收敛
+  // 到占位符，重排下用例仍绿=假守护）；≥40 位签名被 base64 规则先行剥除时
+  // 三段匹配必失配——重排后本用例必红。
+  const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0'
+              + '.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c'; // 签名段 43 位 ≥40
   const out = sanitizeSpeech('jwt:' + jwt + ';end');
   assert.equal(out, 'jwt:[凭证];end');
   assert.equal(out.indexOf('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9'), -1);
+});
+
+test('A4-5: Bearer 先于长 base64 规则（顺序不变量）：≥40 位 token 收敛为单一 [凭证]', () => {
+  // 重排（长 base64 先跑）时 token 先被剥成 [密钥]、"Bearer " 残留为孤立头，
+  // 断言整体收敛即失配——本用例锁住 Bearer 规则先于长 base64 的顺序。
+  const tok = 'Tm9kZS5qcyBpcyBhd2Vzb21lIGFuZCB2ZXJ5IHNlY3VyZQ=='; // 44 位 + padding ≥40
+  const out = sanitizeSpeech('Authorization: Bearer ' + tok + ' 已带上');
+  assert.equal(out, 'Authorization: [凭证] 已带上');
+});
+
+test('A4-5: 跨行/分段凭据不泄漏（空白收敛先于规则循环）', () => {
+  // 顺序守护：空白收敛若放回规则之后，分段样式的密钥各段都低于规则阈值、
+  // 最后又被拼回一条——凭据原样泄漏。
+  assert.equal(sanitizeSpeech('sk-abc12\ndef34567890'), '[密钥]');
+  // JWT 跨点空格：三段被空白拆开时各段均不达长 base64 阈值
+  const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 . eyJzdWIiOiIxIn0'
+              + ' . SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
+  assert.equal(sanitizeSpeech('token=' + jwt + ' end'), 'token=[凭证] end');
+  // Bearer 凭据分段：token 与续段一并收敛（续段后的普通词同被吞入属过杀取舍）
+  assert.equal(sanitizeSpeech('Authorization: Bearer abc123\nXYZ_~def ok'), 'Authorization: [凭证]');
+  // 真顺序锁定样本（对收敛先后敏感）：'\r\n' 与双空格在「规则先行」时都不被
+  // sk- 规则的单词格空格容忍（\s 后瞻见 \r/\n/空格 即断），只有先收敛为单空格
+  // 才收敛成占位符——把 sanitizeSpeech 的两步对调，本两例必红（\n 单换行样本
+  // 对对调不敏感，是假守护，不再作守护样本）。
+  assert.equal(sanitizeSpeech('sk-abc12\r\ndef34567890'), '[密钥]', 'CRLF 分段须先收敛');
+  assert.equal(sanitizeSpeech('sk-abc12  def34567890'), '[密钥]', '双空格分段须先收敛');
+});
+
+test('A4-5: 粘连前缀的 sk-/JWT/AKIA 不整体漏过（锚不依赖词边界）', () => {
+  // 'keysk-…'/'xeyJ…'/'keyAKIA…'：前缀粘连时 \b/lookbehind 锚在词中失配、整条
+  // 漏过——规则从特征前缀起剥除，残留的前缀字符不是密钥材料。
+  const sk = sanitizeSpeech('看 keysk-abcdefgh123456 尾');
+  assert.equal(sk.indexOf('abcdefgh123456'), -1, 'sk- 密钥材料不得残留');
+  assert.ok(sk.includes('[密钥]'));
+  const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeK';
+  const jw = sanitizeSpeech('值x' + jwt + '尾');
+  assert.equal(jw.indexOf('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9'), -1, 'JWT 材料不得残留');
+  assert.ok(jw.includes('[凭证]'));
+  const ak = sanitizeSpeech('keyAKIA1234567890ABCDEF x');
+  assert.equal(ak.indexOf('AKIA1234567890ABCDEF'), -1, 'AKIA 密钥材料不得残留');
+  assert.ok(ak.includes('[密钥]'));
+});
+
+test('A4-5: AWS AccessKeyId（AKIA + 20 位大写字母数字）', () => {
+  const key = 'AKIA1234567890ABCDEF'; // AKIA + 16 位 = 20 位标准形态
+  const out = sanitizeSpeech('身份 ' + key + ' 已带');
+  assert.equal(out.indexOf(key), -1);
+  assert.equal(out, '身份 [密钥] 已带');
+});
+
+test('A4-5: UNC 路径（\\\\host\\share\\…）', () => {
+  const out = sanitizeSpeech('挂载 \\\\fileserver\\share\\data 后读取');
+  assert.equal(out.indexOf('fileserver'), -1);
+  assert.equal(out, '挂载 [本地路径] 后读取');
+});
+
+test('A4-5: data:/javascript: 内联 URI 整串剥除（含粘连前缀形态）', () => {
+  assert.equal(sanitizeSpeech('图 data:image/png;base64,iVBORw0KGgo= 完'),
+    '图 [链接] 完');
+  assert.equal(sanitizeSpeech('打 javascript:alert(1) 看'), '打 [链接] 看');
+  // 粘连前缀（'metadata:…'）不整体漏过：从 data: 起剥除，残前缀不是 URI 内容
+  const glued = sanitizeSpeech('元数据 metadata:image/png;base64,iVBORw0KGgo= 完');
+  assert.equal(glued.indexOf('image/png'), -1, '粘连 data: URI 不得泄漏');
+  assert.ok(glued.includes('[链接]'));
 });
 
 test('A4-5: 普通中文短句原样保留（含标点与数字）', () => {
@@ -128,4 +220,52 @@ test('A4-5: 混合敏感样式的整句一次消毒', () => {
   }
   assert.ok(out.includes('[本地路径]') && out.includes('[链接]')
          && out.includes('[密钥]'));
+});
+
+// ── R3 修-medium：评审实测的五个漏剥（先补单测再放行规则）────────────────────
+
+test('R3: Stripe restricted key（rk_live_/rk_test_）不泄漏', () => {
+  for (const k of ['rk_live_abc123def456ghi789', 'rk_test_abc123def456ghi789']) {
+    const out = sanitizeSpeech('支付 ' + k + ' 泄露');
+    assert.equal(out.indexOf(k), -1, k);
+    assert.ok(out.includes('[密钥]'), k);
+  }
+});
+
+test('R3: Google API key（AIza + 恰 35 位，总 39 字符 < 长 base64 40 位下限）不泄漏', () => {
+  const cont = 'Ab1-Cd2_Ef3-Gh4_'.repeat(5).slice(0, 35); // 含 -/_ 的 35 位续段
+  const key = 'AIza' + cont;
+  assert.equal(key.length, 39, '夹具自检：恰 39 字符');
+  const out = sanitizeSpeech('密钥 ' + key + ' 尾');
+  assert.equal(out.indexOf(key), -1, '39 位 Google key 不得泄漏');
+  assert.ok(out.includes('[密钥]'));
+});
+
+test('R3: sk_/pk_/rk_ 混合大小写（SK_LIVE_/sk_Live_）不泄漏', () => {
+  for (const k of ['SK_LIVE_abc123def456ghi789', 'sk_Live_abc123def456ghi789',
+                   'Pk_Test_abc123def456ghi789']) {
+    const out = sanitizeSpeech('值 ' + k + ' 尾');
+    assert.equal(out.indexOf(k), -1, k);
+    assert.ok(out.includes('[密钥]'), k);
+  }
+});
+
+test('R3: 空格分段的 sk_live_（对齐 sk- 规则的续段容忍）不泄漏', () => {
+  // 跨行分段在气泡单行语境拼回一条（空白先收敛）：规则须容忍续段空格
+  const out = sanitizeSpeech('key sk_live_abc123def456\nghi789jkl end');
+  assert.equal(out.indexOf('abc123def456'), -1, '分段密钥材料不得残留');
+  assert.ok(out.includes('[密钥]'));
+});
+
+test('R3: 冒号分段的 hex（aa:bb:… 指纹形态）不泄漏', () => {
+  // MD5 指纹：32 个 hex 字符按冒号两两分段——每段都远低于长 hex 的 32 位下限，
+  // 且旧分段规则只容忍空格分隔
+  const fp = Array.from({ length: 16 }, (_, i) => (i * 11 + 0x0a).toString(16).padStart(2, '0')).join(':');
+  assert.equal(fp.replace(/:/g, '').length, 32, '夹具自检：32 个 hex 字符');
+  const out = sanitizeSpeech('指纹 ' + fp + ' 记录');
+  assert.equal(out.indexOf(fp), -1, '冒号分段指纹不得泄漏');
+  assert.equal(out, '指纹 [密钥] 记录');
+  // 点分/连字符分段同形态
+  const dotted = 'a1b2c3d4e5f60718' + '.' + '9a8b7c6d5e4f3021';
+  assert.equal(sanitizeSpeech('摘要 ' + dotted + ' 记'), '摘要 [密钥] 记');
 });

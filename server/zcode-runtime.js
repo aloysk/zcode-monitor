@@ -91,6 +91,12 @@ function walIdleMs(dbPath) {
 
 // Fold the WAL into the main db so read-only connections can see all history.
 // ONLY call this when ZCode is NOT running (verified by caller).
+// busy_timeout 用短等待（800ms）：这是同步 better-sqlite3 调用，长 busy_timeout
+// 会把事件循环按 timeout 时长冻结（曾为 10s）。调用方已有 walIdleMs 即时否决
+// （writer 静默 ≥60s 才会走到这里），正常路径抢不到锁的窗口极小；真抢不到就让
+// busy=1 如实上抛，由调用方决定重试——绝不为罕见竞争冻结事件循环。
+// 残余（R3 登记 residuals R-11）：busy_timeout 只约束锁等待、不约束折叠 WAL 的
+// 磁盘 I/O——巨大 -wal 时本调用仍可秒级阻塞（罕见：异常退出 + 大 WAL）。
 // Returns { ok, before, after, checkpointed }.
 function checkpointNow(dbPath) {
   const before = walStatus(dbPath);
@@ -98,18 +104,26 @@ function checkpointNow(dbPath) {
   try {
     // Writable connection: opening it lets SQLite recover the WAL journal,
     // then TRUNCATE checkpoint folds it into the main db and zeroes the -wal.
-    db = new Database(dbPath, { timeout: 10000 });
-    db.pragma('busy_timeout = 10000');
+    db = new Database(dbPath, { timeout: 800 });
+    db.pragma('busy_timeout = 800');
     // TRUNCATE = checkpoint as much as possible, then truncate -wal to 0.
+    // better-sqlite3 对这类 pragma 返回**行对象数组**，wal_checkpoint 恰一行
+    // { busy, log, checkpointed }（2026-09-23 实测：读者持锁时
+    // [{ busy:1, log:5, checkpointed:5 }]）。R3 修正：曾误按裸值数组
+    // [busy, log, checkpointed] 解读——result[0] 取到的是行对象（truthy 而非
+    // busy 数值）、result[2] 恒 undefined，导致 busy===1 永不成立：busy 竞争被
+    // 误报为成功，checkpoint-route 的 503 checkpoint_busy 分支与 index.js 的
+    // checkpointRetryPending 重试整体死代码（评审探针实锤）。测试守护：
+    // test/zcode-runtime.test.js 在真实 WAL 库上不 mock 复核两种形态。
     const result = db.pragma('wal_checkpoint(TRUNCATE)');
-    // result is [busy, log_frames, checkpointed_frames]
+    const row = Array.isArray(result) ? result[0] : null;
     const after = walStatus(dbPath);
     return {
       ok: true,
       before,
       after,
-      busy: Array.isArray(result) ? result[0] : null,
-      checkpointed: Array.isArray(result) ? result[2] : null,
+      busy: row ? row.busy : null,
+      checkpointed: row ? row.checkpointed : null,
     };
   } catch (e) {
     return { ok: false, error: e.message, before };

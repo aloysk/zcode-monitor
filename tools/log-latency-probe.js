@@ -16,10 +16,10 @@
 //    1.7s 级伪影：onEvents 在 tGrow 为 null 的窗口内到达会丢弃该批，下一批又配到
 //    旧 tGrow，watch 样本被抬高（实测 36/52/1681/1716/594ms）。
 // 2) poll 模式可见性确认用本文件内的只读 mini-tail（跟随 defaultTodayFile）——
-//    现行 tailLog 内部走 todayLogFile() 的 UTC 日映射，2026-09-23 实测 ZCode 按
-//    本地日命名轮转（00:00+0800 整点切新文件），午夜后 UTC 映射指向已停写的
-//    旧文件，tailLog 将永远读不到新行；那是既有 tailLog 的缺陷（本任务不改其
-//    行为），不能让它在基线里掩盖轮询机制本身的真实延迟。
+//    采样轮（T6）时 tailLog 内部还走 todayLogFile() 的 UTC 日映射（2026-09-23
+//    实测 ZCode 按本地日命名轮转，00:00+0800 整点切新文件，午夜后 UTC 映射指向
+//    已停写的旧文件），不能让该既有缺陷在基线里掩盖轮询机制本身的真实延迟。
+//    （该缺陷已于后续加固轮修复：tailLog/eventsForTrace 同样改为名字最新语义。）
 'use strict';
 const fs = require('fs');
 const argv = process.argv.slice(2);

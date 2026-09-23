@@ -5,12 +5,13 @@
 //   边界1：cache_read 与 cache_creation 并存、reasoning 为 NULL（COALESCE 路径）、
 //          computed_total_tokens 故意 ≠ 公式和（1400 vs 1300）——保证分支 A / B 可区分；
 //   边界2：子代理组（parent_id 归组语义面：子行属于子会话、官方口径全量计入）；
-//   边界3：token 列全空（SUM 稳健性）。
-// side call 标注为注释级交付（turn_usage 数字无变化），按计划显式缩减、不入断言，
-// 理由留痕于 docs/usage-accounting.md §side call 缺口。
+//   边界3：token 列全空（SUM 稳健性）；
+//   边界4：turn_usage 一行（computed_total_tokens < 同窗 model_usage 之和——
+//          side call 缺口的下界语义可执行化，docs/usage-accounting.md §side call 缺口）。
+// side call 缺口原为注释级交付；R1 加固轮补 turn_usage 边界行使下界结论可检查。
 const test = require('node:test');
 const assert = require('node:assert');
-const { createFixtureDb, buildSession, buildModelUsage } = require('./helpers/fixture-db');
+const { createFixtureDb, buildSession, buildModelUsage, buildTurnUsage } = require('./helpers/fixture-db');
 
 test('A2-1: 口径边界行（cache 并存 / reasoning NULL / parent_id 组 / SUM 稳健）', () => {
   const fx = createFixtureDb();
@@ -36,6 +37,20 @@ test('A2-1: 口径边界行（cache 并存 / reasoning NULL / parent_id 组 / SU
     // 边界3：NULL token 列全空（SUM 稳健性）
     { id: '3', session_id: 'p1', status: 'error', started_at: Date.now() - 40e3,
       duration_ms: null, query_source: 'main_turn' },
+  ]);
+  // 边界4（A2-1 下界可执行检查）：turn_usage 一行，computed_total_tokens 故意
+  // 小于同窗 model_usage 之和（p1 为 1400）——模拟标题生成等 side call 只落
+  // model_usage 的缺口（docs/usage-accounting.md §side call 缺口：turn 级数字
+  // 是下界）。sessionTurns 必须原样返回该列，而不是用公式重算。
+  buildTurnUsage(fx.conn, [
+    { turn_id: 't1', session_id: 'p1', status: 'completed', trace_id: 'tr1',
+      started_at: Date.now() - 60e3, completed_at: Date.now() - 50e3,
+      duration_ms: 10000, time_to_first_token_ms: 800,
+      model_request_count: 1, model_retry_count: 0, tool_call_count: 0,
+      tool_error_count: 0, input_tokens: 1000, output_tokens: 200,
+      reasoning_tokens: null, cache_read_input_tokens: 400,
+      cache_creation_input_tokens: 100, computed_total_tokens: 1000,
+      context_exceeded: 0 },
   ]);
   process.env.ZCODE_DB = fx.dbPath;
   process.env.ZCODE_LOG_DIR = fx.logDir;
@@ -64,6 +79,14 @@ test('A2-1: 口径边界行（cache 并存 / reasoning NULL / parent_id 组 / SU
     const forest = dbq.agentsForest({});
     assert.equal(forest.roots[0].tokens, 1400);
     assert.equal(forest.roots[0].children[0].tokens, 650);
+    // A2-1 下界：turn_usage.computed_total_tokens（1000）< 同窗 model_usage 之和
+    //（p1 = 1400，差值即 side call 缺口）；sessionTurns 返回该官方预计算列本身。
+    const turns = dbq.sessionTurns('p1');
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0].computed_total_tokens, 1000, 'turn 级数字为官方预计算下界');
+    assert.ok(turns[0].computed_total_tokens
+      < dbq.sessionList({}).find(s => s.id === 'p1').total_tokens,
+      'side call 缺口下 turn_usage 是 model_usage 之和的下界');
   } finally {
     try { dbq.db().close(); } catch { /* already closed */ }
     dbq.invalidateDb();

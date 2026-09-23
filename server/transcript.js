@@ -8,7 +8,10 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const AGENTS_DIR = path.join(os.homedir(), '.zcode', 'cli', 'agents');
+// AGENTS_DIR 可经 ZCODE_AGENTS_DIR 注入（R3 修-low）：与 ZCODE_DB/ZCODE_LOG_DIR
+// 同法（require 前注入），测试指向 tmpdir fixture，绝不触碰真实 ~/.zcode。
+const AGENTS_DIR = process.env.ZCODE_AGENTS_DIR
+  || path.join(os.homedir(), '.zcode', 'cli', 'agents');
 
 // Extract the agent uuid from a child session id like
 // `sess_subagent_agent_<uuid>`. We anchor on the *trailing* agent_ segment
@@ -174,6 +177,6 @@ function aggregate(events) {
 }
 
 module.exports = {
-  AGENTS_DIR, locateAgent, readMetadata, readTranscript,
+  AGENTS_DIR, agentUuidFromChild, locateAgent, readMetadata, readTranscript,
   categorize, summarize, aggregate,
 };

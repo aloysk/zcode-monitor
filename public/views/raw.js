@@ -50,8 +50,16 @@
     if (!data.rows.length) { out.innerHTML = '<div class="empty">无数据</div>'; return; }
     const cols = Object.keys(data.rows[0]);
     const isJson = (v) => typeof v === 'string' && (v.startsWith('{') || v.startsWith('[')) ;
-    out.innerHTML = `<div class="faint" style="margin-bottom:8px">${data.count} 行（显示前 ${data.rows.length}）· 表 <code>${escapeHtml(data.table)}</code></div>
-      <div class="card tight" style="overflow:auto;max-height:70vh"><table>
+    // 服务端 order 回落/COUNT 近似说明（R3 raw 收紧）：如实展示，避免「选了
+    // time_created 却按 rowid 排」看起来像排序失灵
+    const metaBits = [];
+    if (data.meta && data.meta.order && data.meta.order.note) metaBits.push(data.meta.order.note);
+    if (data.meta && data.meta.count_approx) metaBits.push('行数为 MAX(rowid) 近似（大表精确计数会全表扫描）');
+    const metaLine = metaBits.length
+      ? `<div class="faint" style="margin-bottom:8px;font-size:11px">⚠ ${metaBits.map(m => escapeHtml(m)).join('；')}</div>` : '';
+    out.innerHTML = `<div class="faint" style="margin-bottom:8px">${data.count} 行（显示前 ${data.rows.length}）· 表 <code>${escapeHtml(data.table)}</code></div>`
+      + metaLine
+      + `<div class="card tight" style="overflow:auto;max-height:70vh"><table>
         <thead><tr>${cols.map(c=>`<th>${escapeHtml(c)}</th>`).join('')}<th></th></tr></thead>
         <tbody>${data.rows.map(r => `<tr>
           ${cols.map(c => {

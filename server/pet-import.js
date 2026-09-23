@@ -9,6 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const { webpSize } = require('../tools/webp-size');
+const { LOOPBACK_HOST_RE } = require('./http-hardening');
 
 const CELL_W = 192;
 const CELL_H = 208;
@@ -19,6 +20,31 @@ const IMPORT_HEADER = 'x-zcode-monitor-import';
 const DEFAULT_STAGING_ROOT = path.join(__dirname, '..', 'tools', 'pets-staging');
 // 包 id 即落位目录名：小写字母/数字/连字符，天然排除路径分隔符与 ..
 const ID_RE = /^[a-z0-9-]+$/;
+// 资源上限：导入是同步复制路径，无上限时一个 GB 级 webp 或巨型目录树会冻结
+// 事件循环。精灵契约下 32MB/2000 条目都是远超正常包的宽松上界。
+const SHEET_MAX_BYTES = 32 * 1024 * 1024;
+const AUDIT_MAX_ENTRIES = 2000;
+// 「许可证已知」白名单（R3 登记low-③，由黑名单反转为白名单）：原黑名单
+// （unknown|unlicensed|none|…）对枚举外的自报值（如 '未确认'、任意字符串）一律
+// 放行——绕过确认门。反转为仅常见 SPDX/惯用写法免确认（归一小写比对），其余
+// 一律视为未知、须 ackUnknownLicense 显式确认：ack 的语义是「知悉授权未核实」，
+// 宁多确认勿漏确认。自报的具体许可证仍是事实性元数据，照 NOTICE 记录不变。
+const LICENSE_KNOWN = new Set([
+  'mit', 'mit license', 'apache-2.0', 'apache 2.0', 'apache2', 'apache-2',
+  'bsd-2-clause', 'bsd-3-clause', 'bsd 2-clause', 'bsd 3-clause', 'bsd',
+  'isc', '0bsd', 'mpl-2.0', 'mpl 2.0',
+  'unlicense', 'the unlicense', 'public domain', 'pd',
+  'cc0', 'cc0-1.0',
+  'cc by 4.0', 'cc-by-4.0', 'cc by-sa 4.0', 'cc-by-sa-4.0',
+  'cc by-nc 4.0', 'cc-by-nc-4.0', 'cc by-nc-sa 4.0', 'cc-by-nc-sa-4.0',
+  'cc by 3.0', 'cc-by-3.0',
+  'ofl-1.1', 'sil ofl 1.1', 'ofl',
+  'gpl-2.0', 'gpl-3.0', 'gpl-3.0-only', 'gpl-3.0-or-later',
+  'lgpl-2.1', 'lgpl-3.0', 'agpl-3.0', 'agpl-3.0-only',
+]);
+function isKnownLicense(license) {
+  return LICENSE_KNOWN.has(String(license).trim().toLowerCase());
+}
 
 class PetImportError extends Error {
   constructor(code, message) { super(message); this.code = code; }
@@ -53,6 +79,12 @@ function checkSheet(sourceDir, pet) {
   }
   if (!fs.existsSync(p) || !fs.statSync(p).isFile()) {
     throw new PetImportError('SHEET_MISSING', `spritesheet 不存在: ${rel}`);
+  }
+  // 体积上限（32MB）：导入复制是同步路径，超大文件会冻结事件循环；精灵契约下
+  // 真实 sheet 远小于此。头部只读 32 字节不受影响（见下）。
+  if (fs.statSync(p).size > SHEET_MAX_BYTES) {
+    throw new PetImportError('SHEET_TOO_LARGE',
+      `spritesheet ${fs.statSync(p).size} 字节超上限 ${SHEET_MAX_BYTES}（同步复制路径的资源上限）`);
   }
   let realSrc, realP;
   try { realSrc = fs.realpathSync(src); realP = fs.realpathSync(p); }
@@ -94,6 +126,11 @@ function checkSheet(sourceDir, pet) {
 // HTTP 静态服务的 public/pets（违背 index.js 声明的 "imports may only source
 // from inside this directory"）。包目录树很小（pet.json + webp + NOTICE），
 // 全树 lstat 成本可忽略。返回遍历到的条目数（供测试断言审计确实发生）。
+// 防御面声明（R3 登记low-②，见 residuals R-12）：硬链接不在防御面——lstat 视角
+// 硬链接是普通文件，包含性审计对它不可见。危害有限：创建硬链接需要对 staging
+// 的本地写权限（面板威胁模型外的本地攻击者，其本身已可直写 public 之外的任意
+// 本地文件）；内容面仍受 sheet 32MB 上限、webp 头校验、/pets 非图片强制下载与
+// /api 回环闸约束。
 function auditNoSymlinks(rootDir) {
   if (fs.lstatSync(rootDir).isSymbolicLink()) {
     throw new PetImportError('SOURCE_SYMLINK', `来源目录本身是链接，拒绝导入: ${rootDir}`);
@@ -101,7 +138,11 @@ function auditNoSymlinks(rootDir) {
   let seen = 0;
   const walk = (dir) => {
     for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
-      seen++;
+      if (++seen > AUDIT_MAX_ENTRIES) {
+        // 条目上限：审计与白名单复制都是同步遍历，巨型目录树会冻结事件循环
+        throw new PetImportError('SOURCE_TOO_LARGE',
+          `来源目录条目超过上限 ${AUDIT_MAX_ENTRIES}（同步遍历路径的资源上限）`);
+      }
       if (d.isSymbolicLink()) {
         throw new PetImportError('SOURCE_SYMLINK',
           `来源目录树内含 symlink/junction，拒绝导入: ${path.join(dir, d.name)}`);
@@ -113,8 +154,9 @@ function auditNoSymlinks(rootDir) {
   return seen;
 }
 
-// NOTICE.md（导入生成）：来源 URL、原作者、许可证三字段 + 粉丝自制免责声明模板。
-// 字段缺失写占位（<未提供>/unknown），导入不阻断，warnings 里另行提示。
+// NOTICE.md（导入生成）：来源 URL、原作者、许可证三字段 + 免责声明模板。
+// 字段缺失写占位（<未提供>/unknown）；许可证缺失/unknown 需 ackUnknownLicense
+// 显式确认后导入（见 importPetPack），其余字段缺失仅 warnings 提示。
 // 来源包自带的 NOTICE.md 原样保留在分隔线之后。
 function buildNotice({ id, name, source, author, license, originalNotice = '' }) {
   const lines = [
@@ -122,19 +164,59 @@ function buildNotice({ id, name, source, author, license, originalNotice = '' })
     `- source: ${source || '<未提供>'}`,
     `- author: ${author || '<未提供>'}`,
     `- license: ${license || 'unknown'}`, '',
-    '## 免责声明（粉丝自制素材）', '',
-    '本包为粉丝自制（fan-made）素材，与原作品权利方无任何隶属、合作或背书关系。',
-    '素材版权归原权利人所有；仅限本地个人非商用使用，不得再分发、转售或用于商业用途。',
+    '## 免责声明', '',
+    '本包素材的来源与授权状态未经核实，导入时未确认与原作品权利方存在任何隶属、合作或背书关系。',
+    '素材著作权归原作者/原权利人所有；请在遵守来源许可与当地法律的前提下限于本地个人非商用使用，不得再分发、转售或用于商业用途。',
     '如权利方或其代表不希望该素材被使用，请联系本仓库维护者移除。', '',
   ];
   if (originalNotice) lines.push('---', '', '# 来源包自带 NOTICE（原样保留）', '', originalNotice);
   return lines.join('\n') + '\n';
 }
 
+// 导入白名单：只允许带走这些文件，其余一律跳过并计入 warnings（extra_files_skipped）。
+// staging 包里可能夹带任何文件（下载器残留、预览 .html/.svg 等）——public/ 由
+// express.static 以面板同源（127.0.0.1:7331）直接服务，一个附带页面就等于
+// 在本服务源上落地可执行内容（可读 /api/raw 等并外传）。白名单外文件一律不进
+// public/pets；静态侧另有 /pets 非图片强制 octet-stream+attachment 的第二道防线。
+// README/LICENSE 的前缀匹配限定纯文本扩展名（裸名亦常见，放行）：不限扩展名时
+// README.html 会经白名单落进 /pets（当前被第二道防线中和，但不应依赖它）。
+const TOP_LEVEL_ALLOW = [
+  /^pet\.json$/i,
+  /^notice\.md$/i,
+  /^readme([^/]*\.(md|txt))?$/i,
+  /^(license|licence)([^/]*\.(md|txt))?$/i,
+];
+function copyWhitelisted(sourceDir, tmpDir, sheetRel) {
+  const sheetPosix = path.posix.normalize(String(sheetRel).replace(/\\/g, '/'));
+  const sheetDirs = new Set();
+  let acc = '';
+  for (const seg of sheetPosix.split('/').slice(0, -1)) {
+    acc = acc ? acc + '/' + seg : seg;
+    sheetDirs.add(acc);
+  }
+  const allowed = (relPosix, isDir) =>
+    relPosix === sheetPosix
+    || (isDir && sheetDirs.has(relPosix))
+    || (!relPosix.includes('/') && TOP_LEVEL_ALLOW.some(re => re.test(relPosix)));
+  const skipped = [];
+  const walk = (dir, relPosix) => {
+    fs.mkdirSync(relPosix ? path.join(tmpDir, relPosix) : tmpDir, { recursive: true });
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const relChild = relPosix ? relPosix + '/' + e.name : e.name;
+      if (!allowed(relChild, e.isDirectory())) { skipped.push(relChild); continue; }
+      if (e.isDirectory()) walk(path.join(dir, e.name), relChild);
+      else fs.copyFileSync(path.join(dir, e.name), path.join(tmpDir, relChild));
+    }
+  };
+  walk(sourceDir, '');
+  return skipped;
+}
+
 // 导入一个包：先全量校验，再复制到临时目录、写 NOTICE、最后 rename 原子落位。
 // 失败路径清理临时目录，目标根无残留。force 覆盖同名包（旧包先挪到回收名，
 // 落位成功后删除；落位失败回滚恢复旧包）。
-function importPetPack({ sourceDir, targetRoot, id, source, author, license, force = false }) {
+function importPetPack({ sourceDir, targetRoot, id, source, author, license,
+                         force = false, ackUnknownLicense = false }) {
   if (!sourceDir || !fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
     throw new PetImportError('SOURCE_MISSING', `来源目录不存在: ${sourceDir}`);
   }
@@ -149,6 +231,17 @@ function importPetPack({ sourceDir, targetRoot, id, source, author, license, for
     throw new PetImportError('ID_INVALID', `非法包 id（须匹配 [a-z0-9-]+）: ${id}`);
   }
   const { sheetRel } = checkSheet(sourceDir, pet);
+  // 许可证白名单外（缺失/unknown/未登记写法，含中文占位）需显式确认才放行：
+  // 导入产物落在以本服务同源静态分发的 public/pets，未核实授权的素材应至少有
+  // 一次知情确认（API ackUnknownLicense / CLI --ack-unlicensed）；确认后仍照常
+  // 生成 license 占位与警告。ack 只认 === true：宽松真值（"false" 字符串/数组等）
+  // 不得视作确认。
+  const licenseUnknown = !license || !isKnownLicense(license);
+  if (licenseUnknown && ackUnknownLicense !== true) {
+    throw new PetImportError('LICENSE_UNKNOWN',
+      '许可证缺失或未知（NOTICE 将记 license: unknown）：导入需显式确认——'
+      + 'API 传 ackUnknownLicense: true，CLI 加 --ack-unlicensed。请先核实来源与授权状态。');
+  }
 
   const targetRootAbs = path.resolve(targetRoot);
   const finalDir = path.join(targetRootAbs, id);
@@ -162,8 +255,9 @@ function importPetPack({ sourceDir, targetRoot, id, source, author, license, for
 
   fs.mkdirSync(targetRootAbs, { recursive: true });
   const tmpDir = path.join(targetRootAbs, `.import-${id}-${process.pid}-${Date.now()}`);
+  let skippedNames = null;
   try {
-    fs.cpSync(sourceDir, tmpDir, { recursive: true });
+    skippedNames = copyWhitelisted(sourceDir, tmpDir, sheetRel);
     const origNoticePath = path.join(tmpDir, 'NOTICE.md');
     const originalNotice = fs.existsSync(origNoticePath)
       ? fs.readFileSync(origNoticePath, 'utf8') : '';
@@ -188,15 +282,19 @@ function importPetPack({ sourceDir, targetRoot, id, source, author, license, for
   const warnings = [];
   if (!source) warnings.push('source_missing');
   if (!author) warnings.push('author_missing');
-  if (!license) warnings.push('license_missing');
-  return { ok: true, id, name, dir: finalDir, warnings };
+  if (licenseUnknown) warnings.push('license_missing');
+  if (skippedNames && skippedNames.length) warnings.push('extra_files_skipped');
+  return { ok: true, id, name, dir: finalDir, warnings, skippedFiles: skippedNames };
 }
 
 // /api/pets 的包发现逻辑（自 server/index.js 原样搬入，root 可注入）。
 // order 前置 + 首字符码兜底排序保持不变（回归守护：yuexinmiao、maid-deepseek-whale 恒排最前）。
+// 点前缀目录（.import-*/.import-old-* 轮换残留等）不参与轮换：覆盖路径挪走旧包、
+// 落位失败回滚的窄窗里它们会短暂存在，按正式包列出即"幽灵包"。
 function listPetPacks(root) {
   const order = ['yuexinmiao', 'maid-deepseek-whale'];
   return fs.readdirSync(root, { withFileTypes: true })
+    .filter(d => !d.name.startsWith('.'))
     .filter(d => d.isDirectory()
       && fs.existsSync(path.join(root, d.name, 'pet.json'))
       && fs.existsSync(path.join(root, d.name, 'spritesheet.webp')))
@@ -216,11 +314,12 @@ function listPetPacks(root) {
 
 // staging 包清单（预览页“从暂存导入”入口的数据源）。
 // staging 不存在时返回 []（不抛错），hasPetJson 标记哪些可直接导入。
+// 点前缀目录（.import-* 等）与正式轮换同理由不列出。
 function listStagingPacks(stagingRoot = DEFAULT_STAGING_ROOT) {
   let entries;
   try { entries = fs.readdirSync(stagingRoot, { withFileTypes: true }); }
   catch { return []; }
-  return entries.filter(d => d.isDirectory()).map(d => {
+  return entries.filter(d => d.isDirectory() && !d.name.startsWith('.')).map(d => {
     const petJsonPath = path.join(stagingRoot, d.name, 'pet.json');
     const hasPetJson = fs.existsSync(petJsonPath);
     let name = d.name;
@@ -281,8 +380,8 @@ function resolveStagingSource(source, stagingRoot = DEFAULT_STAGING_ROOT) {
 // HOST=0.0.0.0 覆写监听（server/index.js 的 HOST 环境变量），非浏览器直连客户端
 // 可伪造回环 Host 与自定义首部绕过前两道闸——这与整个面板的无鉴权回环姿态一致
 // （默认只绑 127.0.0.1 即是主防线），写入面亦已限定在 staging → public/pets；
-// 对外暴露场景须自行加鉴权层，而非依赖本中间件。
-const LOOPBACK_HOST_RE = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/;
+// 对外暴露场景须自行加鉴权层，而非依赖本中间件。读面另由 /api 全局回环 Host
+// 闸覆盖（server/http-hardening.js loopbackHostGate）。
 function importEndpointMiddleware({ petsRoot, stagingRoot } = {}) {
   const staging = stagingRoot || DEFAULT_STAGING_ROOT;
   return (req, res) => {
@@ -296,7 +395,7 @@ function importEndpointMiddleware({ petsRoot, stagingRoot } = {}) {
         message: `拒绝非回环 Host「${host}」：该端点只接受 127.0.0.1/localhost 发起（防 DNS rebinding）。` });
     }
     const body = req.body || {};
-    const { source, id, sourceUrl, author, license, force } = body;
+    const { source, id, sourceUrl, author, license, force, ackUnknownLicense } = body;
     if (!source) {
       return res.status(400).json({ ok: false, error: 'SOURCE_MISSING',
         message: '缺少 source（staging 内的包目录名）' });
@@ -306,6 +405,7 @@ function importEndpointMiddleware({ petsRoot, stagingRoot } = {}) {
       const r = importPetPack({
         sourceDir, targetRoot: petsRoot,
         id, source: sourceUrl, author, license, force: !!force,
+        ackUnknownLicense: ackUnknownLicense === true, // 只认布尔 true（低-f）
       });
       return res.json(r);
     } catch (e) {
