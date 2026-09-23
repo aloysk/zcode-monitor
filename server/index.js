@@ -13,6 +13,7 @@ const { createSnapshotWatcher, makeSnapshotRoute } = require('./snapshot-watch')
 const runtime = require('./zcode-runtime');
 const { loopbackHostGate, securityHeaders, petsStaticOptions, makeErrorTranslator } = require('./http-hardening');
 const { makeCheckpointRoute } = require('./checkpoint-route');
+const { makeRestartRoute } = require('./restart-route');
 const { makeHealthRoute } = require('./health-route');
 const overview = require('./routes/overview');
 const sessions = require('./routes/sessions');
@@ -139,6 +140,11 @@ app.get('/api/health', makeHealthRoute({
   dbq, runtime, runtimeState,
   dbPath: dbq.DB_PATH, logDir: dbq.LOG_DIR,
 }));
+
+// POST /api/restart — 面板自重启（壳右键菜单「重启面板」→ 本端点；语义、
+// 首部闸与端口交接时序见 server/restart-route.js 头注）。POST-only：其余
+// 方法自然落到 404，与既有 /api 路由的未匹配行为一致。
+app.post('/api/restart', makeRestartRoute({ spawn: require('child_process').spawn }));
 
 // ── 快照绊线（snapshot tripwire）──────────────────────────────
 // 只读监视 ~/.zcode/v2/checkpoints/（ZCode 工作区快照上传机制的落盘目录，
@@ -273,8 +279,14 @@ app.get(/^\/(?!api).*/, (_req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
+// 接替进程的 listen 延迟：/api/restart 的 child 由 restart-route.js 带
+// ZCODE_RESTART_BOOT_DELAY_MS 启动——旧进程在响应发出后 ~250ms 才退出，
+// 立即 bind 会 EADDRINUSE 即死，延迟 listen 等端口让出（仅重启路径设置，
+// 正常启动为 0，零行为变化）。
+const RESTART_BOOT_DELAY_MS = Math.max(0, +process.env.ZCODE_RESTART_BOOT_DELAY_MS || 0);
+
 const server = http.createServer(app);
-server.listen(PORT, HOST, () => {
+const startListen = () => server.listen(PORT, HOST, () => {
   const url = `http://${HOST}:${PORT}/`;
   console.log(`\n  zcode-monitor → ${url}\n  (DB ${dbOk ? 'OK' : 'NOT FOUND'})  Ctrl-C to stop\n`);
   if (OPEN) {
@@ -284,3 +296,9 @@ server.listen(PORT, HOST, () => {
     exec(cmd, () => {});
   }
 });
+if (RESTART_BOOT_DELAY_MS > 0) {
+  console.log(`[restart] delaying listen ${RESTART_BOOT_DELAY_MS}ms (old process releasing the port)`);
+  setTimeout(startListen, RESTART_BOOT_DELAY_MS);
+} else {
+  startListen();
+}

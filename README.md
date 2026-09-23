@@ -169,7 +169,7 @@ icacls "$env:USERPROFILE\.zcode\v2\checkpoints" /remove:d "*<SID>"              
 
 监控读路径对 `~/.zcode/` 全程只读。唯一例外是 WAL checkpoint 功能（ZCode 退出后自动折叠，或经 `/api/checkpoint` 手动触发）：它以短时可写连接执行 `wal_checkpoint(TRUNCATE)`，只把 WAL 日志折叠进主库、清空 `-wal` 文件，不改变任何数据行内容。
 
-安全姿态（与隐私相关的部分）：面板无鉴权、默认只绑 `127.0.0.1`，全部 `/api` 仅接受回环 Host（`127.0.0.1` / `localhost`，防 DNS rebinding 整库转录）；全站下发 CSP 与 `X-Content-Type-Options: nosniff`，前端脚本零外联（Chart.js 已本地化到 `public/assets/`，仅 pet/widget 两页保留 Google Fonts 字体 CSS 外联，见 `docs/acceptance/residuals.md`）；`/pets` 静态目录内非图片一律强制下载，导入夹带的页面类文件无法以面板同源执行。手动 checkpoint 的拒绝语义：WAL 近 60s 内有写入 → `409 wal_active`（`?force=1` 也不越过，绝不与真实写入方抢锁）；探测显示 ZCode 运行中 → `409 zcode_running`（`?force=1` 可越过）；锁竞争 → `503 checkpoint_busy`（可重试）；`?force=1` 另要求请求头 `X-Zcode-Monitor-Checkpoint: 1`（面板按钮自动携带；防跨站简单请求触发，缺头 → `403`）。全部 `/api` 行数参数（limit/max/offset）统一钳界，负值不再构成无上限查询。
+安全姿态（与隐私相关的部分）：面板无鉴权、默认只绑 `127.0.0.1`，全部 `/api` 仅接受回环 Host（`127.0.0.1` / `localhost`，防 DNS rebinding 整库转录）；全站下发 CSP 与 `X-Content-Type-Options: nosniff`，前端脚本零外联（Chart.js 已本地化到 `public/assets/`，仅 pet/widget 两页保留 Google Fonts 字体 CSS 外联，见 `docs/acceptance/residuals.md`）；`/pets` 静态目录内非图片一律强制下载，导入夹带的页面类文件无法以面板同源执行。手动 checkpoint 的拒绝语义：WAL 近 60s 内有写入 → `409 wal_active`（`?force=1` 也不越过，绝不与真实写入方抢锁）；探测显示 ZCode 运行中 → `409 zcode_running`（`?force=1` 可越过）；锁竞争 → `503 checkpoint_busy`（可重试）；`?force=1` 另要求请求头 `X-Zcode-Monitor-Checkpoint: 1`（面板按钮自动携带；防跨站简单请求触发，缺头 → `403`）。`POST /api/restart`（桌宠菜单「重启面板」）同款首部闸（`X-Zcode-Monitor-Restart: 1`，缺头 → `403`），POST-only，接替失败如实 500 且旧进程不退出。全部 `/api` 行数参数（limit/max/offset）统一钳界，负值不再构成无上限查询。
 
 ## 故障排查
 
@@ -274,6 +274,8 @@ npm run dev
 ```
 
 前端入口 `public/index.html` + `public/app.js`；后端入口 `server/index.js`。各路由按文件拆分在 `server/routes/`。
+
+生产实例换新代码无需手动找进程：桌宠右键菜单 **「重启面板」**（壳 `shell/Program.cs`）→ `POST /api/restart`（要求请求头 `X-Zcode-Monitor-Restart: 1`，缺头 `403`，防跨站触发；语义见 `server/restart-route.js` 头注）——服务端先 spawn 接替进程（延迟 ~600ms 再 listen 完成端口交接、强制 `OPEN_BROWSER=0`、继承 `PORT`/`ZCODE_WIDGET_CHILD` 等环境）再退出旧进程，全程 1-2 秒，桌宠页面随后自动重载拿到新前端。壳对「自有」与「收养」两种服务形态走同一调用路径；服务不在时退回 `EnsureServerAsync` 直接拉起。
 
 ## 贡献
 

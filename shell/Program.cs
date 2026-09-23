@@ -306,6 +306,9 @@ internal sealed class WidgetForm : Form
     private string? _navUrl;       // page currently loaded (skip no-op navigations)
     private bool _webReady;        // CoreWebView2 initialized (Navigate/ExecuteScript safe)
     private bool _cycleOnNav;      // run cyclePack() once a NEW /pet document lands
+    private bool _restartBusy;     // one restart at a time: a second click in the
+                                   // handoff gap would take the was-down branch and
+                                   // double-spawn a racing node (EADDRINUSE loser dies silently)
 
     public WidgetForm()
     {
@@ -351,6 +354,10 @@ internal sealed class WidgetForm : Form
         _menu.Items.Add(_topMostItem);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("打开完整面板", null, (s, e) => OpenUrl(DashboardUrl));
+        var restartItem = new ToolStripMenuItem("重启面板")
+            { ToolTipText = "重启 127.0.0.1:7331 面板服务（更新代码后用，几秒内自动恢复）" };
+        restartItem.Click += (s, e) => _ = RestartServerAsync();
+        _menu.Items.Add(restartItem);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("退出", null, (s, e) => Close());
         ContextMenuStrip = _menu;
@@ -537,6 +544,80 @@ internal sealed class WidgetForm : Form
         for (var d = new DirectoryInfo(AppContext.BaseDirectory); d != null; d = d.Parent!)
             if (File.Exists(Path.Combine(d.FullName, "server", "index.js"))) return d.FullName;
         return null;
+    }
+
+    // ── menu action: restart the panel server ────────────────────────
+    // The server owns the port handoff itself — POST /api/restart (custom
+    // header gate, see server/restart-route.js) spawns its own replacement
+    // and exits, so ONE call path covers both ownership states: the companion
+    // server we spawned (ZCODE_WIDGET_CHILD, job-bound) and one we merely
+    // adopted because it was already listening. Only when nothing answers do
+    // we fall back to the plain bring-up path. The page is reloaded at the
+    // end so freshly merged frontend code actually runs — SSE self-heal alone
+    // would keep the OLD document alive against the new server.
+    private async Task RestartServerAsync()
+    {
+        if (_restartBusy) { Program.Log("restart: already in progress — ignoring"); return; }
+        _restartBusy = true;
+        try { await RestartServerCoreAsync(); }
+        catch (Exception ex) { Program.Log("restart: unexpected: " + ex.Message); }
+        finally { _restartBusy = false; }
+    }
+
+    private async Task RestartServerCoreAsync()
+    {
+        Program.Log("menu: restart panel");
+        var wasUp = await ServerUpAsync();
+        if (wasUp)
+        {
+            try
+            {
+                using var req = new System.Net.Http.HttpRequestMessage(
+                    System.Net.Http.HttpMethod.Post, "http://127.0.0.1:7331/api/restart");
+                req.Headers.TryAddWithoutValidation("X-Zcode-Monitor-Restart", "1");
+                using var resp = await Http.SendAsync(req);
+                Program.Log($"restart: endpoint -> {(int)resp.StatusCode}");
+                // HttpClient doesn't throw on 4xx/5xx: a refused restart (403 gate /
+                // 500 spawn_failed — old server stays up) must stop here, not burn
+                // 4s in the wait-down loop against a server that never goes down
+                // and then "recover" into a pointless page reload
+                if (!resp.IsSuccessStatusCode) return;
+            }
+            catch (Exception ex)
+            {
+                Program.Log("restart: endpoint failed: " + ex.Message);
+                return;
+            }
+            // let the OLD process actually exit first: it stays reachable for
+            // ~250ms after the response, and an immediate "wait for up" would
+            // probe the old listener, "recover" instantly and reload the page
+            // against PRE-restart assets — the exact stale-code state this
+            // menu item exists to clear
+            for (int i = 0; i < 16; i++)
+            {
+                if (!await ServerUpAsync()) break;
+                await Task.Delay(250);
+            }
+        }
+        else
+        {
+            await EnsureServerAsync(); // nothing up (e.g. companion idle self-exit)
+            Program.Log("restart: server was down — brought it up");
+        }
+        // replacement binds after its boot delay + node start; /api/gen/state
+        // is in-memory so each probe is cheap
+        for (int i = 0; i < 40; i++)
+        {
+            if (await ServerUpAsync()) break;
+            await Task.Delay(500);
+        }
+        if (!await ServerUpAsync()) { Program.Log("restart: server did not come back"); return; }
+        if (_webReady)
+        {
+            var url = _navUrl ?? UrlOf(_mode);
+            _web.CoreWebView2.Navigate(url);
+            Program.Log("restart: reloaded " + url);
+        }
     }
 
     private static string? FindNodeExe()
