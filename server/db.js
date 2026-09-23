@@ -361,7 +361,8 @@ function overviewSpeed(sinceMs) {
     // 动态工作流（dwf）派生的 actor 走第三个来源 workflow_child（会话行为
     // task_type='workflow_child'、同样挂在 parent 会话下，运行册在 dwf_run/
     // dwf_actor 表）。与 subagent 分列返回：UI「子agent」语义 = 两者之和，
-    // 拆开可区分 Task 子代理与工作流 actor。
+    // 拆开可区分 Task 子代理与工作流 actor。三计数之和 < request_count——
+    // 残差是 compact/session_title 及未来未知来源（口径见 How 页）。
     workflow_child_count: m.workflow_child_count || 0,
   };
 }
