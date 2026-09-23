@@ -1,9 +1,11 @@
 'use strict';
-// test/api-hardening.test.js — R2 加固面的端点测试：
+// test/api-hardening.test.js — R2/R4 加固面的端点测试：
 // 1) /api 全局回环 Host 闸（loopbackHostGate，防 DNS rebinding）；
-// 2) /api/raw where 受限文法（参数化绑定，UNION 等注入面拒绝）；
-// 3) /api/checkpoint 三分支（409 wal_active / 409 zcode_running / 503 checkpoint_busy / 放行）；
-// 4) /pets 静态收紧 + CSP/nosniff 响应头。
+// 2) /api/raw where 受限文法（参数化绑定，UNION 等注入面拒绝）+ limit/offset 钳界；
+// 3) /api/checkpoint 四分支（403 force 首部闸 / 409 wal_active / 409 zcode_running
+//    / 503 checkpoint_busy / 放行）；
+// 4) /pets 静态收紧 + CSP/nosniff 响应头；
+// 5) makeErrorTranslator（锁竞争/连接损伤 → 503 契约形态，依赖注入供挂载）。
 // fixture 全部在 os.tmpdir() 下构建；db 环境变量在 require 前 注入
 //（server/db.js 在 require 时读 env，连接惰性）。
 const test = require('node:test');
@@ -21,8 +23,8 @@ process.env.ZCODE_DB = fx.dbPath;
 process.env.ZCODE_LOG_DIR = fx.logDir;
 process.env.ZCODE_ROLLOUT_DIR = fx.rolloutDir;
 
-const { loopbackHostGate, securityHeaders, petsStaticOptions, CSP } = require('../server/http-hardening');
-const { makeCheckpointRoute } = require('../server/checkpoint-route');
+const { loopbackHostGate, securityHeaders, petsStaticOptions, CSP, makeErrorTranslator } = require('../server/http-hardening');
+const { makeCheckpointRoute, CHECKPOINT_FORCE_HEADER } = require('../server/checkpoint-route');
 const raw = require('../server/routes/raw');
 
 test.after(() => {
@@ -37,10 +39,13 @@ function listen(app) {
   return new Promise(resolve => server.on('listening', () => resolve(server)));
 }
 
-// 原生 http.get：可自定 Host 头（fetch/undici 对 Host 覆写不稳定）
-function get(port, p, host) {
+// 原生 http.get：可自定 Host 头（fetch/undici 对 Host 覆写不稳定），extraHeaders
+// 供自定义首部（如 checkpoint force 闸）注入
+function get(port, p, host, extraHeaders) {
+  const headers = { ...(extraHeaders || {}) };
+  if (host) headers.Host = host;
   return new Promise((resolve, reject) => {
-    http.get({ host: '127.0.0.1', port, path: p, headers: host ? { Host: host } : {} },
+    http.get({ host: '127.0.0.1', port, path: p, headers },
       res => {
         let body = '';
         res.on('data', d => { body += d; });
@@ -148,25 +153,28 @@ test('checkpoint 路由三分支：409 wal_active（force 也不越）/ 409 zcod
     return app;
   };
 
-  // 场景 1：wal_active —— -wal 1s 前有写入 → 409，force=1 也不越过
+  // 场景 1：wal_active —— -wal 1s 前有写入 → 409，force（带头部）也不越过
   const s1 = await listen(mount(makeRuntime({ idleMs: 1000, busy: 0 }), { running: false, lastCheckpoint: null }));
   try {
     const a = await get(s1.address().port, '/api/checkpoint');
     assert.equal(a.status, 409);
     assert.equal(JSON.parse(a.body).error, 'wal_active');
-    const af = await get(s1.address().port, '/api/checkpoint?force=1');
+    const af = await get(s1.address().port, '/api/checkpoint?force=1', null,
+      { [CHECKPOINT_FORCE_HEADER]: '1' });
     assert.equal(af.status, 409, 'force 不越过 walIdle 否决（绝不与真实 writer 抢锁）');
     assert.equal(JSON.parse(af.body).error, 'wal_active');
   } finally { s1.close(); }
 
   // 场景 2：zcode_running —— wal 无反证 + running 状态否决；force 越过状态否决
+  //（R4 起 force 须带 X-Zcode-Monitor-Checkpoint 首部，见下方专项用例）
   const s2 = await listen(mount(makeRuntime({ idleMs: null, busy: 0 }), { running: true, lastCheckpoint: null }));
   try {
     const b = await get(s2.address().port, '/api/checkpoint');
     assert.equal(b.status, 409);
     assert.equal(JSON.parse(b.body).error, 'zcode_running');
-    const bf = await get(s2.address().port, '/api/checkpoint?force=1');
-    assert.equal(bf.status, 200, 'force 越过状态否决（wal 已静默）');
+    const bf = await get(s2.address().port, '/api/checkpoint?force=1', null,
+      { [CHECKPOINT_FORCE_HEADER]: '1' });
+    assert.equal(bf.status, 200, 'force（带头部）越过状态否决（wal 已静默）');
   } finally { s2.close(); }
 
   // 场景 3：checkpoint_busy —— 放行执行但 busy=1 → 503 可重试
@@ -338,6 +346,134 @@ test('raw 巨表 where 字段白名单 + COUNT 近似 + 列名大小写不敏感
     const ci = await q('model_usage', "STATUS='error'");
     assert.equal(ci.status, 200, '列名大写变体应等价识别');
     assert.equal(JSON.parse(ci.body).count, 1);
+  } finally { server.close(); }
+});
+
+// ── R4：limit/offset 钳界 + NOT LIKE 分支 + where 长度闸 ────────────────────
+test('raw limit/offset 钳界：负值/0/非数字 limit 与负 offset 均落在安全界内', async () => {
+  const app = express();
+  app.use('/api', loopbackHostGate);
+  app.use('/api/raw', raw);
+  const server = await listen(app);
+  try {
+    const port = server.address().port;
+    // ?limit=-1：旧实现产出 -1（SQLite 负 LIMIT=无上限 → 整表物化），
+    // 钳后回落 1；?limit=0/abc → 缺省 100；?limit=99999 → 上限 1000
+    const cases = [
+      ['limit=-1', 1], ['limit=0', 100], ['limit=abc', 100],
+      ['limit=99999', 1000], ['limit=5', 5],
+    ];
+    for (const [qs, expect] of cases) {
+      const r = await get(port, `/api/raw/session?${qs}`);
+      assert.equal(r.status, 200, qs);
+      const j = JSON.parse(r.body);
+      assert.equal(j.limit, expect, `${qs} → limit`);
+      assert.ok(j.limit >= 1 && j.limit <= 1000, `${qs} → limit ∈ [1,1000]`);
+      assert.ok(j.rows.length <= 1000, `${qs} → rows ≤ 1000`);
+      assert.ok(j.rows.length <= j.limit, `${qs} → rows ≤ 钳后 limit`);
+    }
+    // ?offset=-5：旧实现产出 -5（SQLite 负 OFFSET 语义未定义），钳后回落 0
+    const off = await get(port, '/api/raw/session?offset=-5');
+    assert.equal(off.status, 200);
+    assert.equal(JSON.parse(off.body).offset, 0);
+  } finally { server.close(); }
+});
+
+test('raw NOT LIKE 分支：与 LIKE 互补（计数相加=全表）；where ≥500 → 400', async () => {
+  const app = express();
+  app.use('/api', loopbackHostGate);
+  app.use('/api/raw', raw);
+  const server = await listen(app);
+  try {
+    const port = server.address().port;
+    const q = (w) => get(port, `/api/raw/model_usage?where=${encodeURIComponent(w)}`);
+
+    const notLike = await q("status NOT LIKE 'err%'");
+    assert.equal(notLike.status, 200, 'NOT LIKE 属受限文法，应放行');
+    const nl = JSON.parse(notLike.body);
+    assert.equal(nl.count, 3, "NOT LIKE 'err%' 排除唯一 error 行");
+    const like = await q("status LIKE 'err%'");
+    const lk = JSON.parse(like.body);
+    assert.equal(lk.count, 1);
+    // 不带 where 取全表：与 LIKE/NOT LIKE 计数互补
+    const total = JSON.parse((await get(port, '/api/raw/model_usage')).body).count;
+    assert.equal(nl.count + lk.count, total, 'NOT LIKE 与 LIKE 计数互补（无遗漏/重叠）');
+
+    // 超长 where（≥500 字符）：文法不必要展开，直接 400
+    const long = "status='a' AND ".repeat(40); // 680 字符
+    assert.ok(long.length >= 500);
+    const too = await q(long);
+    assert.equal(too.status, 400);
+    assert.ok(JSON.parse(too.body).error.includes('too long'));
+  } finally { server.close(); }
+});
+
+// ── R4：checkpoint force 首部闸（防跨站 <img> 触发） ────────────────────────
+test('checkpoint force 首部闸：?force=1 无首部 403；带头部进入既有 force 逻辑；非 force 保留简单 GET', async () => {
+  const makeRuntime = () => ({
+    walIdleMs: () => null,
+    walStatus: () => ({ walBytes: 10, shmBytes: 0, mainBytes: 100 }),
+    checkpointNow: () => ({ ok: true, busy: 0, after: { walBytes: 2, shmBytes: 0, mainBytes: 108 } }),
+  });
+  const app = express();
+  app.get('/api/checkpoint', makeCheckpointRoute({
+    dbPath: fx.dbPath, runtime: makeRuntime(),
+    runtimeState: { running: true, lastCheckpoint: null },
+    activeWindowMs: 60 * 1000,
+  }));
+  const server = await listen(app);
+  try {
+    const port = server.address().port;
+    // 跨站 <img src="...?force=1"> 带不了自定义首部 → 403
+    const noHeader = await get(port, '/api/checkpoint?force=1');
+    assert.equal(noHeader.status, 403);
+    assert.equal(JSON.parse(noHeader.body).error, 'forbidden');
+    // 面板同源 fetch 带首部 → 进入既有 force 逻辑（running 否决被越过，200）
+    const withHeader = await get(port, '/api/checkpoint?force=1', null,
+      { [CHECKPOINT_FORCE_HEADER]: '1' });
+    assert.equal(withHeader.status, 200);
+    assert.equal(JSON.parse(withHeader.body).ok, true);
+    // 非 force 分支不受首部闸影响（保留简单 GET 语义）：running 否决 → 409
+    const plain = await get(port, '/api/checkpoint');
+    assert.equal(plain.status, 409);
+    assert.equal(JSON.parse(plain.body).error, 'zcode_running');
+  } finally { server.close(); }
+});
+
+// ── R4：makeErrorTranslator（server/http-hardening.js 工厂，index.js 装配）───
+test('makeErrorTranslator：SQLITE_BUSY→503 database_busy+invalidateDb；SQLITE_NOTADB→503 database_unavailable；普通错误 next 透传', async () => {
+  let invalidated = 0;
+  const mkErr = (msg, code) => Object.assign(new Error(msg), { code });
+  const app = express();
+  app.get('/boom/:kind', (req, _res, next) => {
+    const kind = req.params.kind;
+    if (kind === 'busy') return next(mkErr('database is locked', 'SQLITE_BUSY'));
+    if (kind === 'notadb') return next(mkErr('file is not a database', 'SQLITE_NOTADB'));
+    next(new Error('plain failure'));
+  });
+  app.use(makeErrorTranslator({ invalidateDb: () => { invalidated++; } }));
+  // 透传终点：普通错误必须原样到达（非 503 契约形态）
+  app.use((err, _req, res, _next) => res.status(599).json({ caught: err.message }));
+  const server = await listen(app);
+  try {
+    const port = server.address().port;
+    const before = invalidated;
+    const busy = await get(port, '/boom/busy');
+    assert.equal(busy.status, 503);
+    const bj = JSON.parse(busy.body);
+    assert.equal(bj.error, 'database_busy');
+    assert.equal(bj.retryable, true);
+    assert.equal(invalidated, before + 1, 'BUSY 分支须丢弃只读连接缓存');
+
+    const notadb = await get(port, '/boom/notadb');
+    assert.equal(notadb.status, 503);
+    assert.equal(JSON.parse(notadb.body).error, 'database_unavailable');
+    assert.equal(invalidated, before + 2, 'NOTADB 分支须丢弃只读连接缓存');
+
+    const plain = await get(port, '/boom/plain');
+    assert.equal(plain.status, 599, '普通错误不被翻译，next(err) 原样透传');
+    assert.equal(JSON.parse(plain.body).caught, 'plain failure');
+    assert.equal(invalidated, before + 2, '普通错误不触发 invalidateDb');
   } finally { server.close(); }
 });
 

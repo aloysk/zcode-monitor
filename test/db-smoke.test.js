@@ -10,10 +10,15 @@ const os = require('os');
 const path = require('path');
 const { createFixtureDb } = require('./helpers/fixture-db');
 
-// 查询函数清单按 server/db.js 导出面逐一点得（25 个；行号易漂移，权威以
+// 查询函数清单按 server/db.js 导出面逐一点得（23 个；行号易漂移，权威以
 // module.exports 为准——触碰导出面时本清单同步修订，见 Spec A0-4）。
+// R4：recentModelRows/recentToolRows/latestModelStartedAt/latestToolStartedAt
+//（started_at 单键水位）由 recentModelRowsAfterRowid/latestModelRowid 等 rowid
+// 水位查询取代（语义由 test/live-rowid.test.js 覆盖）；
 // recentToolRowsAfterRowid/latestToolRowid 的行形状由 test/livegen-error.test.js
-// 集成覆盖（rowid 水位语义），此处只守护可跑通。
+// 与 test/live-rowid.test.js 集成覆盖（rowid 水位语义），此处只守护可跑通。
+// makeRetryingStatement/isBusyErr/isConnBroken（连接自愈缝）由
+// test/db-retry.test.js 直测。
 const QUERIES = [
   ['overviewKpis', s => [s]], ['timeseries', () => [24]],
   ['breakdownByModel', s => [s]], ['breakdownByTool', s => [s]],
@@ -24,10 +29,10 @@ const QUERIES = [
   ['sessionActivity', () => ['s1']], ['sessionChildren', () => ['s1']],
   ['sessionReasoning', () => ['s1']],
   ['errorsList', () => [{}]], ['errorSummary', s => [s]],
-  ['slowTools', () => [{}]], ['recentModelRows', () => [0]],
-  ['recentToolRows', () => [0]], ['latestModelStartedAt', () => []],
-  ['latestToolStartedAt', () => []], ['agentsForest', () => [{}]],
+  ['slowTools', () => [{}]],
+  ['recentModelRowsAfterRowid', () => [0]], ['latestModelRowid', () => []],
   ['recentToolRowsAfterRowid', () => [0]], ['latestToolRowid', () => []],
+  ['agentsForest', () => [{}]],
 ];
 
 const fx = createFixtureDb();
@@ -57,7 +62,7 @@ test('冒烟: 注入后 DB_PATH/LOG_DIR/ROLLOUT_DIR 均在 tmpdir 下且不含 .
   }
 });
 
-test('冒烟: 25 个查询函数在 fixture 上全部跑通且抽查结构正确', () => {
+test('冒烟: 23 个查询函数在 fixture 上全部跑通且抽查结构正确', () => {
   const since = Date.now() - 3600e3;
   const out = {};
   for (const [name, argf] of QUERIES) {

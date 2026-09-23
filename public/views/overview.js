@@ -297,7 +297,7 @@
   function renderBreakdown(byModel, byTool) {
     $('#tbl-model').querySelector('thead').innerHTML = `<tr><th>provider / model</th><th>来源</th><th class="num">调用</th><th class="num">输入</th><th class="num">输出</th><th class="num">推理</th><th class="num">均时延</th></tr>`;
     $('#tbl-model').querySelector('tbody').innerHTML = byModel.map(m => `<tr>
-      <td><span class="mono">${escapeHtml(m.model_id||'?')}</span><div class="faint mono" style="font-size:10px">${escapeHtml((m.provider_id||'').replace('builtin:',''))} ${m.variant?'· '+m.variant:''}</div></td>
+      <td><span class="mono">${escapeHtml(m.model_id||'?')}</span><div class="faint mono" style="font-size:10px">${escapeHtml((m.provider_id||'').replace('builtin:',''))} ${m.variant?'· '+escapeHtml(m.variant):''}</div></td>
       <td><span class="badge ${m.query_source==='main_turn'?'blue':m.query_source==='subagent'?'teal':'dim'}">${escapeHtml(m.query_source)}</span></td>
       <td class="num">${fmtInt(m.calls)}</td><td class="num">${fmtNum(m.in_tok)}</td><td class="num">${fmtNum(m.out_tok)}</td><td class="num">${fmtNum(m.reason_tok)}</td><td class="num">${fmtMs(m.avg_ms)}</td></tr>`).join('') || `<tr><td colspan="7" class="empty">无数据</td></tr>`;
 

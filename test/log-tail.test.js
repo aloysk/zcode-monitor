@@ -330,3 +330,53 @@ test('A3-9: 增量路径中同名删除重建不整段重放（重建后按 size
     assert.equal(fs.existsSync(root), false, 'A0-7: 临时目录已清理'); // 守护断言
   }
 });
+
+// ── R4：buildSpanForest 纯函数测试（零覆盖补齐；含同 spanId 单节点归并不变量）──
+test('buildSpanForest: 正常父子链 + 孤儿根（父引用缺失的节点为根）', () => {
+  const ev = [
+    { spanId: 'a', event: 'A' },
+    { spanId: 'b', parentSpanId: 'a', event: 'B' },
+    { spanId: 'c', parentSpanId: 'no-such-span', event: 'C' }, // 父不存在 → 根
+  ];
+  const roots = log.buildSpanForest(ev);
+  assert.equal(roots.length, 2, 'a 与 c 各为根');
+  const a = roots.find(r => r.node.event === 'A');
+  const c = roots.find(r => r.node.event === 'C');
+  assert.ok(a && c, '两个根都在森林中');
+  assert.equal(a.children.length, 1, 'b 挂在 a 下');
+  assert.equal(a.children[0].node.event, 'B');
+  assert.equal(c.children.length, 0, '孤儿根无子');
+});
+
+test('buildSpanForest: 同 spanId 两事件 → 单节点（不重复入 roots），children 归并正确', () => {
+  const ev = [
+    { spanId: 'a', event: 'A1' },
+    { spanId: 'a', event: 'A2' }, // 同 span 的第二事件
+    { spanId: 'b', parentSpanId: 'a', event: 'B' },
+    { spanId: 'c', parentSpanId: 'a', event: 'C' },
+  ];
+  const roots = log.buildSpanForest(ev);
+  assert.equal(roots.length, 1, '同 span 双事件只产生一个根节点（修前会 push 两次）');
+  assert.equal(roots[0].node.event, 'A1', '节点载荷保留首个事件');
+  assert.deepEqual(roots[0].children.map(n => n.node.event).sort(), ['B', 'C'],
+    '两个子 span 各挂一次、归并到同一父节点');
+});
+
+test('buildSpanForest: 无 spanId 的事件各自成根', () => {
+  const ev = [
+    { event: 'x' }, { event: 'y' }, { event: 'z' },
+  ];
+  const roots = log.buildSpanForest(ev);
+  assert.equal(roots.length, 3);
+  assert.deepEqual(roots.map(r => r.node.event).sort(), ['x', 'y', 'z']);
+  for (const r of roots) assert.equal(r.children.length, 0);
+});
+
+test('buildSpanForest: parentSpanId 指向不存在的 span → 按根处理（瀑布不丢事件）', () => {
+  const ev = [
+    { spanId: 'kid', parentSpanId: 'ghost', event: 'K' },
+  ];
+  const roots = log.buildSpanForest(ev);
+  assert.equal(roots.length, 1);
+  assert.equal(roots[0].node.event, 'K');
+});
