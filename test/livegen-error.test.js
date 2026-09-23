@@ -220,3 +220,68 @@ test('僵尸窗: time_created 超过 5min 或 time_updated 沉默超过 90s 的�
     watcher.stop();
   } finally { resetTables(); }
 });
+
+// ── R3 修-low：防御分支的注入式测试（不碰真实连接，行为可编排）───────────────
+// stub dbq 只需实现 createGenWatcher 用到的三个面：db()（主查询语句）、
+// latestToolRowid()（boot 水位）、recentToolRowsAfterRowid()（扫描）。主查询与
+// 工具扫描各自的 try/catch 防御分支（dbq 抛错跳过 tick、不伪造 end 边）此前
+// 只有代码路径没有测试。
+test('防御分支(注入式): 主查询抛错（SQLITE_BUSY 形态）→ 跳过 tick、状态保持、不伪造 end 边', async () => {
+  let fail = false;
+  const rows = [{ inflight: 0, sessions: 0 }]; // 先空基线启动，挂上监听后再进入在飞
+  const stmt = {
+    get: (...a) => {
+      if (fail) throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+      return rows[0];
+    },
+  };
+  const raw = {};
+  const stubDbq = {
+    db: () => { if (fail) throw new Error('database is locked'); return { prepare: () => stmt, _raw: raw }; },
+    latestToolRowid: () => { if (fail) throw new Error('database is locked'); return 0; },
+    recentToolRowsAfterRowid: () => { if (fail) throw new Error('database is locked'); return []; },
+  };
+  const events = [];
+  const watcher = createGenWatcher(stubDbq, { pollMs: 20 });
+  const off = watcher.onEvent(ev => events.push(ev));
+  try {
+    // 空基线启动（boot tick 在 onEvent 之前，先置 0 避免丢失首个边），再进入在飞
+    rows[0] = { inflight: 2, sessions: 1 };
+    assert.ok(await waitFor(() => events.some(e => e.phase === 'start'), 3000), '正常期发出 start');
+    fail = true; // 从下一 tick 起主查询持续抛错
+    await waitTicks(10); // 覆盖若干失败 tick
+    assert.equal(events.filter(e => e.phase === 'end').length, 0,
+      'poll 失败必须跳过 tick——绝不用「查询失败=0 在飞」伪造 end 边');
+    assert.equal(watcher.state().generating, true, '状态保持最后已知值');
+    assert.equal(watcher.state().inflight, 2);
+  } finally {
+    off();
+    watcher.stop();
+  }
+});
+
+test('防御分支(注入式): 工具失败扫描抛错 → 只跳过扫描不影响主状态，水位留待重试', async () => {
+  const rows = [{ inflight: 0, sessions: 0 }];
+  const stmt = { get: () => rows[0] };
+  const stubDbq = {
+    db: () => ({ prepare: () => stmt, _raw: {} }),
+    latestToolRowid: () => 0,
+    recentToolRowsAfterRowid: () => { throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' }); },
+  };
+  const events = [];
+  const watcher = createGenWatcher(stubDbq, { pollMs: 20 });
+  const off = watcher.onEvent(ev => events.push(ev));
+  try {
+    await waitTicks(8); // 扫描每 tick 抛错：watcher 不得崩、tick 不得中断
+    assert.equal(watcher.state().generating, false, '主状态照常更新');
+    assert.equal(watcher.state().lastToolError, null);
+    // 扫描恢复后（同一 stub 改回正常）：主边事件链未被破坏
+    stubDbq.recentToolRowsAfterRowid = () => [];
+    rows[0] = { inflight: 1, sessions: 1 };
+    assert.ok(await waitFor(() => events.some(e => e.phase === 'start'), 3000),
+      '扫描错误恢复后主边事件照常发射');
+  } finally {
+    off();
+    watcher.stop();
+  }
+});

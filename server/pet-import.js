@@ -24,11 +24,27 @@ const ID_RE = /^[a-z0-9-]+$/;
 // 事件循环。精灵契约下 32MB/2000 条目都是远超正常包的宽松上界。
 const SHEET_MAX_BYTES = 32 * 1024 * 1024;
 const AUDIT_MAX_ENTRIES = 2000;
-// 「许可证未知」的语义等价串：占位 unknown 与自报无授权的常见写法都走确认门；
-// 自报的具体许可证（MIT/CC-BY-…）是用户提供的事实性元数据，照 NOTICE 记录、
-// 不需确认（ack 的语义是「知悉授权未核实」，对自报 SPDX 串加确认只加摩擦不
-// 加核实）。
-const LICENSE_UNKNOWN_RE = /^(unknown|unlicensed|none|n\/a|not known|未知|无)$/i;
+// 「许可证已知」白名单（R3 登记low-③，由黑名单反转为白名单）：原黑名单
+// （unknown|unlicensed|none|…）对枚举外的自报值（如 '未确认'、任意字符串）一律
+// 放行——绕过确认门。反转为仅常见 SPDX/惯用写法免确认（归一小写比对），其余
+// 一律视为未知、须 ackUnknownLicense 显式确认：ack 的语义是「知悉授权未核实」，
+// 宁多确认勿漏确认。自报的具体许可证仍是事实性元数据，照 NOTICE 记录不变。
+const LICENSE_KNOWN = new Set([
+  'mit', 'mit license', 'apache-2.0', 'apache 2.0', 'apache2', 'apache-2',
+  'bsd-2-clause', 'bsd-3-clause', 'bsd 2-clause', 'bsd 3-clause', 'bsd',
+  'isc', '0bsd', 'mpl-2.0', 'mpl 2.0',
+  'unlicense', 'the unlicense', 'public domain', 'pd',
+  'cc0', 'cc0-1.0',
+  'cc by 4.0', 'cc-by-4.0', 'cc by-sa 4.0', 'cc-by-sa-4.0',
+  'cc by-nc 4.0', 'cc-by-nc-4.0', 'cc by-nc-sa 4.0', 'cc-by-nc-sa-4.0',
+  'cc by 3.0', 'cc-by-3.0',
+  'ofl-1.1', 'sil ofl 1.1', 'ofl',
+  'gpl-2.0', 'gpl-3.0', 'gpl-3.0-only', 'gpl-3.0-or-later',
+  'lgpl-2.1', 'lgpl-3.0', 'agpl-3.0', 'agpl-3.0-only',
+]);
+function isKnownLicense(license) {
+  return LICENSE_KNOWN.has(String(license).trim().toLowerCase());
+}
 
 class PetImportError extends Error {
   constructor(code, message) { super(message); this.code = code; }
@@ -110,6 +126,11 @@ function checkSheet(sourceDir, pet) {
 // HTTP 静态服务的 public/pets（违背 index.js 声明的 "imports may only source
 // from inside this directory"）。包目录树很小（pet.json + webp + NOTICE），
 // 全树 lstat 成本可忽略。返回遍历到的条目数（供测试断言审计确实发生）。
+// 防御面声明（R3 登记low-②，见 residuals R-12）：硬链接不在防御面——lstat 视角
+// 硬链接是普通文件，包含性审计对它不可见。危害有限：创建硬链接需要对 staging
+// 的本地写权限（面板威胁模型外的本地攻击者，其本身已可直写 public 之外的任意
+// 本地文件）；内容面仍受 sheet 32MB 上限、webp 头校验、/pets 非图片强制下载与
+// /api 回环闸约束。
 function auditNoSymlinks(rootDir) {
   if (fs.lstatSync(rootDir).isSymbolicLink()) {
     throw new PetImportError('SOURCE_SYMLINK', `来源目录本身是链接，拒绝导入: ${rootDir}`);
@@ -210,12 +231,12 @@ function importPetPack({ sourceDir, targetRoot, id, source, author, license,
     throw new PetImportError('ID_INVALID', `非法包 id（须匹配 [a-z0-9-]+）: ${id}`);
   }
   const { sheetRel } = checkSheet(sourceDir, pet);
-  // 许可证缺失/unknown 需显式确认才放行：导入产物落在以本服务同源静态分发的
-  // public/pets，未核实授权的素材应至少有一次知情确认（API ackUnknownLicense
-  // / CLI --ack-unlicensed）；确认后仍照常生成 license: unknown 占位与警告。
-  // ack 只认 === true：宽松真值（"false" 字符串/数组等）不得视作确认。
-  const licenseUnknown = !license
-    || LICENSE_UNKNOWN_RE.test(String(license).trim());
+  // 许可证白名单外（缺失/unknown/未登记写法，含中文占位）需显式确认才放行：
+  // 导入产物落在以本服务同源静态分发的 public/pets，未核实授权的素材应至少有
+  // 一次知情确认（API ackUnknownLicense / CLI --ack-unlicensed）；确认后仍照常
+  // 生成 license 占位与警告。ack 只认 === true：宽松真值（"false" 字符串/数组等）
+  // 不得视作确认。
+  const licenseUnknown = !license || !isKnownLicense(license);
   if (licenseUnknown && ackUnknownLicense !== true) {
     throw new PetImportError('LICENSE_UNKNOWN',
       '许可证缺失或未知（NOTICE 将记 license: unknown）：导入需显式确认——'

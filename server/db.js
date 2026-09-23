@@ -472,18 +472,38 @@ function sessionList({ limit = 100, offset = 0, q = '', taskType = '', status = 
   // schema source: zai-org/ZCode MIG 0010_usage_observability + USAGE queryAppUsage
   // total_tokens = SUM(computed_total_tokens)（官方预计算权威值，保持原口径）。
   // 子代理 token 记在子会话名下（session.parent_id 关联），不与本会话行重复。
-  return db().prepare(`
+  //
+  // 两段查询（R3 修-medium）：原单查询的 3 个相关聚合按「排序前的全行」逐行计算
+  //（真实库 17,733 会话实测热态 949ms，冷态 4.3s——同步阻塞事件循环）；改为先取
+  // 页内 ≤limit 行（排序只搬 8 个基础列，16-29ms），再对页内 id 做两条索引寻址的
+  // GROUP BY 聚合（idx model_usage_session_turn/ tool_usage_session_tool 最左
+  // session_id，合计 <15ms），口径与空值语义不变（COUNT 缺行=0、SUM 缺行=null）。
+  const page = db().prepare(`
     SELECT s.id, s.title, s.task_type, s.directory,
            s.parent_id,
-           s.time_created, s.time_updated,
-           (SELECT COUNT(*) FROM model_usage m WHERE m.session_id = s.id) AS model_calls,
-           (SELECT COUNT(*) FROM tool_usage  t WHERE t.session_id = s.id) AS tool_calls,
-           (SELECT SUM(m.computed_total_tokens) FROM model_usage m WHERE m.session_id = s.id) AS total_tokens
+           s.time_created, s.time_updated
     FROM session s
     ${whereSql}
     ORDER BY s.time_updated DESC
     LIMIT @limit OFFSET @offset
   `).all(params);
+  if (!page.length) return [];
+  const ids = page.map(r => r.id);
+  const ph = ids.map(() => '?').join(',');
+  const modelAgg = new Map(db().prepare(`
+    SELECT session_id, COUNT(*) AS c, SUM(computed_total_tokens) AS s
+    FROM model_usage WHERE session_id IN (${ph}) GROUP BY session_id
+  `).all(...ids).map(r => [r.session_id, r]));
+  const toolAgg = new Map(db().prepare(`
+    SELECT session_id, COUNT(*) AS c
+    FROM tool_usage WHERE session_id IN (${ph}) GROUP BY session_id
+  `).all(...ids).map(r => [r.session_id, r]));
+  return page.map(r => {
+    const m = modelAgg.get(r.id);
+    const t = toolAgg.get(r.id);
+    return { ...r, model_calls: m ? m.c : 0, tool_calls: t ? t.c : 0,
+             total_tokens: m ? m.s : null };
+  });
 }
 
 function sessionGet(id) {
@@ -766,6 +786,13 @@ function latestToolRowid() {
 // ───────────────────────── Agents tree ─────────────────────────
 // Build a forest of sessions rooted at interactive/main sessions, with their
 // subagent children (parent_id chain) underneath.
+// 两段 + LIMIT（R3 修-medium）：原查询对全部会话行内联 3 个相关聚合（真实库
+// 17,733 会话实测热态 985ms-1s、冷态 4.3s）；森林展示主体是「最近活跃的会话」，
+// 改为取 time_updated 最新的 ≤AGENTS_FOREST_MAX_SESSIONS 行（22ms）+ 对这些 id
+// 的索引寻址聚合（60ms）。LIMIT 取舍（有意为之）：被截掉的更旧父会话不进森林，
+// 其仍在窗口内的子会话按既有孤儿语义升为根（byId 缺父即根）；total 如实返回
+// 进入窗口的会话数。真实库当前 17.7k 会话 → 窗口 500 覆盖最近约 3 周活跃。
+const AGENTS_FOREST_MAX_SESSIONS = 500;
 function agentsForest({ projectId = null } = {}) {
   const where = projectId ? 'WHERE project_id = ?' : '';
   const bind = projectId ? [projectId] : [];
@@ -774,15 +801,29 @@ function agentsForest({ projectId = null } = {}) {
   // 自己会话的行，森林展示不叠加求和，无重复计入。
   const sessions = db().prepare(
     `SELECT id, title, task_type, parent_id, directory,
-            time_created, time_updated,
-            (SELECT SUM(computed_total_tokens) FROM model_usage m WHERE m.session_id = s.id) AS tokens,
-            (SELECT COUNT(*) FROM model_usage m WHERE m.session_id = s.id) AS model_calls,
-            (SELECT COUNT(*) FROM tool_usage  t WHERE t.session_id = s.id) AS tool_calls
-     FROM session s ${where}`).all(...bind);
+            time_created, time_updated
+     FROM session s ${where}
+     ORDER BY time_updated DESC
+     LIMIT ?`).all(...bind, AGENTS_FOREST_MAX_SESSIONS);
+  if (!sessions.length) return { roots: [], total: 0 };
+  const ids = sessions.map(r => r.id);
+  const ph = ids.map(() => '?').join(',');
+  const modelAgg = new Map(db().prepare(
+    `SELECT session_id, COUNT(*) AS c, SUM(computed_total_tokens) AS s
+     FROM model_usage WHERE session_id IN (${ph}) GROUP BY session_id`
+  ).all(...ids).map(r => [r.session_id, r]));
+  const toolAgg = new Map(db().prepare(
+    `SELECT session_id, COUNT(*) AS c
+     FROM tool_usage WHERE session_id IN (${ph}) GROUP BY session_id`
+  ).all(...ids).map(r => [r.session_id, r]));
   // build map + forest
   const byId = new Map();
   for (const s of sessions) {
-    byId.set(s.id, { ...s, children: [], time_created: ts(s.time_created), time_updated: ts(s.time_updated) });
+    const m = modelAgg.get(s.id);
+    const t = toolAgg.get(s.id);
+    byId.set(s.id, { ...s, tokens: m ? m.s : null, model_calls: m ? m.c : 0,
+                     tool_calls: t ? t.c : 0,
+                     children: [], time_created: ts(s.time_created), time_updated: ts(s.time_updated) });
   }
   const roots = [];
   for (const s of byId.values()) {

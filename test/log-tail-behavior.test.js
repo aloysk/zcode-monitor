@@ -242,6 +242,42 @@ test('A0-5 tailLog/eventsForTrace 跟随名字最新文件（本地日命名跨�
   }
 });
 
+// R3 修-low（i:4）：复活语义改为 A3-8 式重试追加——被本 watcher 读过的文件删除
+// 后重建，从「已读偏移」续读而非按当刻 size 锚定，复活窗口内写入的行补投递
+//（旧实现把窗口内的行整段锚掉）。对照：上一用例（从未读过 A）仍按 size 锚定。
+test('A3-watch 复活重试追加: 已读文件删除重建后，窗口内写入的行从已读偏移补投递', async () => {
+  const name = 'zcode-2099-11-15.jsonl';
+  const file = path.join(fxLogDir, name);
+  const L = i => JSON.stringify({ i }) + '\n';
+  fs.writeFileSync(file, L(1) + L(2)); // 启动前历史：锚定不投递
+  const got = [];
+  const w = log.createLogWatcher({
+    reconcileMs: 50,
+    todayFile: () => file,
+    onEvents: evs => got.push(...evs),
+  });
+  try {
+    await sleep(200); // 锚定到文件尾
+    fs.appendFileSync(file, L(3));
+    fs.appendFileSync(file, L(4));
+    assert.ok(await waitFor(() => got.some(e => e.i === 4), 5000), '锚定后追加 3/4 可见');
+    await sleep(150); // 确保 4 的偏移已记入 readOffsets（投递即记录）
+
+    fs.rmSync(file); // 删除：下个 pump 探测 ENOENT → 置待重锚定
+    await sleep(200); // 覆盖 ≥2 个 pump：删除必须被观测到
+    // 重建 = 历史 1-4 原样 + 窗口期内写入的 5（旧实现：按 size 锚定把 5 整段锚掉）
+    fs.writeFileSync(file, L(1) + L(2) + L(3) + L(4) + L(5));
+    assert.ok(await waitFor(() => got.some(e => e.i === 5), 5000),
+      '复活窗口内写入的 5 必须补投递（A3-8 式重试追加）');
+    fs.appendFileSync(file, L(6));
+    assert.ok(await waitFor(() => got.some(e => e.i === 6), 5000), '复活后续追加可见');
+    assert.deepEqual(got.map(e => e.i), [3, 4, 5, 6], '恰为增量行：历史 1/2 不回放、3/4 不重复');
+  } finally {
+    w.stop();
+    fs.rmSync(file, { force: true });
+  }
+});
+
 // 高-B 回归（R2）：watcher 已在最新名文件上锚定后，名字回归到旧文件、而该
 // 文件在 readdir→stat 窗口内被删除——ENOENT seenBefore 分支必须复位锚定态，
 // 复活后按 size 补锚定；若沿用旧文件的已锚定标记（R1 缺陷），复活文件会从

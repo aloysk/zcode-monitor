@@ -247,10 +247,20 @@ function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
       anchoredToTail = true;
       return;
     }
-    if (!anchoredToTail) { // 补锚定（首文件/换名锚定失败/删除后的重建）
+    if (!anchoredToTail) { // 补锚定（首文件/换名锚定失败/删除后的复活）
       try {
-        offset = statFile(curFile).size;
-        readOffsets.set(path.basename(curFile), offset);
+        const size = statFile(curFile).size;
+        // 删除后复活（R3 修-low，i:4 → A3-8 式重试追加）：文件被本 watcher 读过
+        //（readOffsets 有已读偏移）时，从「已读偏移」与当前 size 的较小者续读
+        //——复活窗口内（删除探测 → 重锚定之间）写入的行由此补投递，与名字回归
+        //（A3-8 readOffsets 语义）一致。身份取舍也与 A3-8 相同：重建文件若改写为
+        // 不同内容，[已读偏移, size) 段可能含「旧样」行——接受（避免为罕见形态
+        // 整文件回放）。从未读过的文件（首锚定/EPERM 窗/只被 readdir 见过）无
+        // 记录，仍按 size 锚定、绝不回放历史（核心不变量，EPERM 用例守护）。
+        const recName = path.basename(curFile);
+        const rec = readOffsets.get(recName);
+        offset = rec != null && rec < size ? rec : size;
+        readOffsets.set(recName, offset);
         anchoredToTail = true;
         fileKnown = true;
       } catch { return; }

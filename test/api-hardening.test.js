@@ -21,7 +21,7 @@ process.env.ZCODE_DB = fx.dbPath;
 process.env.ZCODE_LOG_DIR = fx.logDir;
 process.env.ZCODE_ROLLOUT_DIR = fx.rolloutDir;
 
-const { loopbackHostGate, securityHeaders, petsStaticOptions } = require('../server/http-hardening');
+const { loopbackHostGate, securityHeaders, petsStaticOptions, CSP } = require('../server/http-hardening');
 const { makeCheckpointRoute } = require('../server/checkpoint-route');
 const raw = require('../server/routes/raw');
 
@@ -215,14 +215,129 @@ test('/pets 静态收紧 + CSP/nosniff 头：非图片 octet-stream+attachment�
         assert.equal(r.headers['content-type'], 'application/octet-stream', `${f} 须 octet-stream`);
         assert.equal(r.headers['content-disposition'], 'attachment', `${f} 须 attachment`);
         assert.equal(r.headers['x-content-type-options'], 'nosniff', '全站 nosniff');
-        assert.ok(String(r.headers['content-security-policy']).includes("default-src 'self'"), 'CSP 在响应上');
       }
       // 图片放行（精灵管线只产 webp）
       const w = await get(port, '/pets/sheet.webp');
       assert.equal(w.status, 200);
       assert.equal(w.headers['content-type'], 'image/webp');
       assert.equal(w.headers['content-disposition'], undefined, '图片不加 attachment');
+      // CSP 等值比对（R3 修-medium）：断言整个策略串与 http-hardening 导出常量
+      // 一致——includes 部分匹配在策略被收窄/改写（如丢掉 default-src）时可能假绿
+      assert.equal(w.headers['content-security-policy'], CSP, 'CSP 须与导出常量逐字一致');
     } finally { server.close(); }
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// ── R3 必修-2：raw order/LIKE/COUNT 收紧 ─────────────────────────────────────
+test('raw order 收紧：巨表回落 rowid DESC 且 meta 注明；索引大表白名单列放行、非白名单列回落；小表照旧', async () => {
+  const app = express();
+  app.use('/api', loopbackHostGate);
+  app.use('/api/raw', raw);
+  const server = await listen(app);
+  try {
+    const port = server.address().port;
+
+    // 巨表 message：UI 下拉任选值（time_created）→ rowid DESC 回落 + meta 注明
+    const giant = await get(port, '/api/raw/message?order=time_created&desc=0');
+    assert.equal(giant.status, 200);
+    const gj = JSON.parse(giant.body);
+    assert.equal(gj.meta.order.order_effective, 'rowid DESC');
+    assert.equal(gj.meta.order.order_requested, 'time_created');
+    assert.ok(gj.meta.order.note.includes('回落'), '回落原因须在 meta 注明');
+    assert.ok(gj.rows.length > 0, '巨表回落后仍可取行');
+
+    // 索引大表 model_usage：started_at（索引最左列）放行、无 meta；id（TEXT 主键
+    // 非 rowid 别名，排序=全表扫）回落
+    const idx = await get(port, '/api/raw/model_usage?order=started_at&desc=1');
+    assert.equal(idx.status, 200);
+    assert.equal(JSON.parse(idx.body).meta.order, undefined);
+    const idxFall = await get(port, '/api/raw/model_usage?order=id');
+    assert.equal(idxFall.status, 200);
+    assert.equal(JSON.parse(idxFall.body).meta.order.order_effective, 'rowid DESC');
+
+    // 小表 session：白名单列照旧放行（无 meta）；「不排序」保持无 ORDER BY
+    const small = await get(port, '/api/raw/session?order=time_updated&desc=1');
+    assert.equal(small.status, 200);
+    assert.equal(JSON.parse(small.body).meta.order, undefined);
+    const none = await get(port, '/api/raw/session');
+    assert.equal(none.status, 200);
+    assert.equal(JSON.parse(none.body).meta.order, undefined);
+
+    // 小表选了不存在的列（session 无 started_at）：不再 500，回落 + 注明
+    const noCol = await get(port, '/api/raw/session?order=started_at');
+    assert.equal(noCol.status, 200);
+    assert.equal(JSON.parse(noCol.body).meta.order.order_effective, 'rowid DESC');
+  } finally { server.close(); }
+});
+
+test('raw LIKE 红线：巨表 LIKE 一律 400；大表前导通配 400、前缀形态放行；小表不设限', async () => {
+  const app = express();
+  app.use('/api', loopbackHostGate);
+  app.use('/api/raw', raw);
+  const server = await listen(app);
+  try {
+    const port = server.address().port;
+    const q = (table, w) => get(port, `/api/raw/${table}?where=${encodeURIComponent(w)}`);
+
+    // 巨表 message：LIKE 整体拒绝（大小写不敏感 LIKE 用不上索引，实测无命中
+    // 前缀最高 61.7s 全表扫描）。可索引列上的 LIKE 走 LIKE 禁令；无索引列
+    //（data）先被字段白名单拦下——同为 400
+    const likeIdx = await q('message', "session_id LIKE 's1%'");
+    assert.equal(likeIdx.status, 400);
+    assert.ok(JSON.parse(likeIdx.body).error.includes('不支持 LIKE'));
+    for (const w of ["data LIKE '%x%'", "data LIKE 'abc%'", "session_id LIKE 's%'"]) {
+      const r = await q('message', w);
+      assert.equal(r.status, 400, `巨表 LIKE/无索引列须拒绝: ${w}`);
+    }
+
+    // 大表 model_usage：前导通配 400（任何索引用不上）
+    const lead = await q('model_usage', "status LIKE '%err%'");
+    assert.equal(lead.status, 400);
+    assert.ok(JSON.parse(lead.body).error.includes('前导通配'));
+
+    // 大表 model_usage：前缀形态放行且过滤生效（fixture status='error' 恰 1 行）
+    const prefix = await q('model_usage', "status LIKE 'err%'");
+    assert.equal(prefix.status, 200);
+    assert.equal(JSON.parse(prefix.body).count, 1, "LIKE 'err%' 前缀过滤生效");
+
+    // 小表 session：前导通配照旧放行（全表扫毫秒级；fixture DDL 无 todo 表）
+    const small = await q('session', "title LIKE '%主%'");
+    assert.equal(small.status, 200);
+    assert.equal(JSON.parse(small.body).count, 1);
+  } finally { server.close(); }
+});
+
+test('raw 巨表 where 字段白名单 + COUNT 近似 + 列名大小写不敏感', async () => {
+  const app = express();
+  app.use('/api', loopbackHostGate);
+  app.use('/api/raw', raw);
+  const server = await listen(app);
+  try {
+    const port = server.address().port;
+    const q = (table, w) => get(port, `/api/raw/${table}?where=${encodeURIComponent(w)}`);
+
+    // 巨表 message：可索引列（session_id 等值）放行；无索引列（time_created 范围）400
+    const okField = await q('message', "session_id='s1'");
+    assert.equal(okField.status, 200);
+    assert.equal(JSON.parse(okField.body).count, 2);
+    const badField = await q('message', 'time_created>=0');
+    assert.equal(badField.status, 400);
+    assert.ok(JSON.parse(badField.body).error.includes('可索引寻址'), '巨表无索引列须拒绝并说明');
+
+    // COUNT 近似：巨表无 where → meta.count_approx=true；带 where → 精确
+    const approx = await get(port, '/api/raw/part');
+    assert.equal(approx.status, 200);
+    const aj = JSON.parse(approx.body);
+    assert.equal(aj.meta.count_approx, true);
+    assert.equal(aj.count, 2, 'MAX(rowid) 近似与 fixture 行数一致');
+    const exact = await q('part', "message_id='2'");
+    assert.equal(exact.status, 200);
+    assert.equal(JSON.parse(exact.body).meta.count_approx, undefined);
+
+    // 列白名单大小写不敏感：列名大写变体等价识别（值本身仍按 SQL 大小写敏感）
+    const ci = await q('model_usage', "STATUS='error'");
+    assert.equal(ci.status, 200, '列名大写变体应等价识别');
+    assert.equal(JSON.parse(ci.body).count, 1);
+  } finally { server.close(); }
 });
 

@@ -167,6 +167,33 @@ test('许可证缺失/unknown/自报无授权：缺省拒绝（LICENSE_UNKNOWN�
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test('许可证白名单反转（R3 登记low-③）：枚举外的自报值也走确认门，已知 SPDX/惯用写法免确认', () => {
+  const root = tmp('lic2');
+  try {
+    const targetRoot = path.join(root, 'pets');
+    // 原黑名单的绕过面：不在枚举里的「自报值」（中文占位/随意串）缺省拒绝
+    for (const lic of ['未确认', 'ProbablyFine', 'license: see website']) {
+      assert.throws(
+        () => importPetPack({ sourceDir: makePack(root, {}), targetRoot, license: lic }),
+        e => e instanceof PetImportError && e.code === 'LICENSE_UNKNOWN',
+        `枚举外自报值须过确认门: ${JSON.stringify(lic)}`);
+    }
+    assert.equal(fs.existsSync(targetRoot), false, '拒绝路径零落位');
+    // 显式确认后放行（NOTICE 仍如实记录自报值）
+    const r = importPetPack({ sourceDir: makePack(root, {}), targetRoot, id: 'lic3-ack',
+      license: '未确认', ackUnknownLicense: true });
+    assert.equal(r.ok, true);
+    assert.ok(r.warnings.includes('license_missing'));
+    assert.ok(fs.readFileSync(path.join(r.dir, 'NOTICE.md'), 'utf8').includes('license: 未确认'));
+    // 白名单常见 SPDX/惯用写法（含大小写与空格变体）免确认
+    for (const [lic, id] of [['Apache-2.0', 'lic4'], ['cc by 4.0', 'lic5'], ['CC-BY-NC-4.0', 'lic6']]) {
+      const rr = importPetPack({ sourceDir: makePack(root, {}), targetRoot, license: lic, id });
+      assert.equal(rr.ok, true, `白名单值免确认: ${lic}`);
+      assert.ok(!rr.warnings.includes('license_missing'), lic);
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('导入白名单：夹带的 .html/.svg/未知名文件不落位，记 extra_files_skipped 告警', () => {
   const root = tmp('wl');
   try {
@@ -280,7 +307,7 @@ test('目录穿越防护：resolveStagingSource 拒绝路径形态，放行裸�
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('junction 逃逸防护：staging 内链接条目被拒，包外内容绝不落 web 服务目录', () => {
+test('junction 逃逸防护：staging 内链接条目被拒，包外内容绝不落 web 服务目录', { skip: process.platform !== 'win32' && "junction 类型仅 win32 存在（POSIX 上 symlinkSync 'junction' 抛错）" }, () => {
   const root = tmp('junc');
   try {
     const staging = path.join(root, 'staging');
@@ -301,7 +328,7 @@ test('junction 逃逸防护：staging 内链接条目被拒，包外内容绝不
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('junction 逃逸防护：包目录树内的嵌套链接条目被拒', () => {
+test('junction 逃逸防护：包目录树内的嵌套链接条目被拒', { skip: process.platform !== 'win32' && "junction 类型仅 win32 存在（POSIX 上 symlinkSync 'junction' 抛错）" }, () => {
   const root = tmp('junc2');
   try {
     const src = makePack(root, {});

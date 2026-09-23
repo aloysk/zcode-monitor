@@ -31,7 +31,7 @@
 -  **推理可视化** —— 思考型模型的推理链单独呈现，与最终回答分开，点击展开。
 - ️ **原始数据查看器** —— 直接查任意 SQLite 表（`where` / `order` / 降序，JSON 列可展开）。
 -  **双主题** —— Dark（默认）/ Light，三种切换方式。
-- 🐾 **宠物一键导入** —— Codex 格式宠物包（`pet.json + spritesheet.webp`）一键导入，导入时校验 sheet 尺寸 / 行数 / JSON 健全性并生成 NOTICE，且**按白名单复制**（只带走 pet.json / 精灵图 / NOTICE / README·LICENSE 文本，`.html`/`.svg` 等一律跳过并告警）；许可证缺失或未知的包**缺省拒绝导入**，需显式确认（CLI `--ack-unlicensed`、图鉴页确认弹窗、API `ackUnknownLicense: true`）；CLI（`node tools/import-pet.js <包目录>`）、API（`POST /api/pets/import`）与图鉴页（`pets-preview.html`）三个入口共用同一校验模块。
+- 🐾 **宠物一键导入** —— Codex 格式宠物包（`pet.json + spritesheet.webp`）一键导入，导入时校验 sheet 尺寸 / 行数 / JSON 健全性并生成 NOTICE，且**按白名单复制**（只带走 pet.json / 精灵图 / NOTICE / README·LICENSE 文本，`.html`/`.svg` 等一律跳过并告警）；许可证缺失、或自报值不在已知 SPDX/惯用写法白名单的包**缺省拒绝导入**，需显式确认（CLI `--ack-unlicensed`、图鉴页确认弹窗、API `ackUnknownLicense: true`；确认后照 NOTICE 记录自报值并放行）；CLI（`node tools/import-pet.js <包目录>`）、API（`POST /api/pets/import`）与图鉴页（`pets-preview.html`）三个入口共用同一校验模块。
 - ⚡ **fs.watch 实时增强** —— 日志目录 `fs.watch` 监听 + 字节偏移增量解析，JSONL 追加即触发、大幅降低日志尾部发现延迟；watch 失败自动降级短轮询，周期偏移对账兜底，事件不丢不重。
 - ✅ **测试套件** —— Node 内置 `node:test`（零新依赖），`npm test` 一键运行；fixture 全部落 `os.tmpdir()`，与真实库完全隔离。
 -  **全程只读** —— 不改 ZCode 一行数据。
@@ -190,7 +190,7 @@ ZCode 用 SQLite 内嵌库（WAL 模式）并持续写入，读时会和它的�
 ## 技术栈
 
 - **后端**：Node 18 + Express + better-sqlite3（只读连接，`readonly: true`）
-- **前端**：原生 HTML/CSS/JS（无框架、无构建步骤）+ Chart.js (CDN)
+- **前端**：原生 HTML/CSS/JS（无框架、无构建步骤）+ Chart.js（已本地化到 `public/assets/`，脚本零外联；仅 pet/widget 两页保留 Google Fonts 字体 CSS 外联，见 `docs/acceptance/residuals.md` R-8）
 - **实时**：Server-Sent Events（SSE）推送新 `model_usage`/`tool_usage` 行
 - 全程只读，只监听 `127.0.0.1`，不修改 / 删除任何 ZCode 数据
 

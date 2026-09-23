@@ -21,7 +21,7 @@
 - **依赖门槛**：`dependencies` 保持恰为 `better-sqlite3` + `express`（A0-6 守护）；新能力优先 Node 内置模块。WP1 服务端校验不得引入图像解码依赖（像素级检测留在页面 `scanRow`）。
 - **9 行动画契约不动**：`ROW_ANIMS = ['idle','running_right','running_left','waving','jumping','failed','waiting_permission','running','review']`（`public/pet.html:186-187`），不新增动画行；入睡复用 idle 行。
 - **平台与可测性**：Windows + Git Bash；被测路径一律注入（env 或参数），不依赖 cwd；不引入浏览器自动化框架（页面级行为走纯函数抽取 + 实机评审）。
-- **IP 与分发**：导入产物不得被 git 跟踪（A1-5）；NOTICE 三要素缺省留痕（来源/作者/许可证缺失时写占位 `<未提供>`/`<未提供>`/`unknown` 并输出警告、导入不阻断——Spec A1-4 与 server/pet-import.js 的既定语义；对无许可证的粉丝自制包记录占位属合理取舍）；不建对外宠物包索引；不与账号切换 / 反代项目互链；AGPL 项目（clawd-on-desk）只学交互设计不抄代码素材。
+- **IP 与分发**：导入产物不得被 git 跟踪（A1-5）；NOTICE 三要素缺省留痕（来源/作者/许可证缺失时写占位 `<未提供>`/`<未提供>`/`unknown` 并输出警告、导入不阻断——Spec A1-4 与 server/pet-import.js 的既定语义；对无许可证的粉丝自制包记录占位属合理取舍。修订注记 2026-09-23（R3）：本条「许可证缺失仅警告、导入不阻断」为初稿语义，R2 起已改为缺省拒绝、显式确认后放行（API `ackUnknownLicense` / CLI `--ack-unlicensed`），R3 进一步反转为已知 SPDX/惯用写法白名单（枚举外自报值同样过确认门）——以 `docs/acceptance/residuals.md` R-7 与 `server/pet-import.js` 现行为准）；不建对外宠物包索引；不与账号切换 / 反代项目互链；AGPL 项目（clawd-on-desk）只学交互设计不抄代码素材。
 - **气泡默认不展示 agent 原始文本**（`public/pet.html:419-431` 气泡渲染区现状：内容仅为速度数字、单位与 ×N 徽章，全页无 agent 文本来源——SSE 消费只见 phase/sessions/tps）；本计划只交付消毒模块 + 单测，不改默认展示行为。
 - **提交规范**：中文主题行 + 前缀（`docs:`/`feat:`/`fix:`/`test:`/`chore:`）；**不要 push**（收尾阶段统一处理）。
 
@@ -38,20 +38,20 @@
 | 4 | T5 | 桌宠行为与安全（WP4） | — | `feat: WP4 桌宠行为升级——error 接线/入睡/连击/消毒模块` |
 | 5 | T6 | JSONL watch 实时化（WP3-lite） | — | `feat: WP3-lite JSONL watch 增量摄取——目录监听+偏移去重+双重兜底` |
 
-- **并行不相交性**：T2 改动 `server/pet-import.js`（新建）、`tools/import-pet.js`（新建）、`tools/webp-size.js`、`server/index.js`、`public/pets-preview.html`、`.gitignore`、`tests/`；T3 只改 `README.md`、`public/index.html`、`public/styles.css`。两集合交集为空（注意 `server/index.js` 与 `public/index.html` 是两个不同文件）。
+- **并行不相交性**：T2 改动 `server/pet-import.js`（新建）、`tools/import-pet.js`（新建）、`tools/webp-size.js`、`server/index.js`、`public/pets-preview.html`、`.gitignore`、`test/`；T3 只改 `README.md`、`public/index.html`、`public/styles.css`。两集合交集为空（注意 `server/index.js` 与 `public/index.html` 是两个不同文件）。
 - **对任务书 T2 文件清单的两处必要增补**（来源为定稿 Spec，并行不相交性不受影响）：Spec WP1 需求 2 + 验收 A1-9 要求 `tools/webp-size.js` 可被 `require` 且 CLI 行为不变（现状无 `module.exports`）；Spec WP1 需求 5 + 验收 A1-5 要求 `.gitignore` 增加 `public/pets/*` + 精选 10 包 `!` 白名单。没有这两处改动，A1-9 / A1-5 无法通过。
 - **里程碑**：M1 = T1 + T2 + T3 + T4（出口判据 A0-1~7、A1-1~9、A2-1~5、A5-1~3）；M2 = T5 + T6（A4-1~7、A3-1~5）。backlog（BP1/BP2）不在本计划。
 
 ### 门禁定义（每个 commit 提交前必须全过）
 
-1. **测试全绿**：在 worktree 根运行 `npm test`（即 `node --test tests/`），退出码 0、0 failed。
+1. **测试全绿**：在 worktree 根运行 `npm test`（即 `node --test test/index.js`；修订注记 2026-09-23 R3：初稿布局 `tests/` 已落地为 `test/`（聚合入口 `test/index.js`，Node v24 目录形态实测不可用，见该文件头注），本节与并行不相交性、冒烟命令共三处旧路径同步修订；正文 T1 步骤模板等历史段落保留原稿字样），退出码 0、0 failed。
 2. **服务冒烟**（fixture 环境，绝不指向真实库）：
 
    > **串行纪律**：门禁（尤其本冒烟，固定 `PORT=7391`）在任意时刻至多一个执行者在跑——T2/T3 的「可并行」指文件改动不相交，**不含门禁并行**；两个执行者同时跑冒烟会端口冲突、假失败。
 
    ```bash
    cd "F:/project/zcode-monitor-plan"
-   FX=$(node -e "const f=require('./tests/helpers/fixture-db');const fx=f.createFixtureDb();fx.seed();console.log(fx.root)")
+   FX=$(node -e "const f=require('./test/helpers/fixture-db');const fx=f.createFixtureDb();fx.seed();console.log(fx.root)")
    ZCODE_DB="$FX/db.sqlite" ZCODE_LOG_DIR="$FX/log" ZCODE_ROLLOUT_DIR="$FX/rollout" \
      PORT=7391 OPEN_BROWSER=0 node server/index.js > "$FX/server.log" 2>&1 &
    SRV=$!; sleep 2

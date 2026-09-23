@@ -221,3 +221,51 @@ test('A4-5: 混合敏感样式的整句一次消毒', () => {
   assert.ok(out.includes('[本地路径]') && out.includes('[链接]')
          && out.includes('[密钥]'));
 });
+
+// ── R3 修-medium：评审实测的五个漏剥（先补单测再放行规则）────────────────────
+
+test('R3: Stripe restricted key（rk_live_/rk_test_）不泄漏', () => {
+  for (const k of ['rk_live_abc123def456ghi789', 'rk_test_abc123def456ghi789']) {
+    const out = sanitizeSpeech('支付 ' + k + ' 泄露');
+    assert.equal(out.indexOf(k), -1, k);
+    assert.ok(out.includes('[密钥]'), k);
+  }
+});
+
+test('R3: Google API key（AIza + 恰 35 位，总 39 字符 < 长 base64 40 位下限）不泄漏', () => {
+  const cont = 'Ab1-Cd2_Ef3-Gh4_'.repeat(5).slice(0, 35); // 含 -/_ 的 35 位续段
+  const key = 'AIza' + cont;
+  assert.equal(key.length, 39, '夹具自检：恰 39 字符');
+  const out = sanitizeSpeech('密钥 ' + key + ' 尾');
+  assert.equal(out.indexOf(key), -1, '39 位 Google key 不得泄漏');
+  assert.ok(out.includes('[密钥]'));
+});
+
+test('R3: sk_/pk_/rk_ 混合大小写（SK_LIVE_/sk_Live_）不泄漏', () => {
+  for (const k of ['SK_LIVE_abc123def456ghi789', 'sk_Live_abc123def456ghi789',
+                   'Pk_Test_abc123def456ghi789']) {
+    const out = sanitizeSpeech('值 ' + k + ' 尾');
+    assert.equal(out.indexOf(k), -1, k);
+    assert.ok(out.includes('[密钥]'), k);
+  }
+});
+
+test('R3: 空格分段的 sk_live_（对齐 sk- 规则的续段容忍）不泄漏', () => {
+  // 跨行分段在气泡单行语境拼回一条（空白先收敛）：规则须容忍续段空格
+  const out = sanitizeSpeech('key sk_live_abc123def456\nghi789jkl end');
+  assert.equal(out.indexOf('abc123def456'), -1, '分段密钥材料不得残留');
+  assert.ok(out.includes('[密钥]'));
+});
+
+test('R3: 冒号分段的 hex（aa:bb:… 指纹形态）不泄漏', () => {
+  // MD5 指纹：32 个 hex 字符按冒号两两分段——每段都远低于长 hex 的 32 位下限，
+  // 且旧分段规则只容忍空格分隔
+  const fp = Array.from({ length: 16 }, (_, i) => (i * 11 + 0x0a).toString(16).padStart(2, '0')).join(':');
+  assert.equal(fp.replace(/:/g, '').length, 32, '夹具自检：32 个 hex 字符');
+  const out = sanitizeSpeech('指纹 ' + fp + ' 记录');
+  assert.equal(out.indexOf(fp), -1, '冒号分段指纹不得泄漏');
+  assert.equal(out, '指纹 [密钥] 记录');
+  // 点分/连字符分段同形态
+  const dotted = 'a1b2c3d4e5f60718' + '.' + '9a8b7c6d5e4f3021';
+  assert.equal(sanitizeSpeech('摘要 ' + dotted + ' 记'), '摘要 [密钥] 记');
+});
