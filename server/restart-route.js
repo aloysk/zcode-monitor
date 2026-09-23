@@ -48,6 +48,10 @@ function makeRestartRoute({
   let exitTimer = null;  // 已武装的退出定时器句柄——child 异步 error 必须撤销它，
                          // 否则「回退闩可重试」是空话：旧进程 250ms 后照死（首轮
                          // 四席评审独立实锤的 CRITICAL）
+  let currentChild = null; // 工厂级「当代接替进程」——跨代防护：error/exit 只对
+                         // 当代生效。请求局部变量做比较是恒真式（三轮两席独立
+                         // 实锤的装饰性守卫），必须提升到本作用域才真正挡住
+                         // 「上一代迟到事件撤销下一代退出」
   return function restartRoute(req, res) {
     if (req.get(RESTART_HEADER) !== '1') {
       return res.status(403).json({
@@ -102,8 +106,7 @@ function makeRestartRoute({
     }
     if (opened) try { fs.closeSync(errFd); } catch {} // 子进程持有继承副本，父侧即关
     scheduled = true;
-    let currentChild = child; // 跨代防护：error/exit 只对「本次受理的那只」生效，
-                              // 迟到的上一代事件不得撤销下一代的退出（纯加固）
+    currentChild = child; // 当代接替进程——后续任何一代受理都会覆盖
     if (child && typeof child.unref === 'function') child.unref();
     // spawn 的真实失败（ENOENT/EPERM/EMFILE）经 child 'error' 事件异步到达，
     // 不设防会以未捕获异常杀掉旧进程；即使已回 200，也必须撤销退出定时器、
@@ -119,13 +122,16 @@ function makeRestartRoute({
       // 发的是 'exit' 而非 'error'：旧进程能观察到的任何 child 退出必然早于
       // 自身退出定时器（250ms）与接替 listen（+600ms），撤销总是安全。头注
       // 「绝不出现答应了却谁都没起来」由此对三种失败形态全部成立（二轮失败席 F1）。
-      child.on('exit', () => {
+      child.on('exit', (code, signal) => {
         if (child !== currentChild) return;
         if (!exitTimer) return; // 已交棒（本不该发生：250ms < 600ms）或已撤销
         scheduled = false;
         clearTimeout(exitTimer);
         exitTimer = null;
-        noteFailure('接替进程早夭（已撤销退出、旧进程继续服务，可重试；崩溃栈见本日志）', new Error('child exited before handoff'));
+        // code/signal 是区分「崩溃」与「新代码主动 process.exit(0)」的唯一现场
+        //（三轮失败席 F2）——秒崩新代码正是本功能的主用例
+        noteFailure('接替进程早夭（已撤销退出、旧进程继续服务，可重试；崩溃栈见本日志）',
+          new Error(`child exited before handoff (code=${code} signal=${signal})`));
       });
     }
     try {

@@ -52,7 +52,7 @@ npm test                   # node --test test/index.js（聚合入口）
 - 重启菜单轮（feat/widget-restart-menu）：桌宠右键菜单「重启面板」+ 服务端
   `POST /api/restart`（首部闸/自 spawn 接替进程/端口交接时序见
   server/restart-route.js 头注）；壳侧 RestartServerAsync 兼容自有/收养两态。
-  测试 test/restart-route.test.js 8 例；7399 真重启循环实机验证过（含
+  测试 test/restart-route.test.js 10 例；7399 真重启循环实机验证过（含
   EADDRINUSE 重试自愈）。R-17 登记。
 - 快照绊线（server/snapshot-watch.js）：只读监视 `~/.zcode/v2/checkpoints/`，
   机制复活即告警；语义（零点/闩锁/unreadable 态/watch 降级）见模块头注，

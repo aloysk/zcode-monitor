@@ -282,20 +282,23 @@ app.post('/api/pets/import',
 // server/http-hardening.js（依赖注入便于测试挂载，checkpoint-route.js 先例）。
 app.use(makeErrorTranslator({ invalidateDb: () => dbq.invalidateDb() }));
 
-// 终端错误消毒器（兜底，注册序晚于全部路由）：4xx 客户端错误回通用 JSON、
-// 不回栈（body-parser 栈/路径泄露的最后一道闭合）；5xx 记栈到服务端 stderr
-// （R-17 观测面保留）后回通用 500。
+// SPA fallback: any non-api route → index.html
+app.get(/^\/(?!api).*/, (_req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+});
+
+// 终端错误消毒器（兜底，必须最后注册——Express 错误处理器只罩住注册在它
+// 之前的路由/中间件：挂在 SPA fallback 之前时，fallback 的 sendFile 错误
+// （如恶意 Range 头的 416）仍落 finalhandler 的含栈响应，SEC-004 只闭了一半
+//（三轮安全席 SEC-006 以 Range 请求实测复现）。4xx 回通用 JSON 不回栈；
+// 5xx 记栈到服务端 stderr（companion 模式下随 NUL 丢——R-17 已登记该边界）
+// 后回通用 500。
 app.use((err, _req, res, _next) => {
   const status = err && err.status >= 400 && err.status < 500 ? err.status : 500;
   if (status >= 500) console.error('[error]', err && err.stack ? err.stack : err);
   res.status(status).json(status >= 500
     ? { error: 'internal', message: '服务内部错误（详情见服务端日志）。' }
     : { error: 'bad_request', message: '请求不合法。' });
-});
-
-// SPA fallback: any non-api route → index.html
-app.get(/^\/(?!api).*/, (_req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
 // 接替进程的 listen 延迟：/api/restart 的 child 由 restart-route.js 带

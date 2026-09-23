@@ -163,18 +163,48 @@ test('restart: child 异步 error 撤销退出定时器并回退闩——旧进�
 
 test('restart: child 早夭 exit（部署秒崩新代码）同款撤销——头注「绝不」对第三种失败形态成立（二轮失败席 F1）', async () => {
   const rec = recorder();
-  const app = mount(makeRestartRoute({ spawn: rec.spawn, exit: rec.exit, exitDelayMs: 5, stderrPath: path.join(TMP_DIR, 't-5b.log') }));
+  // 注入放 spawn 包装内（microtask 必然先于 5ms 宏任务定时器）——await 往返
+  // 后再 emit 有理论竞态（三轮测试席：调度停顿 >5ms 会偶发）
+  let exitOnce = true;
+  const spawnMicroExit = (...a) => {
+    const c = rec.spawn(...a);
+    if (exitOnce) { exitOnce = false; queueMicrotask(() => c.emit('exit', 1)); }
+    return c;
+  };
+  const app = mount(makeRestartRoute({ spawn: spawnMicroExit, exit: rec.exit, exitDelayMs: 5, stderrPath: path.join(TMP_DIR, 't-5b.log') }));
   const r1 = await req(app, { header: '1' });
   assert.strictEqual(r1.status, 200);
   // spawn 成功但秒崩发的是 'exit' 而非 'error'：旧进程观察到的 child 退出
   // 必然早于自身 250ms 定时器与接替 600ms listen，撤销总是安全
-  queueMicrotask(() => rec.fakeChild.emit('exit', 1));
   await new Promise((ok) => setTimeout(ok, 50));
   assert.deepStrictEqual(rec.calls.exit, [], 'child 早夭后旧进程绝不能退出');
   // 闩回退可重试
   const r2 = await req(app, { header: '1' });
   assert.strictEqual(r2.status, 200);
   assert.strictEqual(r2.body.already, undefined);
+});
+
+test('restart: 跨代防护——上一代迟到 exit 不得撤销下一代退出（工厂级 currentChild）', async () => {
+  // 每次受理返回「独立」的假 child：共享单例会让 child !== currentChild 退化
+  // 成自比较恒假，守卫形同虚设（这正是被测的装饰性形态）
+  const children = [];
+  const spawnGen = (...a) => {
+    const c = new EventEmitter();
+    c.unref = () => {};
+    children.push(c);
+    return c;
+  };
+  const exits = [];
+  const app = mount(makeRestartRoute({ spawn: spawnGen, exit: (code) => exits.push(code), exitDelayMs: 60 * 1000, stderrPath: path.join(TMP_DIR, 't-5c.log') }));
+  await req(app, { header: '1' });            // 第一代受理
+  children[0].emit('exit', 1);                 // 第一代秒夭：撤销第一代定时器、回退闩
+  const r2 = await req(app, { header: '1' });  // 第二代受理（新的定时器武装）
+  assert.strictEqual(r2.status, 200);
+  children[0].emit('exit', 1);                 // 第一代的迟到 exit（若守卫是装饰性的恒真式，
+                                               // 这里会错杀第二代的定时器——三轮两席实锤）
+  // 闩仍在（第二代的撤销未发生）——用第三次 POST 的 already 判定
+  const r3 = await req(app, { header: '1' });
+  assert.strictEqual(r3.body.already, true, '上一代迟到事件不得回退当代受理闩');
 });
 
 test('restart: stderr 落盘打开失败不阻断重启（回退 ignore，重启优先于日志）', async () => {
@@ -219,8 +249,9 @@ test('restart: 壳侧接线源码契约（Program.cs）——首部名与值/双
   assert.ok(src.includes('"X-Zcode-Monitor-Restart"'),
     '壳须以与服务端常量同名的字面量携带重启首部（改名即断线，JS 侧测试不会红）');
   // 值也钉：服务端严格比对 !== \'1\'，壳侧值改动会让全线 403 而 JS 测试照绿
-  //（二轮测试席：跨语言契约的名与值都是契约）
-  assert.ok(/"X-Zcode-Monitor-Restart",\s*"1"/.test(src),
+  //（二轮测试席：跨语言契约的名与值都是契约）。收紧到 TryAddWithoutValidation
+  // 调用点，防同文件别处出现同名值对而误绿（三轮测试席）
+  assert.ok(/TryAddWithoutValidation\("X-Zcode-Monitor-Restart",\s*"1"\)/.test(src),
     '壳首部值须为 "1"（值变即全线 403 而测试照绿）');
   assert.ok(/if \(_restartBusy\)/.test(src), '双击竞态闩：交接窗内的第二次点击不得再走 was-down 分支双拉起 node');
   assert.ok(/if \(_ensureBusy\)/.test(src), 'Shown 启动拉起与菜单重启并发时的 ensure 闩');
@@ -228,7 +259,10 @@ test('restart: 壳侧接线源码契约（Program.cs）——首部名与值/双
   assert.ok(/_navRetries < 3/.test(src), '导航失败（错误页无脚本=菜单也没了）须有界重试');
   assert.ok(/HttpLong\.SendAsync/.test(src), '重启 POST 须走长超时客户端（2s 探测预算会被冷查询拖爆）');
   // 三态探测：Blocked（活着但事件循环卡死）不得当 down 处理——否则兜底分支
-  // 对仍占着端口的阻塞服务双拉起必败竞速者（二轮并发席 finding 1）
+  // 对仍占着端口的阻塞服务双拉起必败竞速者（二轮并发席 finding 1）。钉分支
+  // 条件本身而非仅存在性（三轮测试席：删分支留枚举时存在性钉照绿）
   assert.ok(/ServerProbe\.Blocked/.test(src) && /ProbeServerAsync/.test(src),
     '重启流程须区分 refused 与 blocked（阻塞服务不得触发 ensure 双拉起）');
+  assert.ok(/if \(probe == ServerProbe\.Blocked\)/.test(src),
+    'Blocked 分支的早退不得删（存在性钉在枚举与方法都在时不会红）');
 });
