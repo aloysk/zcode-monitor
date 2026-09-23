@@ -33,10 +33,17 @@ test('装配契约：全站安全头 → /api 回环 Host 闸 → 全部 API 路
   // 闸是唯一防线，且它是破坏力最大的端点——显式钉住（首轮测试席）。
   const restart = firstIndexOf(/app\.post\('\/api\/restart'/, 'POST /api/restart（自重启）');
   assert.ok(gate < restart, '/api/restart 须挂在 Host 闸之后——挂晚则 rebinding 同源页可触发重启');
-  // express.json 须在闸后：闸前解析会让恶意 Host + 畸形 JSON 落 body-parser
-  // 含栈 400，把框架内部路径泄给 rebinding 页（首轮安全席实锤后重排）。
-  const jsonParser = firstIndexOf(/app\.use\(express\.json\(\)\)/, 'express.json');
+  // express.json 须在闸后且只挂 /api：闸前解析会让恶意 Host + 畸形 JSON 落
+  // body-parser 含栈 400（首轮安全席）；全局挂载则让任意网页向非 /api 路径
+  // 跨站 POST 垃圾 JSON 换含栈响应——唯一读 body 的端点是 /api/pets/import
+  //（二轮安全席 SEC-004）。
+  const jsonParser = firstIndexOf(/app\.use\('\/api', express\.json\(\)\)/, "/api 作用域 express.json");
   assert.ok(gate < jsonParser, 'express.json 须挂在 /api Host 闸之后（闸只读头，先闸后解析）');
+  // 终端错误消毒器（4xx/5xx 都不回栈）须晚于错误翻译层：body-parser 等抛出的
+  // 含栈错误在此被换成通用 JSON（SEC-004 的最后一道闭合）。
+  const sanitizer = firstIndexOf(/app\.use\(\(err, _req, res, _next\) =>/, '终端错误消毒器');
+  const translator = firstIndexOf(/app\.use\(makeErrorTranslator\(/, 'makeErrorTranslator 错误翻译中间件');
+  assert.ok(translator < sanitizer, '终端错误消毒器须晚于 makeErrorTranslator');
 });
 
 test('装配契约：/pets 收紧 static 先于通用 static（注册序即命中序）', () => {

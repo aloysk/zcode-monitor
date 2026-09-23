@@ -6,11 +6,13 @@
 //   1. 首部闸：缺 X-Zcode-Monitor-Restart: 1 一律 403（跨源简单 POST 带不了
 //      自定义首部，镜像 /api/pets/import 的 X-Zcode-Monitor-Import 机制；
 //      Host 闸与安全头由 server/index.js 的全局中间件负责）。
-//   2. 先 spawn 接替进程，成功后才回 200 并安排退出——spawn 同步抛错如实
-//      500、异步 'error'（ENOENT/EPERM/EMFILE 真实失败形态）撤销退出定时器
-//      并回退受理闩，两种失败旧进程都不退出：绝不出现「答应了重启却谁都没
-//      起来」的下线事故。接替进程 stderr 落盘 logs/restart-child.log（stdout
-//      是每请求 logger，太吵；崩溃栈与监听失败都在 stderr）。
+//   2. 先 spawn 接替进程，成功后才回 200 并安排退出——三种失败形态旧进程都
+//      不退出（绝不出现「答应了重启却谁都没起来」的下线事故）：同步抛错
+//      如实 500；异步 'error'（ENOENT/EPERM/EMFILE 真实失败形态）撤销退出
+//      定时器并回退受理闩；child 早夭 'exit'（部署秒崩新代码，旧进程退出
+//      定时器 250ms < 接替 listen 600ms，撤销必然安全）同款撤销。接替进程
+//      stderr 落盘 logs/restart-child.log（stdout 是每请求 logger，太吵；
+//      崩溃栈与监听失败都在 stderr）。
 //   3. 端口交接：接替进程带 ZCODE_RESTART_BOOT_DELAY_MS 延迟 listen（见
 //      server/index.js 尾部），旧进程在响应发出 exitDelayMs 后退出；两次
 //      延迟之和大于端口释放耗时，接替进程不至于 EADDRINUSE 即死。
@@ -57,16 +59,26 @@ function makeRestartRoute({
     if (scheduled) {
       return res.json({ ok: true, already: true, message: '重启已受理，接替进程在途。' });
     }
+    // 旧进程侧的失败诊断双写：console.error 在壳自有（companion）模式下随
+    // NUL 消失——「关于丢日志的日志被丢」。appendFileSync 按路径重开写同一份
+    // restart-child.log，用户唯一会 grep 的地方（二轮失败席 F2）。
+    const noteFailure = (msg, e) => {
+      console.error('[restart]', msg, e && e.message ? e.message : e);
+      try { fs.appendFileSync(stderrPath, `[restart] ${msg} ${e && e.message ? e.message : e}\n`); } catch {} // 日志盘也坏时只剩 console
+    };
     // 接替进程 stderr → 仓内日志（打开失败不阻断重启，回退全忽略——重启本身
-    // 比日志落盘更重要）
+    // 比日志落盘更重要）。>1MB 时改 'w' 截断重开：append 永续 + body-parser
+    // 栈（安全席实测：任意网页可向非 /api 路径跨站 POST 垃圾 JSON 触发 stderr
+    // 栈）构成无界增长面，重启时机即轮转时机（SEC-005）。
     let errFd = 'ignore';
     let opened = false;
     try {
       fs.mkdirSync(path.dirname(stderrPath), { recursive: true });
-      errFd = fs.openSync(stderrPath, 'a');
+      const trunc = fs.existsSync(stderrPath) && fs.statSync(stderrPath).size > 1024 * 1024;
+      errFd = fs.openSync(stderrPath, trunc ? 'w' : 'a');
       opened = true;
     } catch (e) {
-      console.error('[restart] stderr 日志打开失败（回退忽略）:', e && e.message ? e.message : e);
+      noteFailure('stderr 日志打开失败（回退忽略）:', e);
     }
     let child;
     try {
@@ -90,23 +102,46 @@ function makeRestartRoute({
     }
     if (opened) try { fs.closeSync(errFd); } catch {} // 子进程持有继承副本，父侧即关
     scheduled = true;
+    let currentChild = child; // 跨代防护：error/exit 只对「本次受理的那只」生效，
+                              // 迟到的上一代事件不得撤销下一代的退出（纯加固）
     if (child && typeof child.unref === 'function') child.unref();
     // spawn 的真实失败（ENOENT/EPERM/EMFILE）经 child 'error' 事件异步到达，
     // 不设防会以未捕获异常杀掉旧进程；即使已回 200，也必须撤销退出定时器、
-    // 回退受理闩——旧进程继续服务，下一次点击可重试（「答应了重启却谁都没
-    // 起来」是本模块头注承诺不发生的事故）。
+    // 回退受理闩——旧进程继续服务，下一次点击可重试。
     if (child && typeof child.on === 'function') {
       child.on('error', (e) => {
+        if (child !== currentChild) return; // 上一代的迟到事件
         scheduled = false;
         if (exitTimer) { clearTimeout(exitTimer); exitTimer = null; }
-        console.error('[restart] 接替进程启动失败（已撤销退出、旧进程继续服务，可重试）:',
-          e && e.message ? e.message : e);
+        noteFailure('接替进程启动失败（已撤销退出、旧进程继续服务，可重试）:', e);
+      });
+      // child 早夭（spawn 成功但秒崩——部署了秒崩的新代码正是本功能主用例）
+      // 发的是 'exit' 而非 'error'：旧进程能观察到的任何 child 退出必然早于
+      // 自身退出定时器（250ms）与接替 listen（+600ms），撤销总是安全。头注
+      // 「绝不出现答应了却谁都没起来」由此对三种失败形态全部成立（二轮失败席 F1）。
+      child.on('exit', () => {
+        if (child !== currentChild) return;
+        if (!exitTimer) return; // 已交棒（本不该发生：250ms < 600ms）或已撤销
+        scheduled = false;
+        clearTimeout(exitTimer);
+        exitTimer = null;
+        noteFailure('接替进程早夭（已撤销退出、旧进程继续服务，可重试；崩溃栈见本日志）', new Error('child exited before handoff'));
       });
     }
-    res.json({
-      ok: true,
-      message: '重启已受理：接替进程起来后自动恢复（约 1-2 秒）。',
-    });
+    try {
+      res.json({
+        ok: true,
+        message: '重启已受理：接替进程起来后自动恢复（约 1-2 秒）。',
+      });
+    } catch (e) {
+      // 响应半途断链（socket 销毁）：请求者已不在，重启失去意义——撤销并回退
+      // 闩，避免「闩已置、退出未武装」的搁浅态（二轮失败席 F6）
+      scheduled = false;
+      if (exitTimer) { clearTimeout(exitTimer); exitTimer = null; }
+      currentChild = null;
+      noteFailure('响应写出失败（请求方已断开），重启已撤销:', e);
+      return;
+    }
     // 响应先走（连接排空），旧进程随后让出端口
     exitTimer = setTimeout(() => exit(0), exitDelayMs);
     exitTimer.unref();

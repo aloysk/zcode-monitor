@@ -51,7 +51,11 @@ app.use(securityHeaders);
 // 框架内部路径泄给 rebinding 页（首轮安全席实锤，重排即闭）。
 app.use('/api', loopbackHostGate);
 
-app.use(express.json());
+// body 解析只挂 /api：唯一读 body 的端点是 POST /api/pets/import，非 /api
+// 路径无 POST 路由——全局挂载会让任意网页向 /widget 等路径跨站 POST 垃圾
+// JSON，换来 body-parser/finalhandler 的含栈 400+stderr 栈（二轮安全席
+// SEC-004 实锤，同族残余一并闭合）。
+app.use('/api', express.json());
 
 // tiny request logger
 app.use((req, _res, next) => {
@@ -278,6 +282,17 @@ app.post('/api/pets/import',
 // server/http-hardening.js（依赖注入便于测试挂载，checkpoint-route.js 先例）。
 app.use(makeErrorTranslator({ invalidateDb: () => dbq.invalidateDb() }));
 
+// 终端错误消毒器（兜底，注册序晚于全部路由）：4xx 客户端错误回通用 JSON、
+// 不回栈（body-parser 栈/路径泄露的最后一道闭合）；5xx 记栈到服务端 stderr
+// （R-17 观测面保留）后回通用 500。
+app.use((err, _req, res, _next) => {
+  const status = err && err.status >= 400 && err.status < 500 ? err.status : 500;
+  if (status >= 500) console.error('[error]', err && err.stack ? err.stack : err);
+  res.status(status).json(status >= 500
+    ? { error: 'internal', message: '服务内部错误（详情见服务端日志）。' }
+    : { error: 'bad_request', message: '请求不合法。' });
+});
+
 // SPA fallback: any non-api route → index.html
 app.get(/^\/(?!api).*/, (_req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
@@ -303,7 +318,9 @@ const startListen = () => server.listen(PORT, HOST, () => {
 // listen 失败 previously 是未捕获 'error' 直接崩——接替进程 stdio 收窄后更是
 // 无声死。重启路径（旧进程事件循环被冷查询阻塞时可能迟退）带界重试把「旧迟
 // 退→接替撞死→双亡」变成自愈交接；正常启动维持快速失败 + 可读日志。
-const LISTEN_RETRY_DEADLINE = RESTART_BOOT_DELAY_MS > 0 ? Date.now() + 10 * 1000 : 0;
+// 预算 65s ≥ 本仓自证的冷阻塞上界（壳注释：真实库首次冷查询可阻塞事件循环
+// ~60s——10s 预算会被最坏交错耗尽然后双亡，二轮失败席 F3）。
+const LISTEN_RETRY_DEADLINE = RESTART_BOOT_DELAY_MS > 0 ? Date.now() + 65 * 1000 : 0;
 let listenRetries = 0;
 server.on('error', (err) => {
   if (err && err.code === 'EADDRINUSE' && Date.now() < LISTEN_RETRY_DEADLINE) {

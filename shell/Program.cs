@@ -495,6 +495,23 @@ internal sealed class WidgetForm : Form
         catch { return false; }
     }
 
+    // tri-state probe for the restart flow: "refused" (nothing listening) and
+    // "blocked" (listening but the single-threaded loop is stuck in a cold
+    // query) both read as false to ServerUpAsync — but restart must NOT treat
+    // blocked as down: the ensure fallback would spawn a doomed racer against a
+    // port the blocked server still holds (round-2 concurrency finding 1).
+    private enum ServerProbe { Up, Refused, Blocked }
+    private static async Task<ServerProbe> ProbeServerAsync()
+    {
+        try
+        {
+            using var r = await Http.GetAsync("http://127.0.0.1:7331/api/gen/state");
+            return r.IsSuccessStatusCode ? ServerProbe.Up : ServerProbe.Refused;
+        }
+        catch (System.Threading.Tasks.TaskCanceledException) { return ServerProbe.Blocked; } // 2s timeout: TCP up, loop busy
+        catch { return ServerProbe.Refused; } // refused/reset: nothing there
+    }
+
     // The widget page is served by the repo's node server. At login it usually
     // isn't running: probe a few times, then spawn it hidden as our child so
     // the whole stack comes up with the pill. The owned server dies with our
@@ -592,7 +609,17 @@ internal sealed class WidgetForm : Form
     private async Task RestartServerCoreAsync()
     {
         Program.Log("menu: restart panel");
-        var wasUp = await ServerUpAsync();
+        var probe = await ProbeServerAsync();
+        if (probe == ServerProbe.Blocked)
+        {
+            // alive but unresponsive (cold query holding the single-threaded
+            // loop): a restart POST would hang too, and the down-branch would
+            // spawn a doomed racer against a port the blocked server holds —
+            // bail and say why (round-2 concurrency finding 1)
+            Program.Log("restart: server alive but unresponsive (blocked event loop) — not restarting now, retry later");
+            return;
+        }
+        var wasUp = probe == ServerProbe.Up;
         if (wasUp)
         {
             try
@@ -628,8 +655,10 @@ internal sealed class WidgetForm : Form
                 await Task.Delay(250);
             }
             // exhaustion is not fatal (the up-loop may catch the replacement), but
-            // it means the reload below may hit the OLD server — say so in the log
-            if (!oldWentDown) Program.Log("restart: old listener still up after 4s (blocked event loop?) — proceeding");
+            // it means the reload below may hit the OLD server — say so in the log,
+            // naming both plausible causes (blocked loop, or the replacement died
+            // early — the latter's evidence is in the server's restart-child.log)
+            if (!oldWentDown) Program.Log("restart: old listener still up after 4s (blocked event loop? or child died early — see logs/restart-child.log) — proceeding");
         }
         else
         {
@@ -687,6 +716,10 @@ internal sealed class WidgetForm : Form
             // document instead
             _web.CoreWebView2.NavigationCompleted += async (s, e) =>
             {
+                // async void: any escapee exception rethrows on the UI thread —
+                // a local catch keeps it a log line, matching NextPetAsync's shape
+                try
+                {
                 // a failed navigation (server briefly down mid-handoff) lands
                 // WebView2's error page — it runs no page script, so drag/menu/
                 // seed all die and nothing ever retries. Re-probe and re-Navigate
@@ -696,7 +729,7 @@ internal sealed class WidgetForm : Form
                     if (_navUrl != null && _navRetries < 3)
                     {
                         _navRetries++;
-                        Program.Log($"nav failed (hr=0x{e.HttpStatusCode:X}) — retry {_navRetries}/3 after probe");
+                        Program.Log($"nav failed (http={e.HttpStatusCode}) — retry {_navRetries}/3 after probe");
                         for (int i = 0; i < 20; i++)
                         {
                             if (await ServerUpAsync()) break;
@@ -712,6 +745,8 @@ internal sealed class WidgetForm : Form
                 if (!_cycleOnNav) return;
                 _cycleOnNav = false;
                 _ = _web.CoreWebView2.ExecuteScriptAsync("typeof cyclePack==='function'&&cyclePack()");
+                }
+                catch (Exception ex) { Program.Log("nav handler: " + ex.Message); }
             };
             string url = _mode == "pill" ? WidgetUrl : PetUrl;
             _navUrl = url;
