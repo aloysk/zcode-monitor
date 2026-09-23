@@ -38,6 +38,13 @@ const ALLOWED = new Set([
   'session_entry', 'session_target', 'session_input', 'session_task_link',
   'input_history', 'local_setting', 'todo', 'permission', 'schema_migration',
   'workflow_definition', 'workflow_run', 'workflow_activity', 'workflow_event',
+  // dwf_* 是动态工作流的真身运行册（2026-09-23 实测：workflow_run/
+  // workflow_activity 全空；dwf_* 行数 COUNT(*)：run≈53 / actor≈0.8k /
+  // node≈2.9k / event≈1.7万——落在「≤1.8万行」小表量级带内，排序/where
+  // 维持小表默认策略；event 因 payload_json 行宽较宽，ORDER BY 实测
+  // ~140ms（亚百毫秒~百毫秒级，仍远低于文件头 ≤300ms 目标），增长绊线
+  // 登记 residuals R-16）。
+  'dwf_run', 'dwf_actor', 'dwf_node', 'dwf_event',
 ]);
 
 const ALLOWED_ORDER = new Set([

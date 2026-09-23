@@ -11,7 +11,8 @@ npm run dev                # node --watch 开发模式
 npm test                   # node --test test/index.js（聚合入口）
 ```
 
-- Node ≥18（本机 v24：test runner 不接受目录参数，新增测试文件须登记进 `test/index.js`）。
+- Node ≥18（本机 v24：test runner 不接受目录参数；`test/index.js` 按 `readdirSync`
+  自动发现 `test/*.test.js`，新测试文件放入即被纳入，无需手工登记）。
 - 冒烟：`PORT=7399 OPEN_BROWSER=0` 起服探 `/api/health`；7331 可能是用户正在跑的实例，勿动；
   起服前后 `netstat -ano | grep 7399` 确认端口干净（防残留进程假绿）。
 
@@ -38,8 +39,12 @@ npm test                   # node --test test/index.js（聚合入口）
 
 - main：生态采纳计划 + 四轮多视角加固审查 + 快照绊线（五视角对抗评审 + 六视角
   zcode-pr-review-toolkit 终审：子目录读失败 partial 分级 / 截断拍零点拒绝 /
-  README 锁定矛盾修正 / __proto__ 与截断置位 / 测试补强至 29 例）全部合并，
-  测试套件 187 用例全绿。
+  README 锁定矛盾修正 / __proto__ 与截断置位 / 测试补强至 29 例）全部合并。
+- workflow_child 计数轮（fix/workflow-child-accounting）：动态工作流（dwf）actor
+  此前在全面板被漏计（24h 窗口 ≈17% 请求）；本轮分列纳入——速度卡/速度表徽标/
+  会话徽标与筛选/raw 页 dwf 运行册表/How 文档，顺带修复 overview 切页后 SSE
+  刷错（renderFeed 自愈）。三子代理对抗评审（code/API 兼容/测试质量）通过，
+  已知边界登记 residuals R-16。
 - 快照绊线（server/snapshot-watch.js）：只读监视 `~/.zcode/v2/checkpoints/`，
   机制复活即告警；语义（零点/闩锁/unreadable 态/watch 降级）见模块头注，
   已知边界登记 residuals R-14。

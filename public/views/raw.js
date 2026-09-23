@@ -3,8 +3,12 @@
 (function () {
   const { registerView, $, fmtInt, escapeHtml, getJSON, loading, errorCard } = window.ZC;
 
+  // 与 server/routes/raw.js 的 ALLOWED 白名单保持同族（不含 permission/
+  // session_task_link 等敏感/边缘表，仅列调试有意义的运行数据表）。
   const TABLES = ['session','message','part','model_usage','tool_usage','turn_usage',
-    'session_entry','session_target','session_input','input_history','local_setting','todo','schema_migration'];
+    'session_entry','session_target','session_input','input_history','local_setting','todo','schema_migration',
+    'workflow_definition','workflow_run','workflow_activity','workflow_event',
+    'dwf_run','dwf_actor','dwf_node','dwf_event'];
 
   async function view() {
     $('#root').innerHTML = `<div class="view max">
@@ -17,6 +21,7 @@
           <option value="started_at">started_at</option>
           <option value="time_created">time_created</option>
           <option value="time_updated">time_updated</option>
+          <option value="sequence">sequence</option>
           <option value="id">id</option>
         </select>
         <label class="faint" style="font-size:12px"><input type="checkbox" id="rw-desc"> 降序</label>

@@ -340,8 +340,9 @@ function overviewSpeed(sinceMs) {
     SELECT SUM(output_tokens + COALESCE(reasoning_tokens, 0)) AS total_tokens,
            SUM(duration_ms)                                    AS total_ms,
            COUNT(*)                                            AS request_count,
-           SUM(CASE WHEN query_source='main_turn' THEN 1 END) AS main_count,
-           SUM(CASE WHEN query_source='subagent'  THEN 1 END) AS subagent_count
+           SUM(CASE WHEN query_source='main_turn'      THEN 1 END) AS main_count,
+           SUM(CASE WHEN query_source='subagent'       THEN 1 END) AS subagent_count,
+           SUM(CASE WHEN query_source='workflow_child' THEN 1 END) AS workflow_child_count
     FROM model_usage
     WHERE status = 'completed'
       AND duration_ms > 0
@@ -357,6 +358,11 @@ function overviewSpeed(sinceMs) {
     request_count: m.request_count || 0,
     main_count: m.main_count || 0,
     subagent_count: m.subagent_count || 0,
+    // 动态工作流（dwf）派生的 actor 走第三个来源 workflow_child（会话行为
+    // task_type='workflow_child'、同样挂在 parent 会话下，运行册在 dwf_run/
+    // dwf_actor 表）。与 subagent 分列返回：UI「子agent」语义 = 两者之和，
+    // 拆开可区分 Task 子代理与工作流 actor。
+    workflow_child_count: m.workflow_child_count || 0,
   };
 }
 

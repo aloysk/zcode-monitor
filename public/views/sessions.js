@@ -36,6 +36,7 @@
                 <option value="">全部类型</option>
                 <option value="interactive">interactive</option>
                 <option value="subagent_child">subagent</option>
+                <option value="workflow_child">workflow</option>
                 <option value="selection_side_chat">side_chat</option>
               </select>
               <select id="list-sort">
@@ -95,13 +96,17 @@
     const el = $('#list-scroll');
     if (!items.length) { el.innerHTML = '<div class="empty">无匹配会话</div>'; return; }
     el.innerHTML = items.map(s => {
-      const isSub = s.task_type === 'subagent_child';
+      // 三态徽标：workflow_child 是动态工作流（dwf）actor 会话，与 Task 子代理
+      // 同挂 parent 会话下，但不该再被错标成 main。
+      const badge = s.task_type === 'subagent_child' ? '<span class="badge dim">subagent</span>'
+        : s.task_type === 'workflow_child' ? '<span class="badge purple">workflow</span>'
+        : '<span class="badge blue">main</span>';
       const hasErr = s.model_calls && !s.tool_calls; // crude; real error shown in detail
       return `<div class="listitem ${s.id===currentId?'active':''}" data-id="${escapeHtml(s.id)}">
         <div class="t">${escapeHtml(s.title || '(无标题)')}</div>
         <div class="s">
           <span>${relTime(new Date(s.time_updated).toISOString())}</span>
-          <span>${isSub?'<span class="badge dim">subagent</span>':'<span class="badge blue">main</span>'}</span>
+          <span>${badge}</span>
           ${s.total_tokens?`<span>${fmtNum(s.total_tokens)} tok</span>`:''}
           ${s.model_calls?`<span>${fmtInt(s.model_calls)} req</span>`:''}
         </div>
@@ -123,8 +128,9 @@
     try {
       const s = (await getJSON('/api/sessions/' + currentId)).session;
       const isSub = s.task_type === 'subagent_child';
+      const isWf = s.task_type === 'workflow_child';
       $('#detail-head').innerHTML = `
-        <div class="title">${escapeHtml(s.title || '(无标题)')} ${isSub?'<span class="badge purple">subagent</span>':''}</div>
+        <div class="title">${escapeHtml(s.title || '(无标题)')} ${isSub?'<span class="badge purple">subagent</span>':''} ${isWf?'<span class="badge purple">workflow</span>':''}</div>
         <div class="sub">${escapeHtml(s.id)} ${s.parent_id?'· parent '+shortId(s.parent_id):''} ${s.directory?'· '+escapeHtml(s.directory):''}</div>`;
     } catch {}
   }
@@ -400,11 +406,18 @@
   async function renderAgents(id, body) {
     const data = await getJSON(`/api/sessions/${id}/children`);
     if (!data.children.length) { body.innerHTML = '<div class="empty">该会话未派生子 agent</div>'; return; }
-    body.innerHTML = `<h2>子 Agent <span class="sub">${data.children.length} 个</span></h2>
+    // children 按 parent_id 查询，天然同时含 Task 子代理与工作流 actor——
+    // 计数拆开展示，避免把工作流 actor 混记进 Task 子代理数。
+    const wfs = data.children.filter(c => c.task_type === 'workflow_child').length;
+    body.innerHTML = `<h2>子 Agent <span class="sub">${data.children.length} 个${wfs ? ` · 工作流 actor ${wfs}` : ''}</span></h2>
       <div class="card tight" style="overflow-x:auto"><table>
         <thead><tr><th>profile</th><th>描述</th><th class="num">token</th><th>创建</th><th></th></tr></thead>
         <tbody>${data.children.map(c => `<tr data-id="${escapeHtml(c.id)}">
-          <td><span class="badge ${c.profile==='Explore'?'teal':'purple'}">${escapeHtml(c.profile||'?')}</span></td>
+          <td>${c.profile
+            ? `<span class="badge ${c.profile==='Explore'?'teal':'purple'}">${escapeHtml(c.profile)}</span>`
+            : c.task_type === 'workflow_child'
+              ? '<span class="badge purple">workflow</span>'
+              : '<span class="badge dim">?</span>'}</td>
           <td>${escapeHtml((c.prompt||'').slice(0,80))}${c.prompt&&c.prompt.length>80?'…':''}</td>
           <td class="num">${fmtNum(c.total_tokens)}</td>
           <td><span class="mono faint">${relTime(c.time_created)}</span></td>
