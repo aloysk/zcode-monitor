@@ -33,6 +33,7 @@
 -  **双主题** —— Dark（默认）/ Light，三种切换方式。
 - 🐾 **宠物一键导入** —— Codex 格式宠物包（`pet.json + spritesheet.webp`）一键导入，导入时校验 sheet 尺寸 / 行数 / JSON 健全性并生成 NOTICE，且**按白名单复制**（只带走 pet.json / 精灵图 / NOTICE / README·LICENSE 文本，`.html`/`.svg` 等一律跳过并告警）；许可证缺失、或自报值不在已知 SPDX/惯用写法白名单的包**缺省拒绝导入**，需显式确认（CLI `--ack-unlicensed`、图鉴页确认弹窗、API `ackUnknownLicense: true`；确认后照 NOTICE 记录自报值并放行）；CLI（`node tools/import-pet.js <包目录>`）、API（`POST /api/pets/import`）与图鉴页（`pets-preview.html`）三个入口共用同一校验模块。
 - ⚡ **fs.watch 实时增强** —— 日志目录 `fs.watch` 监听 + 字节偏移增量解析，JSONL 追加即触发、大幅降低日志尾部发现延迟；watch 失败自动降级短轮询，周期偏移对账兜底，事件不丢不重。
+- 🚨 **快照绊线（tripwire）** —— 只读监视 `~/.zcode/v2/checkpoints/`（ZCode 工作区快照上传机制的落盘目录，背景见下文「隐私提示」）：实时监控页常驻一张绊线卡，四态呈现（静默 / 遗留静止 / 目录不可读 / **检测到活动**）；快照机制复活、新内容落盘的那一刻卡片转红、顶栏亮出「快照活动!」告警（任何视图可见）。boot 时目录状态即零点，此后新增工作区 / `state.json` 变化 / pending 工件增减都判为活动并闩锁（上传后目录被清理也保持告警）；fs.watch 快路径 + 30s 轮询兜底，全程对 `~/.zcode/` 零写入。
 - ✅ **测试套件** —— Node 内置 `node:test`（零新依赖），`npm test` 一键运行；fixture 全部落 `os.tmpdir()`，与真实库完全隔离。
 -  **全程只读** —— 不改 ZCode 一行数据。
 
@@ -69,6 +70,7 @@ npm run dev          # node --watch，文件改动自动重启
 | `PORT`     | `7331`                      | 监听端口                 |
 | `HOST`     | `127.0.0.1`                 | 监听地址（出于安全默认只绑本地）     |
 | `ZCODE_DB` | `~/.zcode/cli/db/db.sqlite` | SQLite 主库路径          |
+| `ZCODE_SNAPSHOT_DIR` | `~/.zcode/v2/checkpoints` | 快照绊线监视的目录（测试/异构环境改址） |
 | `OPEN_BROWSER` | `1`（未设即开）          | 启动时是否自动打开浏览器（设 `0` 关闭） |
 
 示例：
@@ -150,6 +152,21 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
 
 以上均为只读取证；上传目的地与云端处置未经网络侧验证，本项目不对此下断言。
 
+### 快照绊线：面板内置的复活监视
+
+「实时监控」页常驻**快照绊线卡**，顶栏在告警态亮出「快照活动!」红标（语义见 `server/snapshot-watch.js` 头注）：boot 时的目录状态即零点，此后任何新增工作区、`state.json` 重写、pending 加密工件增减都判定为机制复活并闩锁告警；fs.watch（Windows/macOS 递归）秒级快路径 + 30s 轮询兜底；目录不可读（如手动锁定后）如实显示「目录不可读」态而不是伪装成「静默」。已知边界：绊线只在面板运行时段设防，面板停机期间的活动以启动后的「遗留静止」态呈现（可用最后活动时间辅助判断）；面板重启会重置零点。
+
+### 可选：目录锁定（阻断快照写入，可逆）
+
+如决定阻断 ZCode 的快照写入（参考 Masterchiefm/zcode-speed-panel `snapshot_guard.rs` 的实现思路，MIT），在 Windows 上以拒绝 ACE 锁定目录（先 `whoami /user` 取当前用户 SID）：
+
+```powershell
+icacls "$env:USERPROFILE\.zcode\v2\checkpoints" /deny "*<SID>:(OI)(CI)(WD,AD)"   # 锁定（只拒写入/创建，不影响读取）
+icacls "$env:USERPROFILE\.zcode\v2\checkpoints" /remove:d "*<SID>"               # 解除（可逆）
+```
+
+锁定后 ZCode 写不进该目录、快照上传链路失效，代价是「检查点回滚 / 时间线」功能不可用；绊线卡会如实转为「目录不可读」态（预期行为，非故障）。注意：锁定/解除是**对 `~/.zcode/` 的写入性操作**，由你手动执行——本面板自身对 `~/.zcode/` 始终零写入，不提供也代行不了这个动作。
+
 监控读路径对 `~/.zcode/` 全程只读。唯一例外是 WAL checkpoint 功能（ZCode 退出后自动折叠，或经 `/api/checkpoint` 手动触发）：它以短时可写连接执行 `wal_checkpoint(TRUNCATE)`，只把 WAL 日志折叠进主库、清空 `-wal` 文件，不改变任何数据行内容。
 
 安全姿态（与隐私相关的部分）：面板无鉴权、默认只绑 `127.0.0.1`，全部 `/api` 仅接受回环 Host（`127.0.0.1` / `localhost`，防 DNS rebinding 整库转录）；全站下发 CSP 与 `X-Content-Type-Options: nosniff`，前端脚本零外联（Chart.js 已本地化到 `public/assets/`，仅 pet/widget 两页保留 Google Fonts 字体 CSS 外联，见 `docs/acceptance/residuals.md`）；`/pets` 静态目录内非图片一律强制下载，导入夹带的页面类文件无法以面板同源执行。手动 checkpoint 的拒绝语义：WAL 近 60s 内有写入 → `409 wal_active`（`?force=1` 也不越过，绝不与真实写入方抢锁）；探测显示 ZCode 运行中 → `409 zcode_running`（`?force=1` 可越过）；锁竞争 → `503 checkpoint_busy`（可重试）；`?force=1` 另要求请求头 `X-Zcode-Monitor-Checkpoint: 1`（面板按钮自动携带；防跨站简单请求触发，缺头 → `403`）。全部 `/api` 行数参数（limit/max/offset）统一钳界，负值不再构成无上限查询。
@@ -204,6 +221,7 @@ zcode-monitor/
 │   ├── db.js                 # 只读 DB 连接 + 查询函数
 │   ├── zcode-runtime.js      # ZCode 运行状态探测 + WAL checkpoint
 │   ├── livegen.js            # 生成态引擎（呼吸动画/×N 车道的 SSE 边沿）
+│   ├── snapshot-watch.js     # 快照绊线（只读监视 checkpoints/，复活即告警）
 │   ├── transcript.js         # 解析 transcript.jsonl + metadata.json
 │   ├── log-tail.js           # 日志读取 + trace 还原 + fs.watch 实时增量
 │   ├── pet-import.js         # 宠物包导入共享模块（校验/白名单复制/端点中间件）

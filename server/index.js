@@ -2,12 +2,14 @@
 // server/index.js — entry point. Serves the static frontend + JSON API,
 // then opens the browser automatically.
 const path = require('path');
+const os = require('os');
 const http = require('http');
 const { exec } = require('child_process');
 const express = require('express');
 
 const dbq = require('./db');
 const { createGenWatcher } = require('./livegen');
+const { createSnapshotWatcher, makeSnapshotRoute } = require('./snapshot-watch');
 const runtime = require('./zcode-runtime');
 const { loopbackHostGate, securityHeaders, petsStaticOptions, makeErrorTranslator } = require('./http-hardening');
 const { makeCheckpointRoute } = require('./checkpoint-route');
@@ -138,6 +140,20 @@ app.get('/api/health', makeHealthRoute({
   dbPath: dbq.DB_PATH, logDir: dbq.LOG_DIR,
 }));
 
+// ── 快照绊线（snapshot tripwire）──────────────────────────────
+// 只读监视 ~/.zcode/v2/checkpoints/（ZCode 工作区快照上传机制的落盘目录，
+// 语义与红线见 server/snapshot-watch.js 头注）：机制复活即红。ZCODE_SNAPSHOT_DIR
+// 供测试/异构环境改址（与 ZCODE_DB 同款约定）。
+// 挂载位置在 companion tracker 之前是有意的：仪表盘 snapshotLoop 每 30s 轮询
+// 本端点——若挂在 tracker 之后，「壳被强杀但浏览器标签还开着」的孤儿 companion
+// 服务会被这条常驻流量永久续命（lastSeen 一直新鲜，5 分钟自清永不触发）。
+// 与 /api/health 同区即不刷 lastSeen（companion 靠 widget 页自己的 keep-alive）。
+const snapshotWatcher = createSnapshotWatcher({
+  dir: process.env.ZCODE_SNAPSHOT_DIR
+    || path.join(os.homedir(), '.zcode', 'v2', 'checkpoints'),
+});
+app.get('/api/snapshot', makeSnapshotRoute({ watcher: snapshotWatcher }));
+
 app.use('/api/overview', overview);
 app.use('/api/sessions', sessions);
 app.use('/api/trace', trace);
@@ -214,10 +230,10 @@ app.get('/api/gen/events', (req, res) => {
   });
 });
 
-// Stop the watcher on shutdown signals (its timer is already unref'd and
-// never blocks exit; this makes the teardown explicit and immediate).
-process.on('SIGINT', () => { genWatcher.stop(); process.exit(0); });
-process.on('SIGTERM', () => { genWatcher.stop(); process.exit(0); });
+// Stop the watchers on shutdown signals (their timers are already unref'd and
+// never block exit; this makes the teardown explicit and immediate).
+process.on('SIGINT', () => { genWatcher.stop(); snapshotWatcher.stop(); process.exit(0); });
+process.on('SIGTERM', () => { genWatcher.stop(); snapshotWatcher.stop(); process.exit(0); });
 
 // token-speed floating widget page (loaded by the frameless WebView2 shell)
 app.get('/widget', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'widget.html')));

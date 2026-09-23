@@ -284,6 +284,18 @@ input[type=search] { width: 100%; }
 .card.tight { padding: 0; overflow: hidden; }
 .chart-wrap { position: relative; height: 200px; }
 
+/* ── 快照绊线卡 / 顶栏告警（server/snapshot-watch.js）──────── */
+/* active 态描红：静默时与普通卡无异，机制复活那一刻一眼可见 */
+.snapshot-card.active {
+  border-color: color-mix(in srgb, var(--sev-err) 45%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--sev-err) 20%, transparent);
+}
+/* 顶栏告警 chip（badge red 形态 + 可点击锚点语义）。[hidden] 显式兜底：
+   .badge 的 display:inline-block 会盖过 UA 对 [hidden] 的 display:none
+   （.privacy-notice[hidden] 同款教训）——不兜底则红标常显 = 永久假告警 */
+.snap-alert { cursor: pointer; text-decoration: none; white-space: nowrap; }
+.snap-alert[hidden] { display: none; }
+
 /* ── table ─────────────────────────────────────────────── */
 table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border-soft); }
