@@ -258,7 +258,7 @@
       <div class="kpi">
         <div class="label">平均 Token 速度 (${lastWindow})</div>
         <div class="value ${cls}">${s && s.weighted_tps != null ? s.weighted_tps + ' <span class="faint" style="font-size:13px;font-weight:400">t/s</span>' : '—'}</div>
-        <div class="delta">加权:总 token ÷ 总秒数 · 主 ${fmtInt(s && s.main_count)} · 子agent ${fmtInt(s && s.subagent_count)}</div>
+        <div class="delta">加权:总 token ÷ 总秒数 · 主 ${fmtInt(s && s.main_count)} · 子agent(含工作流) ${fmtInt((s && s.subagent_count || 0) + (s && s.workflow_child_count || 0))} · 其中工作流 ${fmtInt(s && s.workflow_child_count)}</div>
       </div>`;
   }
 
@@ -393,7 +393,7 @@
               <td class="num">${r.reasoning ? fmtInt(r.reasoning) : '<span class="faint">0</span>'}</td>
               <td class="num">${fmtMs(r.duration_ms)}</td>
               <td class="num">${r.tps != null ? `<span class="spd-chip ${cls}">${r.tps} t/s</span>` : '<span class="faint">—</span>'}</td>
-              <td><span class="badge ${r.query_source==='main_turn'?'blue':r.query_source==='subagent'?'teal':'dim'}">${escapeHtml(r.query_source||'')}</span></td>
+              <td><span class="badge ${r.query_source==='main_turn'?'blue':r.query_source==='subagent'?'teal':r.query_source==='workflow_child'?'purple':'dim'}">${escapeHtml(r.query_source||'')}</span></td>
             </tr>`;
           }).join('')
         }</tbody>
@@ -407,12 +407,14 @@
       const totSec = recent.reduce((a, r) => a + (r.duration_ms || 0), 0) / 1000;
       const wTps = totSec > 0 ? (totTok / totSec).toFixed(1) : null;
       const subs = recent.filter(r => r.query_source === 'subagent').length;
+      const wfs = recent.filter(r => r.query_source === 'workflow_child').length;
       foot.hidden = false;
       foot.innerHTML = `
         <span><span class="lbl">均速</span> <b class="${speedClass(wTps != null ? +wTps : null)}">${wTps != null ? wTps + ' t/s' : '—'}</b></span>
         <span><span class="lbl">总 token</span> <b>${fmtInt(totTok)}</b><span class="caliber" title="本地估算：速度专用口径 Σ(输出+推理)，不含输入，与官方 computed_total_tokens（input+output）口径不同，见 docs/usage-accounting.md">本地估算</span></span>
         <span><span class="lbl">请求</span> <b>${fmtInt(recent.length)}</b></span>
-        <span><span class="lbl">subagent</span> <b>${fmtInt(subs)}</b></span>`;
+        <span><span class="lbl">subagent</span> <b>${fmtInt(subs)}</b></span>
+        <span><span class="lbl">工作流</span> <b>${fmtInt(wfs)}</b></span>`;
     }
   }
 
@@ -420,7 +422,7 @@
     $('#tbl-model').querySelector('thead').innerHTML = `<tr><th>provider / model</th><th>来源</th><th class="num">调用</th><th class="num">输入</th><th class="num">输出</th><th class="num">推理</th><th class="num">均时延</th></tr>`;
     $('#tbl-model').querySelector('tbody').innerHTML = byModel.map(m => `<tr>
       <td><span class="mono">${escapeHtml(m.model_id||'?')}</span><div class="faint mono" style="font-size:10px">${escapeHtml((m.provider_id||'').replace('builtin:',''))} ${m.variant?'· '+escapeHtml(m.variant):''}</div></td>
-      <td><span class="badge ${m.query_source==='main_turn'?'blue':m.query_source==='subagent'?'teal':'dim'}">${escapeHtml(m.query_source)}</span></td>
+      <td><span class="badge ${m.query_source==='main_turn'?'blue':m.query_source==='subagent'?'teal':m.query_source==='workflow_child'?'purple':'dim'}">${escapeHtml(m.query_source)}</span></td>
       <td class="num">${fmtInt(m.calls)}</td><td class="num">${fmtNum(m.in_tok)}</td><td class="num">${fmtNum(m.out_tok)}</td><td class="num">${fmtNum(m.reason_tok)}</td><td class="num">${fmtMs(m.avg_ms)}</td></tr>`).join('') || `<tr><td colspan="7" class="empty">无数据</td></tr>`;
 
     $('#tbl-tool').querySelector('thead').innerHTML = `<tr><th>工具</th><th class="num">调用</th><th class="num">错误</th><th class="num">均时延</th><th class="num">最大</th><th class="num">输出字节</th></tr>`;
@@ -462,7 +464,13 @@
   }
 
   function renderFeed() {
-    $('#feed').innerHTML = liveRows.map((row, i) => `
+    const feed = $('#feed');
+    // hash 切走后 DOM 已被替换、但本视图的 SSE 仍连着：每条推送都会撞
+    // null innerHTML 抛 TypeError（实测离开 overview 后每分钟刷几十条）。
+    // 自愈：目标元素不在即关掉这条 EventSource；回到 overview 时 view()
+    // 开头的 close+重开逻辑会建新连接，不依赖这条旧流。
+    if (!feed) { if (liveEs) { liveEs.close(); liveEs = null; } return; }
+    feed.innerHTML = liveRows.map((row, i) => `
       <div class="ev-row ${i===0?'row-flash':''} ${row.status==='error'?'err':''}">
         <span class="seq">${row.seq}</span>
         <span class="ts">${fmtTime(row.t)}</span>

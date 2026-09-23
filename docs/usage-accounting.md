@@ -281,6 +281,13 @@ fixture 组：边界行在改动前后各跑一次（`git stash` 切换），脚
 样式：`public/styles.css` 新增 `.caliber`（11px 圆角描边徽章）。`public/app.js` 为
 应用外壳（路由/主题/健康轮询），不含用量数字，本任务未改动。
 
+2026-09-23 增补（workflow_child 计数轮）：overview 速度卡的「主/子agent(含工作流)/其中
+工作流」三段与速度表 footer 的 subagent/工作流 计数均为 `model_usage` 原始行 COUNT
+（`overviewSpeed` 分列 main_turn/subagent/workflow_child，速度口径过滤同前），非 token
+口径；UI「子agent(含工作流)」= `subagent_count + workflow_child_count`（API 两字段各自
+保持纯口径、可分列复原）。widget ×N（在飞会话数）与窗口内行为计数的口径差异见 How 页
+「widget 的 ×N」条目。
+
 ## 9. db.js 注释出处约定（A2-5）
 
 `server/db.js` Overview 段头注释定义缩写，逐查询以

@@ -45,12 +45,13 @@
       const byModel = ov.by_model;
       const mainSrc = byModel.find(m => m.query_source === 'main_turn');
       const subSrc = byModel.find(m => m.query_source === 'subagent');
+      const wfSrc = byModel.find(m => m.query_source === 'workflow_child');
       const titleSrc = byModel.find(m => m.query_source === 'session_title');
 
       const concepts = [
         {
           h: 'Session（会话）',
-          p: `一次独立的对话。分三类：<code>interactive</code>（你直接聊的主会话）、<code>subagent_child</code>（主 agent 派生的子 agent，做搜索/调研等只读活）、<code>selection_side_chat</code>（选中代码的侧边提问）。你的库里有 <b>${fmtInt(agents.total)}</b> 个会话，其中 ${fmtInt(agents.roots.length)} 个主会话派生了大量子 agent。`,
+          p: `一次独立的对话。分四类：<code>interactive</code>（你直接聊的主会话）、<code>subagent_child</code>（主 agent 派生的子 agent，做搜索/调研等只读活）、<code>workflow_child</code>（动态工作流派生的 actor 会话，同样挂在 parent 会话下，会话列表里以紫色 workflow 徽标区分）、<code>selection_side_chat</code>（选中代码的侧边提问）。你的库里有 <b>${fmtInt(agents.total)}</b> 个会话，其中 ${fmtInt(agents.roots.length)} 个主会话派生了大量子 agent。`,
           ex: `例：最近的主会话 "查看和观测 zcode agent" 派生了 4 个 Explore 子 agent（在「子 Agent」页可见调用树）`,
         },
         {
@@ -60,8 +61,8 @@
         },
         {
           h: 'query_source（请求来源）',
-          p: `区分这次模型调用是为什么：${renderQuerySources(byModel)}。<b>main_turn</b> 是真正回答你的；<b>subagent</b> 是子 agent 干活；<b>compact</b> 是上下文压缩；<b>session_title</b> 只是给会话起个标题（很便宜）。`,
-          ex: `24h 内：main_turn ${fmtInt(mainSrc?.calls||0)} 次、subagent ${fmtInt(subSrc?.calls||0)} 次、标题生成 ${fmtInt(titleSrc?.calls||0)} 次`,
+          p: `区分这次模型调用是为什么：${renderQuerySources(byModel)}。<b>main_turn</b> 是真正回答你的；<b>subagent</b> 是 Task 派生的子 agent 干活；<b>workflow_child</b> 是动态工作流（dwf）派生的 actor 在干活（两者都算 agent 侧请求，速度卡的「子agent」= subagent + workflow_child）；<b>compact</b> 是上下文压缩；<b>session_title</b> 只是给会话起个标题（很便宜）。`,
+          ex: `24h 内：main_turn ${fmtInt(mainSrc?.calls||0)} 次、subagent ${fmtInt(subSrc?.calls||0)} 次、工作流 actor ${fmtInt(wfSrc?.calls||0)} 次、标题生成 ${fmtInt(titleSrc?.calls||0)} 次`,
         },
         {
           h: 'mode（运行模式）',
@@ -87,6 +88,11 @@
           h: 'MCP 工具',
           p: `名字以 <code>mcp__</code> 开头的是外部 MCP 服务器提供的工具（如 gitnexus、agentmemory、chrome-devtools）。你装了 3 个 MCP 服务器，扩展了 agent 的能力。`,
           ex: `在「实时监控」按工具表里能看到 mcp__gitnexus__query 等的调用频次`,
+        },
+        {
+          h: 'widget 的 ×N（并发泳道）',
+          p: `桌宠/挂件的 <b>×N</b> 是「此刻正在生成中的会话数」——按 message 表里未完成的 assistant 行去重统计，不区分 main/subagent/workflow。它是<b>瞬时在飞口径</b>：agent 在两次模型调用的间隙（跑工具、等结果）会暂时退出计数，所以 ×3 不等于「活着的 agent 总数」。想知道窗口内有多少 agent 干过活，看速度卡的 主/子agent/工作流 三个计数。`,
+          ex: `例：三个工作流并行复审时，×N 在泳道 turn 间隙会塌到 2-3，而 24h 速度卡的「子agent」计数把它们全部计入`,
         },
       ];
       $('#concepts').innerHTML = concepts.map(c => `
