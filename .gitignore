@@ -32,6 +32,9 @@ tools/*-catalog.json
 tools/scratch/
 .serena/
 
+# browser tool residue (playwright MCP page snapshots)
+.playwright-mcp/
+
 # task acceptance artifacts (local evidence, not for distribution)
 artifacts/
 
