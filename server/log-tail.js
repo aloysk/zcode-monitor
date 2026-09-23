@@ -175,7 +175,10 @@ function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
                             statFile = (p) => fs.statSync(p) } = {}) {
   if (typeof onEvents !== 'function') throw new TypeError('onEvents required');
   let curFile = null, offset = 0, remainder = Buffer.alloc(0);
-  const readFileNames = new Set(); // 本 watcher 已锚定/读过的文件名：换名回到读过的文件时按 size 锚定，绝不二次回放
+  // 文件名 → 本 watcher 在该文件上已消费到的偏移（键存在即「读过」）：
+  // 换名回到读过的文件时从 min(已读偏移, 当前 size) 续读——回退窗口内写入的行
+  // 由此补投递，且不与已投递内容重复。
+  const readOffsets = new Map();
   let watcher = null, reconcileTimer = 0, pollTimer = 0, stopped = false;
   let pending = 0;
   let degradedWarned = false;
@@ -184,6 +187,10 @@ function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
   // 违反「起点对账不回放历史」。未锚定前每次 pump 先补做尾部锚定。
   // 真日切换（名字更新且从未读过）到的新文件无历史，从 0 起读即视为已锚定。
   let anchoredToTail = false;
+  // curFile 曾被 stat 观测到存在：已锚定后的同名 ENOENT 即「被删除」，复活
+  // （重建）时须重锚定（否则从旧 offset 续读会整段重放重建文件的内容）。
+  // 从未存在过的文件（新日文件未创建）不受此路径影响——从 0 增量读保留。
+  let fileKnown = false;
 
   function warnDegraded(why) {
     if (degradedWarned || stopped) return;
@@ -203,14 +210,22 @@ function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
       // 都是本 watcher 未见过的新事件）。其余换名一律按 size 锚定、不回放：
       // - 名字回退（readdir 失败时 defaultTodayFile 回退 UTC 名 < 本地日名）：
       //   那是同一活跃文件的旧视角，从 0 起读会整文件回放；
-      // - 名字回归到读过的文件（回退窗口结束、名字又跳回最新）：该文件此前
-      //   的内容已投递过，必须从上次语义上未读的位置锚定。
-      const freshDay = prevName !== '' && nextName > prevName && !readFileNames.has(nextName);
+      // - 名字回归到读过的文件（回退窗口结束、名字又跳回最新）：从已读偏移续读。
+      const freshDay = prevName !== '' && nextName > prevName && !readOffsets.has(nextName);
       curFile = file; offset = 0; remainder = Buffer.alloc(0);
+      // 换名即进入未锚定态：中途 return 不得沿用旧文件的已锚定标记——否则锚定
+      // 失败后下次 pump 直接按 offset=0 增量读，文件出现/复活时整文件回放。
+      anchoredToTail = false;
+      fileKnown = false;
       if (!freshDay) {
         try {
           offset = statFile(curFile).size;
-          readFileNames.add(nextName);
+          // 回归到读过的文件：从「已读偏移」与当前 size 的较小者续读（回退窗口
+          // 内写入的行由此补投递、不重复；文件被截短则按截断语义从 size 起）。
+          const rec = readOffsets.get(nextName);
+          if (rec != null && rec < offset) offset = rec;
+          readOffsets.set(nextName, offset);
+          fileKnown = true; // stat 成功即「存在过」的证据
         } catch (e) {
           if ((e && e.code) !== 'ENOENT') return; // 文件在但 stat 瞬时失败（EPERM/EBUSY）：
                                                   // 历史未知、保持未锚定，下次 pump 先补锚定，
@@ -222,29 +237,40 @@ function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
           // 锚定反而会锚掉启动后已写入的新行、直接丢事件。
           const seenBefore = !!(todayFile.seenFiles && todayFile.seenFiles.has
             && todayFile.seenFiles.has(nextName));
-          if (seenBefore || readFileNames.has(nextName)) return;
+          if (seenBefore || readOffsets.has(nextName)) return; // anchoredToTail 已复位，复活走补锚定
+          anchoredToTail = true;
+          return;
         }
       } else {
-        readFileNames.add(nextName);
+        readOffsets.set(nextName, 0); // 新日文件：键存在（此后换名回来不当作新文件）、从 0 起读
       }
       anchoredToTail = true;
       return;
     }
-    if (!anchoredToTail) { // 首次非 ENOENT 失败过的补锚定（再失败则继续等）
+    if (!anchoredToTail) { // 补锚定（首文件/换名锚定失败/删除后的重建）
       try {
         offset = statFile(curFile).size;
-        readFileNames.add(path.basename(curFile));
+        readOffsets.set(path.basename(curFile), offset);
         anchoredToTail = true;
+        fileKnown = true;
       } catch { return; }
       return;
     }
     let stat;
     try { stat = statFile(curFile); }
-    catch { return; } // 当日文件尚不存在：等下次事件/对账
-    if (stat.size < offset) { offset = 0; remainder = Buffer.alloc(0); } // 截断/回绕：按新文件从 0 重读
+    catch (e) {
+      // 已锚定且曾存在的文件 ENOENT = 被删除：置「待重锚定」，重建后按当刻 size
+      // 锚定（重建文件与旧文件无身份连续性，从旧 offset 续读会整段重放旧内容；
+      // 重建到重锚定之间写入的行按窄窗取舍锚掉，与 EPERM 同取舍）。
+      if ((e && e.code) === 'ENOENT' && fileKnown) { anchoredToTail = false; fileKnown = false; }
+      return;
+    }
+    fileKnown = true;
+    if (stat.size < offset) { offset = 0; remainder = Buffer.alloc(0); // 截断/回绕：按新文件从 0 重读
                                                                          // （对账定时器调的就是本 pump，走同一
                                                                          //  分支兜不了底；offset 不重置会让此后
                                                                          //  追加在 size 追回 offset 前全部不可见）
+      readOffsets.set(path.basename(curFile), 0); }
     if (stat.size === offset) return; // 无新字节
     const readSize = Math.min(stat.size - offset, maxBytesPerPump);
     const buf = Buffer.alloc(readSize);
@@ -255,6 +281,7 @@ function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
     } catch { return; }
     finally { try { if (fd != null) fs.closeSync(fd); } catch { /* ignore */ } }
     offset += readSize;
+    readOffsets.set(path.basename(curFile), offset);
     // 残行按原始字节保存，只在完整行（以 \n 收尾的前缀）上做 utf8 解码：若某次
     // 读取落在多字节 UTF-8 序列中间，两段各自解码会产生 U+FFFD，该行 JSON 解析
     // 失败被静默丢弃且 offset 已前移、无法补读。\n 是 ASCII 字节、不出现在任何

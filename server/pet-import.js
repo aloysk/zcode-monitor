@@ -9,6 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const { webpSize } = require('../tools/webp-size');
+const { LOOPBACK_HOST_RE } = require('./http-hardening');
 
 const CELL_W = 192;
 const CELL_H = 208;
@@ -19,6 +20,15 @@ const IMPORT_HEADER = 'x-zcode-monitor-import';
 const DEFAULT_STAGING_ROOT = path.join(__dirname, '..', 'tools', 'pets-staging');
 // 包 id 即落位目录名：小写字母/数字/连字符，天然排除路径分隔符与 ..
 const ID_RE = /^[a-z0-9-]+$/;
+// 资源上限：导入是同步复制路径，无上限时一个 GB 级 webp 或巨型目录树会冻结
+// 事件循环。精灵契约下 32MB/2000 条目都是远超正常包的宽松上界。
+const SHEET_MAX_BYTES = 32 * 1024 * 1024;
+const AUDIT_MAX_ENTRIES = 2000;
+// 「许可证未知」的语义等价串：占位 unknown 与自报无授权的常见写法都走确认门；
+// 自报的具体许可证（MIT/CC-BY-…）是用户提供的事实性元数据，照 NOTICE 记录、
+// 不需确认（ack 的语义是「知悉授权未核实」，对自报 SPDX 串加确认只加摩擦不
+// 加核实）。
+const LICENSE_UNKNOWN_RE = /^(unknown|unlicensed|none|n\/a|not known|未知|无)$/i;
 
 class PetImportError extends Error {
   constructor(code, message) { super(message); this.code = code; }
@@ -53,6 +63,12 @@ function checkSheet(sourceDir, pet) {
   }
   if (!fs.existsSync(p) || !fs.statSync(p).isFile()) {
     throw new PetImportError('SHEET_MISSING', `spritesheet 不存在: ${rel}`);
+  }
+  // 体积上限（32MB）：导入复制是同步路径，超大文件会冻结事件循环；精灵契约下
+  // 真实 sheet 远小于此。头部只读 32 字节不受影响（见下）。
+  if (fs.statSync(p).size > SHEET_MAX_BYTES) {
+    throw new PetImportError('SHEET_TOO_LARGE',
+      `spritesheet ${fs.statSync(p).size} 字节超上限 ${SHEET_MAX_BYTES}（同步复制路径的资源上限）`);
   }
   let realSrc, realP;
   try { realSrc = fs.realpathSync(src); realP = fs.realpathSync(p); }
@@ -101,7 +117,11 @@ function auditNoSymlinks(rootDir) {
   let seen = 0;
   const walk = (dir) => {
     for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
-      seen++;
+      if (++seen > AUDIT_MAX_ENTRIES) {
+        // 条目上限：审计与白名单复制都是同步遍历，巨型目录树会冻结事件循环
+        throw new PetImportError('SOURCE_TOO_LARGE',
+          `来源目录条目超过上限 ${AUDIT_MAX_ENTRIES}（同步遍历路径的资源上限）`);
+      }
       if (d.isSymbolicLink()) {
         throw new PetImportError('SOURCE_SYMLINK',
           `来源目录树内含 symlink/junction，拒绝导入: ${path.join(dir, d.name)}`);
@@ -134,12 +154,17 @@ function buildNotice({ id, name, source, author, license, originalNotice = '' })
 
 // 导入白名单：只允许带走这些文件，其余一律跳过并计入 warnings（extra_files_skipped）。
 // staging 包里可能夹带任何文件（下载器残留、预览 .html/.svg 等）——public/ 由
-// express.static 以面板同源（127.0.0.1:7331）直接服务，一个附带页面落进去就等于
+// express.static 以面板同源（127.0.0.1:7331）直接服务，一个附带页面就等于
 // 在本服务源上落地可执行内容（可读 /api/raw 等并外传）。白名单外文件一律不进
 // public/pets；静态侧另有 /pets 非图片强制 octet-stream+attachment 的第二道防线。
-// README*/LICENSE* 容忍自由格式文件名（README.md/README.ja.txt/LICENSE 等）；
-// spritesheet 允许 pet.json 指定的相对路径（checkSheet 已验证其落在包内且为 webp）。
-const TOP_LEVEL_ALLOW = [/^pet\.json$/i, /^notice\.md$/i, /^readme/i, /^license/i];
+// README/LICENSE 的前缀匹配限定纯文本扩展名（裸名亦常见，放行）：不限扩展名时
+// README.html 会经白名单落进 /pets（当前被第二道防线中和，但不应依赖它）。
+const TOP_LEVEL_ALLOW = [
+  /^pet\.json$/i,
+  /^notice\.md$/i,
+  /^readme([^/]*\.(md|txt))?$/i,
+  /^(license|licence)([^/]*\.(md|txt))?$/i,
+];
 function copyWhitelisted(sourceDir, tmpDir, sheetRel) {
   const sheetPosix = path.posix.normalize(String(sheetRel).replace(/\\/g, '/'));
   const sheetDirs = new Set();
@@ -186,10 +211,12 @@ function importPetPack({ sourceDir, targetRoot, id, source, author, license,
   }
   const { sheetRel } = checkSheet(sourceDir, pet);
   // 许可证缺失/unknown 需显式确认才放行：导入产物落在以本服务同源静态分发的
-  // public/pets，未核实授权的素材应至少有一次知情确认（API ackUnknownLicense /
-  // CLI --ack-unlicensed）；确认后仍照常生成 license: unknown 占位与警告。
-  const licenseUnknown = !license || String(license).trim().toLowerCase() === 'unknown';
-  if (licenseUnknown && !ackUnknownLicense) {
+  // public/pets，未核实授权的素材应至少有一次知情确认（API ackUnknownLicense
+  // / CLI --ack-unlicensed）；确认后仍照常生成 license: unknown 占位与警告。
+  // ack 只认 === true：宽松真值（"false" 字符串/数组等）不得视作确认。
+  const licenseUnknown = !license
+    || LICENSE_UNKNOWN_RE.test(String(license).trim());
+  if (licenseUnknown && ackUnknownLicense !== true) {
     throw new PetImportError('LICENSE_UNKNOWN',
       '许可证缺失或未知（NOTICE 将记 license: unknown）：导入需显式确认——'
       + 'API 传 ackUnknownLicense: true，CLI 加 --ack-unlicensed。请先核实来源与授权状态。');
@@ -332,8 +359,8 @@ function resolveStagingSource(source, stagingRoot = DEFAULT_STAGING_ROOT) {
 // HOST=0.0.0.0 覆写监听（server/index.js 的 HOST 环境变量），非浏览器直连客户端
 // 可伪造回环 Host 与自定义首部绕过前两道闸——这与整个面板的无鉴权回环姿态一致
 // （默认只绑 127.0.0.1 即是主防线），写入面亦已限定在 staging → public/pets；
-// 对外暴露场景须自行加鉴权层，而非依赖本中间件。
-const LOOPBACK_HOST_RE = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/;
+// 对外暴露场景须自行加鉴权层，而非依赖本中间件。读面另由 /api 全局回环 Host
+// 闸覆盖（server/http-hardening.js loopbackHostGate）。
 function importEndpointMiddleware({ petsRoot, stagingRoot } = {}) {
   const staging = stagingRoot || DEFAULT_STAGING_ROOT;
   return (req, res) => {
@@ -357,7 +384,7 @@ function importEndpointMiddleware({ petsRoot, stagingRoot } = {}) {
       const r = importPetPack({
         sourceDir, targetRoot: petsRoot,
         id, source: sourceUrl, author, license, force: !!force,
-        ackUnknownLicense: !!ackUnknownLicense,
+        ackUnknownLicense: ackUnknownLicense === true, // 只认布尔 true（低-f）
       });
       return res.json(r);
     } catch (e) {

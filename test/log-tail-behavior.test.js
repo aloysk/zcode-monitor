@@ -182,7 +182,14 @@ test('A0-5 todayLogFile: UTC 日命名映射（zcode-YYYY-MM-DD.jsonl，落在�
 });
 
 test('A0-5 defaultTodayFile: 取目录内字典序最新的匹配名（非日期名干扰项不参与）', () => {
-  // fixture 此刻已含 TODAY/YESTERDAY 与 zcode-not-a-date.txt（上文写入）：
+  // 幂等自备所需文件（低-k）：不依赖前序用例的落盘顺序，缺席才补写——
+  // 已存在的内容（前序用例写入的事件行）原样保留，不覆写。
+  for (const n of [TODAY, YESTERDAY]) {
+    if (!fs.existsSync(path.join(fxLogDir, n))) fs.writeFileSync(path.join(fxLogDir, n), '{"a":1}\n');
+  }
+  if (!fs.existsSync(path.join(fxLogDir, 'zcode-not-a-date.txt'))) {
+    fs.writeFileSync(path.join(fxLogDir, 'zcode-not-a-date.txt'), 'x');
+  }
   // 名字最新的匹配文件是 TODAY，干扰项不构成候选。
   assert.equal(log.defaultTodayFile(), path.join(fxLogDir, TODAY));
   // 再放一个名字更大的匹配文件后立即切换（本地日命名下"最新名"同理）
@@ -211,8 +218,7 @@ test('A0-5 defaultTodayFile: LOG_DIR 不可读（readdir 抛错）→ 回退 tod
   assert.equal(out, 'SAME', 'readdir 失败时回退 UTC 日映射: ' + out);
 });
 
-test('A0-5 tailLog/eventsForTrace 跟随名字最新文件（本地日命名跨本地午夜也可见）', async () => {
-  // ZCode 实测按本地日命名轮转（docs/acceptance/T6-latency-samples.md §4）：本地
+test('A0-5 tailLog/eventsForTrace 跟随名字最新文件（本地日命名跨本地午夜也可见）', async () => {  // ZCode 实测按本地日命名轮转（docs/acceptance/T6-latency-samples.md §4）：本地
   // 00:00-08:00 期间 UTC 名（todayLogFile）是"昨天"，只有名字最新语义能追上真实
   // 活跃文件。用本地日 +2 天构造必然大于 UTC 今日名的文件名（任何时区下本地日期
   // ≥ UTC 日期 − 1，+2 后必严格更大）。
@@ -233,5 +239,55 @@ test('A0-5 tailLog/eventsForTrace 跟随名字最新文件（本地日命名跨�
     assert.equal((await log.eventsForTrace('trX')).length, 2, '窗口恰为最新两个名字');
   } finally {
     fs.rmSync(path.join(fxLogDir, localLater));
+  }
+});
+
+// 高-B 回归（R2）：watcher 已在最新名文件上锚定后，名字回归到旧文件、而该
+// 文件在 readdir→stat 窗口内被删除——ENOENT seenBefore 分支必须复位锚定态，
+// 复活后按 size 补锚定；若沿用旧文件的已锚定标记（R1 缺陷），复活文件会从
+// offset=0 整文件回放（评审复现投递 [3,0,1,2,3,4]）。缺省解析走 defaultTodayFile
+//（seenFiles 即 readdir 证据），todayFile 包装器做名字回归，statFile seam 在
+// readdir→stat 窗口删文件。
+test('A3-watch 复活: 回归锚定窗内文件被删 → 复活后按 size 补锚定，仅新增行可见', async () => {
+  const A = 'zcode-2099-12-30.jsonl';
+  const B = 'zcode-2099-12-31.jsonl';
+  const aPath = path.join(fxLogDir, A);
+  const bPath = path.join(fxLogDir, B);
+  fs.writeFileSync(aPath, [0, 1, 2].map(i => JSON.stringify({ i })).join('\n') + '\n'); // 旧名文件（回归目标）
+  fs.writeFileSync(bPath, '{"i":0}\n');                                                // 最新名文件（启动锚定）
+  const got = [];
+  let phase = 0; // 0=缺省（最新名 B）；1=名字回归（A）
+  let killA = true;
+  // 生产形态的 todayFile 就是 defaultTodayFile 本身（seenFiles 是 readdir 证据的
+  // 载体）；包装器须透传该证据，否则被测分支读不到 seenBefore。
+  const todayWrapper = () => (phase === 1 ? aPath : log.defaultTodayFile());
+  todayWrapper.seenFiles = log.defaultTodayFile.seenFiles;
+  const w = log.createLogWatcher({
+    reconcileMs: 100,
+    todayFile: todayWrapper,
+    statFile: (p) => {
+      // A 首次被 stat 时删除它：此前 pump 的 readdir 已把 A 记入 seenFiles，
+      // 回归换名的锚定 stat 落在删除之后 → ENOENT + seenBefore
+      if (killA && p === aPath) { killA = false; fs.rmSync(aPath); }
+      return fs.statSync(p);
+    },
+    onEvents: evs => got.push(...evs),
+  });
+  try {
+    await sleep(300); // 锚定 B（预置行不投递）
+    fs.appendFileSync(bPath, JSON.stringify({ i: 3 }) + '\n');
+    assert.ok(await waitFor(() => got.some(e => e.i === 3), 5000), 'B 上已锚定并续读');
+    phase = 1; // 名字回归到 A：A 在锚定 stat 窗口内被删（ENOENT + seenBefore）
+    await sleep(350);
+    assert.ok(!got.some(e => e.i === 0 || e.i === 1 || e.i === 2), '被删文件不产生任何投递');
+    fs.writeFileSync(aPath, [0, 1, 2].map(i => JSON.stringify({ i })).join('\n') + '\n'); // 同名复活（旧内容形态）
+    await sleep(350); // 复活后按当刻 size 补锚定（R1 缺陷形态：从 0 回放 [0,1,2]）
+    fs.appendFileSync(aPath, JSON.stringify({ i: 4 }) + '\n');
+    assert.ok(await waitFor(() => got.some(e => e.i === 4), 5000), '补锚定后的新增行可见');
+    assert.deepEqual(got.map(e => e.i), [3, 4], '复活文件仅新增行可见，旧内容不回放');
+  } finally {
+    w.stop();
+    fs.rmSync(aPath, { force: true });
+    fs.rmSync(bPath, { force: true });
   }
 });

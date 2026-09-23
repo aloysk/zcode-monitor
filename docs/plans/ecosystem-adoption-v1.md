@@ -569,6 +569,8 @@ zcode-monitor-plan/
 
 ## T2：宠物包一键导入（WP1）——可与 T3 并行
 
+> **接口漂移注记（R1/R2 加固轮，2026-09-22 追记）**：本文 Interfaces 所列签名按后续加固轮演进，实施以 `server/pet-import.js` 当前导出为准——`importEndpointMiddleware({ petsRoot, stagingRoot })` 的 `body.source` 收敛为 **staging 内包目录名**（`--staging` 可换根；路径形态由 CLI 解析），新增 `author` / `force` / `ackUnknownLicense`（许可证缺失或 unknown 需显式确认，R2 起只认布尔 `true`）参数；`importPetPack` 同步新增 `ackUnknownLicense`，复制改为**白名单**（pet.json / 精灵图 / NOTICE / README·LICENSE 纯文本，其余跳过并告警 `extra_files_skipped`），并新增 `SHEET_TOO_LARGE` / `SOURCE_TOO_LARGE` / `LICENSE_UNKNOWN` 错误码与 32MB / 2000 条目资源上限。PetImportError 取值与测试同步扩展（`test/pet-import.test.js`）。
+
 **Files:**
 - Create: `server/pet-import.js`（共享模块：校验 + 落位 + NOTICE + 发现逻辑 + 端点中间件）
 - Create: `tools/import-pet.js`（CLI）

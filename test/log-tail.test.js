@@ -252,9 +252,11 @@ test('A3-7: 文件截断改写后新行可见、无重复（偏移守恒兜底�
 });
 
 // 文件名回退不回放：readdir 失败时 defaultTodayFile 会回退 UTC 名（字典序可能
-// 小于本地日名）——名字变小的换名不是日切换，按 size 锚定；名字跳回最新（回归
-// 到读过的文件）同样锚定，已投递过的内容不得二次回放。
-test('A3-8: 文件名回退/回归不整文件回放（只有名字更新且从未读过才从 0 起读）', async () => {
+// 小于本地日名）——名字变小的换名不是日切换，按已读偏移续读；名字跳回最新
+// （回归到读过的文件）从 min(已读偏移, 当前 size) 续读：回退窗口内写入的行
+// 由此补投递、不重复。回归后的追加用重试式（竞态窗口内锚定可能恰好落在追加
+// 之后把该行锚掉——换下一个 id 重试，不用固定 sleep 猜窗口）。
+test('A3-8: 文件名回退/回归不整文件回放（回退窗口内的写入回归后补投递）', async () => {
   const { root, logDir } = makeLogRoot('zcmon-back-');
   const dNew = path.join(logDir, 'zcode-2026-09-23.jsonl');
   const dOld = path.join(logDir, 'zcode-2026-09-22.jsonl');
@@ -273,13 +275,55 @@ test('A3-8: 文件名回退/回归不整文件回放（只有名字更新且从�
     fs.appendFileSync(dNew, JSON.stringify({ i: 10, day: 1 }) + '\n');
     await waitFor(() => got.some(e => e.i === 10), 10000);
     useNew = false; // 名字回退（dOld < dNew）：dOld 的 3 行历史不得投递
+    fs.appendFileSync(dNew, JSON.stringify({ i: 11, day: 1 }) + '\n'); // 回退窗口内 dNew 的新写入
     await sleep(400);
-    useNew = true;  // 名字跳回 dNew（读过的文件回归）：从 size 锚定，4+10 行历史不得回放
-    await sleep(400); // 等 pump 完成回归锚定，再追加验证续读（否则锚定恰好落在追加之后会锚掉该行）
-    fs.appendFileSync(dNew, JSON.stringify({ i: 11, day: 1 }) + '\n');
+    assert.ok(!got.some(e => e.day === 0), '回退窗口读的是旧名文件，其历史不投递');
+    useNew = true;  // 名字跳回 dNew（读过的文件回归）：从已读偏移续读
+    await sleep(400); // 等 pump 完成回归续读（低-c：窗口内写入的 i:11 在此补投递）
+    const saw11 = await waitFor(() => got.some(e => e.i === 11), 5000);
+    assert.ok(saw11, '回退窗口内写入的行在回归后补投递（不丢）');
+    // 回归后的续读验证用重试式追加：锚定若恰好落在追加之后会锚掉该行，换 id 重试
+    let seen = null;
+    for (const id of [12, 13, 14]) {
+      fs.appendFileSync(dNew, JSON.stringify({ i: id, day: 1 }) + '\n');
+      if (await waitFor(() => got.some(e => e.i === id), 3000)) { seen = id; break; }
+    }
+    assert.ok(seen != null, '回归后的追加（重试式）必须可见');
+    await sleep(250); // 再过几轮对账：确认无重复
+    assert.deepEqual([...new Set(got.map(e => e.i))], got.map(e => e.i), '无重复投递');
+    assert.deepEqual(got.map(e => e.i).sort((a, b) => a - b), [10, 11, seen], '只投递新增行，无任何回放');
+  } finally {
+    w.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+    assert.equal(fs.existsSync(root), false, 'A0-7: 临时目录已清理'); // 守护断言
+  }
+});
+
+// 增量路径的同名删除重建：曾读过的文件消失（regular stat ENOENT）即置「待重
+// 锚定」，重建后按当刻 size 锚定——重建文件与旧文件无身份连续性，从旧 offset
+// 续读/截断重读都会整段重放旧内容。
+test('A3-9: 增量路径中同名删除重建不整段重放（重建后按 size 重锚定）', async () => {
+  const { root, logDir } = makeLogRoot('zcmon-delre-');
+  const file = path.join(logDir, 'zcode-2026-09-23.jsonl');
+  fs.writeFileSync(file, Array.from({ length: 3 }, (_, i) => JSON.stringify({ i })).join('\n') + '\n');
+  const got = [];
+  const w = log.createLogWatcher({
+    todayFile: () => file,
+    reconcileMs: 100,
+    onEvents: evs => got.push(...evs),
+  });
+  try {
+    await sleep(300); // 锚定（历史 3 行不投递）
+    fs.appendFileSync(file, JSON.stringify({ i: 10 }) + '\n');
+    await waitFor(() => got.some(e => e.i === 10), 10000); // 已读到 i:10（fileKnown）
+    fs.rmSync(file); // 删除：regular stat ENOENT → 待重锚定
+    await sleep(300);
+    fs.writeFileSync(file, '{"i":0}\n{"i":1}\n'); // 重建为更短内容（截断形态）
+    await sleep(350); // 重锚定窗口
+    fs.appendFileSync(file, JSON.stringify({ i: 11 }) + '\n');
     await waitFor(() => got.some(e => e.i === 11), 10000);
-    await sleep(350);
-    assert.deepEqual(got.map(e => e.i), [10, 11], '回退/回归期间只投递新增行，无任何回放');
+    await sleep(250);
+    assert.deepEqual(got.map(e => e.i), [10, 11], '重建文件的旧内容不重放，仅新增行可见');
   } finally {
     w.stop();
     fs.rmSync(root, { recursive: true, force: true });

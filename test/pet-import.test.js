@@ -138,21 +138,32 @@ test('字段缺失：NOTICE 留占位、结果带三类警告、导入不阻断�
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('许可证缺失/unknown：缺省拒绝（LICENSE_UNKNOWN），显式 ack 后放行且仍告警', () => {
+test('许可证缺失/unknown/自报无授权：缺省拒绝（LICENSE_UNKNOWN），显式 ack（=== true）后放行', () => {
   const root = tmp('lic');
   try {
     const targetRoot = path.join(root, 'pets');
-    for (const lic of [undefined, '', 'unknown', 'UNKNOWN']) {
+    // 占位 unknown 与自报无授权的常见写法都走确认门
+    for (const lic of [undefined, '', 'unknown', 'UNKNOWN', 'unlicensed', 'none', 'n/a']) {
       assert.throws(
         () => importPetPack({ sourceDir: makePack(root, {}), targetRoot, license: lic }),
         e => e instanceof PetImportError && e.code === 'LICENSE_UNKNOWN' && e.message.includes('--ack-unlicensed'),
         `缺省拒绝: license=${JSON.stringify(lic)}`);
     }
     assert.equal(fs.existsSync(targetRoot), false, '拒绝路径零落位');
-    const r = importPetPack({ sourceDir: makePack(root, {}), targetRoot,
+    // ack 只认布尔 true：宽松真值（"false" 字符串）不得视作确认
+    assert.throws(
+      () => importPetPack({ sourceDir: makePack(root, {}), targetRoot, ackUnknownLicense: 'false' }),
+      e => e instanceof PetImportError && e.code === 'LICENSE_UNKNOWN',
+      'ackUnknownLicense="false" 不是确认');
+    const r = importPetPack({ sourceDir: makePack(root, {}), targetRoot, id: 'lic-ack',
       license: 'unknown', ackUnknownLicense: true });
     assert.equal(r.ok, true);
     assert.ok(r.warnings.includes('license_missing'));
+    // 自报的具体许可证是事实性元数据：不需确认，照 NOTICE 记录
+    const r2 = importPetPack({ sourceDir: makePack(root, {}), targetRoot, id: 'lic-mit',
+      license: 'MIT' });
+    assert.equal(r2.ok, true);
+    assert.ok(!r2.warnings.includes('license_missing'));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -164,19 +175,42 @@ test('导入白名单：夹带的 .html/.svg/未知名文件不落位，记 extr
     fs.writeFileSync(path.join(src, 'preview.html'), '<script>fetch("/api/raw")</script>');
     fs.writeFileSync(path.join(src, 'icon.svg'), '<svg onload="alert(1)"></svg>');
     fs.writeFileSync(path.join(src, 'meta.db'), 'x');
+    fs.writeFileSync(path.join(src, 'README.html'), '<script>evil</script>'); // 前缀匹配但非纯文本扩展名
+    fs.writeFileSync(path.join(src, 'README.ja.md'), 'readme'); // README*.md 白名单形态
+    fs.writeFileSync(path.join(src, 'LICENSE'), 'MIT license'); // 裸名 LICENSE 白名单形态
     fs.mkdirSync(path.join(src, 'extras'));
     fs.writeFileSync(path.join(src, 'extras', 'bonus.txt'), 'x');
-    fs.writeFileSync(path.join(src, 'README.ja.md'), 'readme'); // README* 白名单形态
     const r = importPetPack({ sourceDir: src, targetRoot: path.join(root, 'pets'),
       license: 'MIT' });
     assert.equal(r.ok, true);
     assert.deepEqual(fs.readdirSync(r.dir).sort(),
-      ['NOTICE.md', 'README.ja.md', 'pet.json', 'spritesheet.webp']);
+      ['LICENSE', 'NOTICE.md', 'README.ja.md', 'pet.json', 'spritesheet.webp']);
     assert.ok(r.warnings.includes('extra_files_skipped'), '告警: ' + r.warnings.join(','));
-    assert.ok(r.skippedFiles.includes('preview.html'));
-    assert.ok(r.skippedFiles.includes('icon.svg'));
-    assert.ok(r.skippedFiles.includes('meta.db'));
-    assert.ok(r.skippedFiles.includes('extras'), '非白名单子目录整树跳过');
+    for (const skipped of ['preview.html', 'icon.svg', 'meta.db', 'README.html', 'extras']) {
+      assert.ok(r.skippedFiles.includes(skipped), `须跳过: ${skipped}`);
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('资源上限：spritesheet 超 32MB 或来源条目超 2000 拒绝（同步复制路径的冻结防线）', () => {
+  const root = tmp('cap');
+  try {
+    const targetRoot = path.join(root, 'pets');
+    // 超大 sheet：合法 VP8X 头 + 填充到 >32MB（checkSheet 只读头部，体积走 stat）
+    const big = Buffer.concat([vp8xSheet(LEGAL.w, LEGAL.h), Buffer.alloc(32 * 1024 * 1024)]);
+    assert.ok(big.length > 32 * 1024 * 1024, '夹具须超上限');
+    const srcBig = makePack(root, { webp: big });
+    assert.throws(
+      () => importPetPack({ sourceDir: srcBig, targetRoot, license: 'MIT' }),
+      e => e instanceof PetImportError && e.code === 'SHEET_TOO_LARGE');
+
+    // 巨型目录树：2001 个条目
+    const srcMany = makePack(root, {});
+    for (let i = 0; i < 2001; i++) fs.writeFileSync(path.join(srcMany, `f${i}.txt`), 'x');
+    assert.throws(
+      () => importPetPack({ sourceDir: srcMany, targetRoot, license: 'MIT' }),
+      e => e instanceof PetImportError && e.code === 'SOURCE_TOO_LARGE');
+    assert.equal(fs.existsSync(targetRoot), false, '上限拒绝路径零落位');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

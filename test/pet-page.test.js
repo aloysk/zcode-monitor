@@ -41,6 +41,14 @@ test('契约: widget.html 的 gen 分派显式处理 tool_error（不把它当 e
     'widget 的 gen 事件分派必须显式认得 tool_error phase（livegen 在同一条 SSE 上发射）');
 });
 
+test('契约: pets-preview 的 LICENSE_UNKNOWN 走 confirm 知情确认后带 ack 重试', () => {
+  const html = readPage('pets-preview.html');
+  assert.ok(html.includes("j.error === 'LICENSE_UNKNOWN'"), '识别许可证未知错误码');
+  assert.ok(/window\.confirm\(/.test(html), '导入前弹出知情确认');
+  assert.ok(html.includes('importPack(source, true)'), '确认后带确认位重试');
+  assert.ok(html.includes('ackUnknownLicense: !!ackUnknownLicense'), '确认位随请求体传入');
+});
+
 test('契约: pet.html 内联脚本可编译（无构建器，页面即交付物）', () => {
   const html = readPage('pet.html');
   // 枚举所有 <script> 开标签（含带属性形态），跳过外链 src 后逐段编译内联脚本：

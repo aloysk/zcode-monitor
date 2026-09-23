@@ -31,7 +31,7 @@
 -  **推理可视化** —— 思考型模型的推理链单独呈现，与最终回答分开，点击展开。
 - ️ **原始数据查看器** —— 直接查任意 SQLite 表（`where` / `order` / 降序，JSON 列可展开）。
 -  **双主题** —— Dark（默认）/ Light，三种切换方式。
-- 🐾 **宠物一键导入** —— Codex 格式宠物包（`pet.json + spritesheet.webp`）一键导入，导入时校验 sheet 尺寸 / 行数 / JSON 健全性并生成 NOTICE；CLI（`node tools/import-pet.js <包目录>`）、API（`POST /api/pets/import`）与图鉴页（`pets-preview.html`）三个入口共用同一校验模块。
+- 🐾 **宠物一键导入** —— Codex 格式宠物包（`pet.json + spritesheet.webp`）一键导入，导入时校验 sheet 尺寸 / 行数 / JSON 健全性并生成 NOTICE，且**按白名单复制**（只带走 pet.json / 精灵图 / NOTICE / README·LICENSE 文本，`.html`/`.svg` 等一律跳过并告警）；许可证缺失或未知的包**缺省拒绝导入**，需显式确认（CLI `--ack-unlicensed`、图鉴页确认弹窗、API `ackUnknownLicense: true`）；CLI（`node tools/import-pet.js <包目录>`）、API（`POST /api/pets/import`）与图鉴页（`pets-preview.html`）三个入口共用同一校验模块。
 - ⚡ **fs.watch 实时增强** —— 日志目录 `fs.watch` 监听 + 字节偏移增量解析，JSONL 追加即触发、大幅降低日志尾部发现延迟；watch 失败自动降级短轮询，周期偏移对账兜底，事件不丢不重。
 - ✅ **测试套件** —— Node 内置 `node:test`（零新依赖），`npm test` 一键运行；fixture 全部落 `os.tmpdir()`，与真实库完全隔离。
 -  **全程只读** —— 不改 ZCode 一行数据。
@@ -151,6 +151,8 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
 目录存在与否都属于正常的自查结果：目录存在仅说明本机生成了快照数据，不足以据此推断云端行为。
 
 监控读路径对 `~/.zcode/` 全程只读。唯一例外是 WAL checkpoint 功能（ZCode 退出后自动折叠，或经 `/api/checkpoint` 手动触发）：它以短时可写连接执行 `wal_checkpoint(TRUNCATE)`，只把 WAL 日志折叠进主库、清空 `-wal` 文件，不改变任何数据行内容。
+
+安全姿态（与隐私相关的部分）：面板无鉴权、默认只绑 `127.0.0.1`，全部 `/api` 仅接受回环 Host（`127.0.0.1` / `localhost`，防 DNS rebinding 整库转录）；全站下发 CSP 与 `X-Content-Type-Options: nosniff`，前端脚本零外联（Chart.js 已本地化到 `public/assets/`，仅 pet/widget 两页保留 Google Fonts 字体 CSS 外联，见 `docs/acceptance/residuals.md`）；`/pets` 静态目录内非图片一律强制下载，导入夹带的页面类文件无法以面板同源执行。手动 checkpoint 的拒绝语义：WAL 近 60s 内有写入 → `409 wal_active`（`?force=1` 也不越过，绝不与真实写入方抢锁）；探测显示 ZCode 运行中 → `409 zcode_running`（`?force=1` 可越过）；锁竞争 → `503 checkpoint_busy`（可重试）。
 
 ## 故障排查
 

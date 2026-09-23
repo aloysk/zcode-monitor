@@ -9,6 +9,8 @@ const express = require('express');
 const dbq = require('./db');
 const { createGenWatcher } = require('./livegen');
 const runtime = require('./zcode-runtime');
+const { loopbackHostGate, securityHeaders, petsStaticOptions } = require('./http-hardening');
+const { makeCheckpointRoute } = require('./checkpoint-route');
 const overview = require('./routes/overview');
 const sessions = require('./routes/sessions');
 const trace = require('./routes/trace');
@@ -35,28 +37,13 @@ const PETS_STAGING_ROOT = path.join(__dirname, '..', 'tools', 'pets-staging');
 const app = express();
 app.use(express.json());
 
-// 全站安全响应头：
-// - X-Content-Type-Options: nosniff —— 阻止浏览器对响应体做 MIME 嗅探（无它时
-//   一个被当 text/plain 下发的文件仍可能被嗅成 HTML 执行）。
-// - CSP —— 把页面的可执行面钉死在自身来源。本仓前端为无构建器的内联形态，
-//   script/style 需 'unsafe-inline'（无 nonce 基建，务实取舍）；仅有的两处外联
-//   显式列白：Chart.js（jsdelivr，index.html）与字体 CSS（fonts.googleapis.com，
-//   字体文件在 fonts.gstatic.com）。SSE/fetch 全部同源（connect-src 'self'）。
-const CSP = [
-  "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-  "font-src 'self' https://fonts.gstatic.com",
-  "img-src 'self' data:",
-  "connect-src 'self'",
-  "object-src 'none'",
-  "base-uri 'self'",
-].join('; ');
-app.use((_req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Security-Policy', CSP);
-  next();
-});
+// 全站安全响应头（CSP / nosniff，构成见 server/http-hardening.js）。
+app.use(securityHeaders);
+
+// /api 全局回环 Host 闸（防 DNS rebinding）：面板无鉴权，读 API 面大（整库
+// 转录），rebinding 下唯一可靠的判别就是 Host 头形态。本机 UI/壳都从
+// 127.0.0.1（或 localhost）加载，不受影响。
+app.use('/api', loopbackHostGate);
 
 // tiny request logger
 app.use((req, _res, next) => {
@@ -105,6 +92,8 @@ const PROBE_MIN_INTERVAL_MS = 30 * 1000; // 探测节流 ≥ 单次子进程延�
 const WAL_ACTIVE_WINDOW_MS = 60 * 1000;  // -wal 静默不足此时长即视为 writer 在场
 let lastProbeAt = 0;
 
+let checkpointRetryPending = false; // 上次自动 checkpoint 因 busy 未完成：下个探测周期（仍判定未运行时）重试一次
+
 function pollZCodeRuntime() {
   if (Date.now() - lastProbeAt < PROBE_MIN_INTERVAL_MS) return; // 结果沿用上次
   lastProbeAt = Date.now();
@@ -119,11 +108,16 @@ function pollZCodeRuntime() {
     runtimeState.running = running;
 
     // Transition: running → stopped → fold the WAL so history stays readable.
-    if (wasRunning && !running) {
+    // Also retry once per probe cycle after a busy attempt: the one-shot
+    // transition would otherwise give up forever on a transient lock.
+    const shouldCheckpoint = (wasRunning && !running)
+      || (checkpointRetryPending && !running);
+    if (shouldCheckpoint) {
       console.log('[runtime] ZCode exited — checkpointing WAL to preserve history…');
       const before = runtime.walStatus(dbq.DB_PATH);
       const result = runtime.checkpointNow(dbq.DB_PATH);
-      if (result.ok) {
+      checkpointRetryPending = !!(result.ok && result.busy === 1); // busy=1：锁被占，下个周期再试一次
+      if (result.ok && !checkpointRetryPending) {
         const after = result.after;
         runtimeState.lastCheckpoint = {
           at: new Date().toISOString(),
@@ -134,14 +128,16 @@ function pollZCodeRuntime() {
         };
         console.log(`[runtime] checkpoint done: WAL ${before ? before.walBytes : '?'} → ${after ? after.walBytes : '?'} bytes`);
       } else {
-        runtimeState.lastCheckpoint = { at: new Date().toISOString(), ok: false, error: result.error };
-        console.warn(`[runtime] checkpoint failed: ${result.error}`);
+        runtimeState.lastCheckpoint = { at: new Date().toISOString(), ok: false,
+          error: checkpointRetryPending ? 'checkpoint_busy' : result.error, retryable: true };
+        console.warn(`[runtime] checkpoint ${checkpointRetryPending ? 'busy（下个探测周期重试一次）' : 'failed'}: ${result.error || 'lock busy'}`);
       }
       // Drop our read-only connection cache so the next read sees the folded db.
       dbq.invalidateDb();
     }
   });
 }
+
 
 // initial probe (async, doesn't block boot; don't checkpoint at boot — ZCode
 // may already be down and that's fine)
@@ -150,47 +146,15 @@ setInterval(pollZCodeRuntime, 5000);
 
 // Manual checkpoint endpoint (for a "preserve now" button). Refuses to run
 // while ZCode is running to avoid contending with its writer (unless ?force=1).
-app.get('/api/checkpoint', (req, res) => {
-  // 执行前即时否决（硬证据优先）：runtimeState.running 最多 ~37s 陈旧（探测节流
-  // 30s + tasklist 单次 4-7s），而 -wal 近期有写入即真实 writer 在场的直接证据——
-  // force 也不越过这道闸（「绝不与真实 writer 抢锁」是本模块的不变量）。
-  const idle = runtime.walIdleMs(dbq.DB_PATH);
-  if (idle != null && idle < WAL_ACTIVE_WINDOW_MS) {
-    return res.status(409).json({
-      ok: false,
-      error: 'wal_active',
-      message: `WAL 最近 ${Math.round(idle / 1000)}s 内有写入（真实 writer 在场），拒绝 checkpoint。请待写入静默后再试。`,
-    });
-  }
-  if (runtimeState.running && !req.query.force) {
-    return res.status(409).json({
-      ok: false,
-      error: 'zcode_running',
-      message: 'ZCode 正在运行，无法安全 checkpoint。请先关闭 ZCode，或加 ?force=1 强制（可能短暂抢锁）。',
-    });
-  }
-  const before = runtime.walStatus(dbq.DB_PATH);
-  const result = runtime.checkpointNow(dbq.DB_PATH);
-  if (result.ok && result.busy === 1) {
-    // busy_timeout 已降为短等待（zcode-runtime.checkpointNow）：抢不到锁立即
-    // 如实上报可重试，而不是同步阻塞事件循环长等。
-    return res.status(503).json({
-      ok: false,
-      error: 'checkpoint_busy',
-      message: '数据库锁被占用，checkpoint 未完成。请稍后重试。',
-      retryable: true,
-    });
-  }
-  if (result.ok) {
-    dbq.invalidateDb();
-    runtimeState.lastCheckpoint = {
-      at: new Date().toISOString(), ok: true,
-      walBefore: before ? before.walBytes : null,
-      walAfter: result.after ? result.after.walBytes : null,
-    };
-  }
-  res.json(result);
-});
+// 闸逻辑在 server/checkpoint-route.js（三分支：409 wal_active / 409 zcode_running /
+// 503 checkpoint_busy / 200 放行），依赖注入便于测试挂载。
+app.get('/api/checkpoint', makeCheckpointRoute({
+  dbPath: dbq.DB_PATH,
+  runtime,
+  runtimeState,
+  activeWindowMs: WAL_ACTIVE_WINDOW_MS,
+  onSuccess: () => dbq.invalidateDb(),
+}));
 
 app.get('/api/health', (_req, res) => {
   let ok = false, error = null;
@@ -252,19 +216,9 @@ app.use((err, _req, res, next) => {
 });
 
 // /pets 静态服务收紧（须挂在与下面通用的 express.static 之前，注册顺序即命中
-// 顺序）：本仓精灵图全部是 spritesheet.webp，目录内其余类型（pet.json/NOTICE.md，
-// 或任何经手工放入的白名单外文件）一律以 octet-stream + attachment 下发——即使
-// 有可执行面（.html/.svg）混进 public/pets，也不能再以面板同源在浏览器里执行。
-// SVG 有脚本载体能力，不按图片放行（精灵管线只产 webp）。
-const PETS_RASTER_RE = /\.(webp|png|gif|jpe?g)$/i;
-app.use('/pets', express.static(PETS_ROOT, {
-  setHeaders(res, filePath) {
-    if (!PETS_RASTER_RE.test(filePath)) {
-      res.setHeader('Content-Type', 'application/octet-stream');
-      res.setHeader('Content-Disposition', 'attachment');
-    }
-  },
-}));
+// 顺序；构成见 server/http-hardening.js petsStaticOptions）：非图片一律
+// octet-stream + attachment，可执行面即使混进 public/pets 也不能以面板同源执行。
+app.use('/pets', express.static(PETS_ROOT, petsStaticOptions()));
 
 // static frontend
 app.use(express.static(path.join(__dirname, '..', 'public')));
