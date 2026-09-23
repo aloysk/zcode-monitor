@@ -29,6 +29,27 @@ test('装配契约：全站安全头 → /api 回环 Host 闸 → 全部 API 路
     const pos = firstIndexOf(new RegExp(`app\\.use\\('/api/${route}'`), `/api/${route} 路由`);
     assert.ok(gate < pos, `/api/${route} 须挂在 Host 闸之后`);
   }
+  // POST /api/restart（自重启）：rebinding 同源页带自定义首部过首部闸后，Host
+  // 闸是唯一防线，且它是破坏力最大的端点——显式钉住（首轮测试席）。
+  const restart = firstIndexOf(/app\.post\('\/api\/restart'/, 'POST /api/restart（自重启）');
+  assert.ok(gate < restart, '/api/restart 须挂在 Host 闸之后——挂晚则 rebinding 同源页可触发重启');
+  // express.json 须在闸后且只挂 /api：闸前解析会让恶意 Host + 畸形 JSON 落
+  // body-parser 含栈 400（首轮安全席）；全局挂载则让任意网页向非 /api 路径
+  // 跨站 POST 垃圾 JSON 换含栈响应——唯一读 body 的端点是 /api/pets/import
+  //（二轮安全席 SEC-004）。
+  const jsonParser = firstIndexOf(/app\.use\('\/api', express\.json\(\)\)/, "/api 作用域 express.json");
+  assert.ok(gate < jsonParser, 'express.json 须挂在 /api Host 闸之后（闸只读头，先闸后解析）');
+  // 负钉：不得再出现全局 body 解析（作用域钉 + 负钉双保险，未来加全局解析
+  // 即 SEC-004 复活而作用域钉照绿——三轮测试席）
+  assert.ok(!/^app\.use\(express\.json\(\)\)/m.test(src), '禁止全局挂载 body 解析（须 /api 作用域）');
+  // 终端错误消毒器（4xx/5xx 都不回栈）必须是最后注册的错误处理器：挂早了
+  //（曾挂在 SPA fallback 之前）则 fallback 的 sendFile 错误仍落 finalhandler
+  // 含栈响应（三轮安全席 SEC-006，Range 请求实测复现）。
+  const sanitizer = firstIndexOf(/app\.use\(\(err, _req, res, _next\) =>/, '终端错误消毒器');
+  const translator = firstIndexOf(/app\.use\(makeErrorTranslator\(/, 'makeErrorTranslator 错误翻译中间件');
+  assert.ok(translator < sanitizer, '终端错误消毒器须晚于 makeErrorTranslator');
+  const spa2 = firstIndexOf(/app\.get\(\s*\/\^\\\/\(\?!api\)/, 'SPA fallback');
+  assert.ok(spa2 < sanitizer, '终端错误消毒器须晚于 SPA fallback——挂早则 fallback 错误绕过消毒');
 });
 
 test('装配契约：/pets 收紧 static 先于通用 static（注册序即命中序）', () => {

@@ -39,15 +39,23 @@ const PETS_ROOT = path.join(__dirname, '..', 'public', 'pets');
 const PETS_STAGING_ROOT = path.join(__dirname, '..', 'tools', 'pets-staging');
 
 const app = express();
-app.use(express.json());
 
 // 全站安全响应头（CSP / nosniff，构成见 server/http-hardening.js）。
+// 挂在最前：Host 闸的 403 响应也要带全套安全头。
 app.use(securityHeaders);
 
 // /api 全局回环 Host 闸（防 DNS rebinding）：面板无鉴权，读 API 面大（整库
 // 转录），rebinding 下唯一可靠的判别就是 Host 头形态。本机 UI/壳都从
-// 127.0.0.1（或 localhost）加载，不受影响。
+// 127.0.0.1（或 localhost）加载，不受影响。挂在 express.json 之前（闸只读
+// 头）：否则恶意 Host + 畸形 JSON body 会先落 body-parser 的含栈 400，把
+// 框架内部路径泄给 rebinding 页（首轮安全席实锤，重排即闭）。
 app.use('/api', loopbackHostGate);
+
+// body 解析只挂 /api：唯一读 body 的端点是 POST /api/pets/import，非 /api
+// 路径无 POST 路由——全局挂载会让任意网页向 /widget 等路径跨站 POST 垃圾
+// JSON，换来 body-parser/finalhandler 的含栈 400+stderr 栈（二轮安全席
+// SEC-004 实锤，同族残余一并闭合）。
+app.use('/api', express.json());
 
 // tiny request logger
 app.use((req, _res, next) => {
@@ -279,6 +287,20 @@ app.get(/^\/(?!api).*/, (_req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
+// 终端错误消毒器（兜底，必须最后注册——Express 错误处理器只罩住注册在它
+// 之前的路由/中间件：挂在 SPA fallback 之前时，fallback 的 sendFile 错误
+// （如恶意 Range 头的 416）仍落 finalhandler 的含栈响应，SEC-004 只闭了一半
+//（三轮安全席 SEC-006 以 Range 请求实测复现）。4xx 回通用 JSON 不回栈；
+// 5xx 记栈到服务端 stderr（companion 模式下随 NUL 丢——R-17 已登记该边界）
+// 后回通用 500。
+app.use((err, _req, res, _next) => {
+  const status = err && err.status >= 400 && err.status < 500 ? err.status : 500;
+  if (status >= 500) console.error('[error]', err && err.stack ? err.stack : err);
+  res.status(status).json(status >= 500
+    ? { error: 'internal', message: '服务内部错误（详情见服务端日志）。' }
+    : { error: 'bad_request', message: '请求不合法。' });
+});
+
 // 接替进程的 listen 延迟：/api/restart 的 child 由 restart-route.js 带
 // ZCODE_RESTART_BOOT_DELAY_MS 启动——旧进程在响应发出后 ~250ms 才退出，
 // 立即 bind 会 EADDRINUSE 即死，延迟 listen 等端口让出（仅重启路径设置，
@@ -296,8 +318,25 @@ const startListen = () => server.listen(PORT, HOST, () => {
     exec(cmd, () => {});
   }
 });
+// listen 失败 previously 是未捕获 'error' 直接崩——接替进程 stdio 收窄后更是
+// 无声死。重启路径（旧进程事件循环被冷查询阻塞时可能迟退）带界重试把「旧迟
+// 退→接替撞死→双亡」变成自愈交接；正常启动维持快速失败 + 可读日志。
+// 预算 65s ≥ 本仓自证的冷阻塞上界（壳注释：真实库首次冷查询可阻塞事件循环
+// ~60s——10s 预算会被最坏交错耗尽然后双亡，二轮失败席 F3）。
+const LISTEN_RETRY_DEADLINE = RESTART_BOOT_DELAY_MS > 0 ? Date.now() + 65 * 1000 : 0;
+let listenRetries = 0;
+server.on('error', (err) => {
+  if (err && err.code === 'EADDRINUSE' && Date.now() < LISTEN_RETRY_DEADLINE) {
+    listenRetries++;
+    console.error(`[restart] 端口仍被旧进程占用（第 ${listenRetries} 次），500ms 后重试 listen…`);
+    setTimeout(startListen, 500);
+    return;
+  }
+  console.error(`listen 失败 ${HOST}:${PORT}: ${err && err.message ? err.message : err}`);
+  process.exit(1);
+});
 if (RESTART_BOOT_DELAY_MS > 0) {
-  console.log(`[restart] delaying listen ${RESTART_BOOT_DELAY_MS}ms (old process releasing the port)`);
+  console.error(`[restart] 延迟 listen ${RESTART_BOOT_DELAY_MS}ms（等旧进程释放端口）`);
   setTimeout(startListen, RESTART_BOOT_DELAY_MS);
 } else {
   startListen();
