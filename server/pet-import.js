@@ -113,8 +113,9 @@ function auditNoSymlinks(rootDir) {
   return seen;
 }
 
-// NOTICE.md（导入生成）：来源 URL、原作者、许可证三字段 + 粉丝自制免责声明模板。
-// 字段缺失写占位（<未提供>/unknown），导入不阻断，warnings 里另行提示。
+// NOTICE.md（导入生成）：来源 URL、原作者、许可证三字段 + 免责声明模板。
+// 字段缺失写占位（<未提供>/unknown）；许可证缺失/unknown 需 ackUnknownLicense
+// 显式确认后导入（见 importPetPack），其余字段缺失仅 warnings 提示。
 // 来源包自带的 NOTICE.md 原样保留在分隔线之后。
 function buildNotice({ id, name, source, author, license, originalNotice = '' }) {
   const lines = [
@@ -122,19 +123,54 @@ function buildNotice({ id, name, source, author, license, originalNotice = '' })
     `- source: ${source || '<未提供>'}`,
     `- author: ${author || '<未提供>'}`,
     `- license: ${license || 'unknown'}`, '',
-    '## 免责声明（粉丝自制素材）', '',
-    '本包为粉丝自制（fan-made）素材，与原作品权利方无任何隶属、合作或背书关系。',
-    '素材版权归原权利人所有；仅限本地个人非商用使用，不得再分发、转售或用于商业用途。',
+    '## 免责声明', '',
+    '本包素材的来源与授权状态未经核实，导入时未确认与原作品权利方存在任何隶属、合作或背书关系。',
+    '素材著作权归原作者/原权利人所有；请在遵守来源许可与当地法律的前提下限于本地个人非商用使用，不得再分发、转售或用于商业用途。',
     '如权利方或其代表不希望该素材被使用，请联系本仓库维护者移除。', '',
   ];
   if (originalNotice) lines.push('---', '', '# 来源包自带 NOTICE（原样保留）', '', originalNotice);
   return lines.join('\n') + '\n';
 }
 
+// 导入白名单：只允许带走这些文件，其余一律跳过并计入 warnings（extra_files_skipped）。
+// staging 包里可能夹带任何文件（下载器残留、预览 .html/.svg 等）——public/ 由
+// express.static 以面板同源（127.0.0.1:7331）直接服务，一个附带页面落进去就等于
+// 在本服务源上落地可执行内容（可读 /api/raw 等并外传）。白名单外文件一律不进
+// public/pets；静态侧另有 /pets 非图片强制 octet-stream+attachment 的第二道防线。
+// README*/LICENSE* 容忍自由格式文件名（README.md/README.ja.txt/LICENSE 等）；
+// spritesheet 允许 pet.json 指定的相对路径（checkSheet 已验证其落在包内且为 webp）。
+const TOP_LEVEL_ALLOW = [/^pet\.json$/i, /^notice\.md$/i, /^readme/i, /^license/i];
+function copyWhitelisted(sourceDir, tmpDir, sheetRel) {
+  const sheetPosix = path.posix.normalize(String(sheetRel).replace(/\\/g, '/'));
+  const sheetDirs = new Set();
+  let acc = '';
+  for (const seg of sheetPosix.split('/').slice(0, -1)) {
+    acc = acc ? acc + '/' + seg : seg;
+    sheetDirs.add(acc);
+  }
+  const allowed = (relPosix, isDir) =>
+    relPosix === sheetPosix
+    || (isDir && sheetDirs.has(relPosix))
+    || (!relPosix.includes('/') && TOP_LEVEL_ALLOW.some(re => re.test(relPosix)));
+  const skipped = [];
+  const walk = (dir, relPosix) => {
+    fs.mkdirSync(relPosix ? path.join(tmpDir, relPosix) : tmpDir, { recursive: true });
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const relChild = relPosix ? relPosix + '/' + e.name : e.name;
+      if (!allowed(relChild, e.isDirectory())) { skipped.push(relChild); continue; }
+      if (e.isDirectory()) walk(path.join(dir, e.name), relChild);
+      else fs.copyFileSync(path.join(dir, e.name), path.join(tmpDir, relChild));
+    }
+  };
+  walk(sourceDir, '');
+  return skipped;
+}
+
 // 导入一个包：先全量校验，再复制到临时目录、写 NOTICE、最后 rename 原子落位。
 // 失败路径清理临时目录，目标根无残留。force 覆盖同名包（旧包先挪到回收名，
 // 落位成功后删除；落位失败回滚恢复旧包）。
-function importPetPack({ sourceDir, targetRoot, id, source, author, license, force = false }) {
+function importPetPack({ sourceDir, targetRoot, id, source, author, license,
+                         force = false, ackUnknownLicense = false }) {
   if (!sourceDir || !fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
     throw new PetImportError('SOURCE_MISSING', `来源目录不存在: ${sourceDir}`);
   }
@@ -149,6 +185,15 @@ function importPetPack({ sourceDir, targetRoot, id, source, author, license, for
     throw new PetImportError('ID_INVALID', `非法包 id（须匹配 [a-z0-9-]+）: ${id}`);
   }
   const { sheetRel } = checkSheet(sourceDir, pet);
+  // 许可证缺失/unknown 需显式确认才放行：导入产物落在以本服务同源静态分发的
+  // public/pets，未核实授权的素材应至少有一次知情确认（API ackUnknownLicense /
+  // CLI --ack-unlicensed）；确认后仍照常生成 license: unknown 占位与警告。
+  const licenseUnknown = !license || String(license).trim().toLowerCase() === 'unknown';
+  if (licenseUnknown && !ackUnknownLicense) {
+    throw new PetImportError('LICENSE_UNKNOWN',
+      '许可证缺失或未知（NOTICE 将记 license: unknown）：导入需显式确认——'
+      + 'API 传 ackUnknownLicense: true，CLI 加 --ack-unlicensed。请先核实来源与授权状态。');
+  }
 
   const targetRootAbs = path.resolve(targetRoot);
   const finalDir = path.join(targetRootAbs, id);
@@ -162,8 +207,9 @@ function importPetPack({ sourceDir, targetRoot, id, source, author, license, for
 
   fs.mkdirSync(targetRootAbs, { recursive: true });
   const tmpDir = path.join(targetRootAbs, `.import-${id}-${process.pid}-${Date.now()}`);
+  let skippedNames = null;
   try {
-    fs.cpSync(sourceDir, tmpDir, { recursive: true });
+    skippedNames = copyWhitelisted(sourceDir, tmpDir, sheetRel);
     const origNoticePath = path.join(tmpDir, 'NOTICE.md');
     const originalNotice = fs.existsSync(origNoticePath)
       ? fs.readFileSync(origNoticePath, 'utf8') : '';
@@ -188,15 +234,19 @@ function importPetPack({ sourceDir, targetRoot, id, source, author, license, for
   const warnings = [];
   if (!source) warnings.push('source_missing');
   if (!author) warnings.push('author_missing');
-  if (!license) warnings.push('license_missing');
-  return { ok: true, id, name, dir: finalDir, warnings };
+  if (licenseUnknown) warnings.push('license_missing');
+  if (skippedNames && skippedNames.length) warnings.push('extra_files_skipped');
+  return { ok: true, id, name, dir: finalDir, warnings, skippedFiles: skippedNames };
 }
 
 // /api/pets 的包发现逻辑（自 server/index.js 原样搬入，root 可注入）。
 // order 前置 + 首字符码兜底排序保持不变（回归守护：yuexinmiao、maid-deepseek-whale 恒排最前）。
+// 点前缀目录（.import-*/.import-old-* 轮换残留等）不参与轮换：覆盖路径挪走旧包、
+// 落位失败回滚的窄窗里它们会短暂存在，按正式包列出即"幽灵包"。
 function listPetPacks(root) {
   const order = ['yuexinmiao', 'maid-deepseek-whale'];
   return fs.readdirSync(root, { withFileTypes: true })
+    .filter(d => !d.name.startsWith('.'))
     .filter(d => d.isDirectory()
       && fs.existsSync(path.join(root, d.name, 'pet.json'))
       && fs.existsSync(path.join(root, d.name, 'spritesheet.webp')))
@@ -216,11 +266,12 @@ function listPetPacks(root) {
 
 // staging 包清单（预览页“从暂存导入”入口的数据源）。
 // staging 不存在时返回 []（不抛错），hasPetJson 标记哪些可直接导入。
+// 点前缀目录（.import-* 等）与正式轮换同理由不列出。
 function listStagingPacks(stagingRoot = DEFAULT_STAGING_ROOT) {
   let entries;
   try { entries = fs.readdirSync(stagingRoot, { withFileTypes: true }); }
   catch { return []; }
-  return entries.filter(d => d.isDirectory()).map(d => {
+  return entries.filter(d => d.isDirectory() && !d.name.startsWith('.')).map(d => {
     const petJsonPath = path.join(stagingRoot, d.name, 'pet.json');
     const hasPetJson = fs.existsSync(petJsonPath);
     let name = d.name;
@@ -296,7 +347,7 @@ function importEndpointMiddleware({ petsRoot, stagingRoot } = {}) {
         message: `拒绝非回环 Host「${host}」：该端点只接受 127.0.0.1/localhost 发起（防 DNS rebinding）。` });
     }
     const body = req.body || {};
-    const { source, id, sourceUrl, author, license, force } = body;
+    const { source, id, sourceUrl, author, license, force, ackUnknownLicense } = body;
     if (!source) {
       return res.status(400).json({ ok: false, error: 'SOURCE_MISSING',
         message: '缺少 source（staging 内的包目录名）' });
@@ -306,6 +357,7 @@ function importEndpointMiddleware({ petsRoot, stagingRoot } = {}) {
       const r = importPetPack({
         sourceDir, targetRoot: petsRoot,
         id, source: sourceUrl, author, license, force: !!force,
+        ackUnknownLicense: !!ackUnknownLicense,
       });
       return res.json(r);
     } catch (e) {

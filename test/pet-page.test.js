@@ -16,8 +16,10 @@ test('契约: 两页都引入 /sanitize.js，气泡展示点过消毒闸', () =>
   const widget = readPage('widget.html');
   assert.ok(pet.includes('<script src="/sanitize.js"></script>'), 'pet.html 引入 sanitize.js');
   assert.ok(widget.includes('<script src="/sanitize.js"></script>'), 'widget.html 引入 sanitize.js');
-  // widget 现有的气泡类展示点（悬浮 tip）必须经过 sanitizeSpeech
-  assert.ok(/tip\.textContent = [\s\S]*sanitizeSpeech\(/.test(widget),
+  // widget 现有的气泡类展示点（悬浮 tip）必须经过 sanitizeSpeech。
+  // 正则限定单行（[^\n;]）：[\s\S]* 跨行贪婪会把文件后段任意位置的 sanitizeSpeech(
+  // 误配到 tip 赋值行，形成假阴性守护。
+  assert.ok(/tip\.textContent\s*=[^;\n]*sanitizeSpeech\(/.test(widget),
             'widget 悬浮 tip 文本必须过 sanitizeSpeech');
   // pet 气泡默认只显示数值（既定决策：不展示 agent 原始文本），契约留痕
   assert.ok(pet.includes('SanitizeSpeech.sanitizeSpeech'), 'pet.html 保留消毒闸契约注释');

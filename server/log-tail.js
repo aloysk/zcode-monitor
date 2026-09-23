@@ -10,7 +10,11 @@ const readline = require('readline');
 const { LOG_DIR } = require('./db');
 
 function todayLogFile(d = new Date()) {
-  // logs are named zcode-YYYY-MM-DD.jsonl (UTC day)
+  // 日期→文件名映射（UTC 日）。注意：2026-09-23 实测 ZCode 按本地日命名/轮转
+  // （docs/acceptance/T6-latency-samples.md §4），UTC 映射在本地 00:00-08:00 期间
+  // 会指向停写旧文件。读路径（tailLog/eventsForTrace/watch 缺省）一律走
+  // defaultTodayFile 的「名字最新」语义；本导出保留 UTC 映射仅为兼容既有调用面
+  // （tools/log-latency-probe 等），不再是内部读路径的依据。
   return path.join(LOG_DIR, `zcode-${d.toISOString().slice(0, 10)}.jsonl`);
 }
 
@@ -37,8 +41,10 @@ function parseLine(line) {
 }
 
 // Tail the current day's log: read the last N lines efficiently.
+// 当前文件取 defaultTodayFile（名字最新）：对 UTC/本地命名惯例都成立，本地午夜
+// 后不再追错文件（见 todayLogFile 注释）。
 async function tailLog({ lines = 200 } = {}) {
-  const file = todayLogFile();
+  const file = defaultTodayFile();
   if (!fs.existsSync(file)) return [];
   // Stream from end: read last ~256KB then split lines, take last N.
   const stat = fs.statSync(file);
@@ -59,13 +65,25 @@ async function tailLog({ lines = 200 } = {}) {
   return parsed;
 }
 
-// Collect every log event whose traceId matches, scanning today's file
-// (and optionally yesterday's too, since UTC day boundaries shift).
+// Collect every log event whose traceId matches, scanning the current day's
+// file plus the previous one (a trace can straddle the day boundary).
+// 两个文件都取「名字最新/次新」（defaultTodayFile 同语义）：UTC 与本地命名惯例
+// 下都各自成立；readdir 失败回退 UTC 今/昨映射。
 async function eventsForTrace(traceId) {
   if (!traceId) return [];
-  const files = [todayLogFile()];
-  const y = new Date(); y.setUTCDate(y.getUTCDate() - 1);
-  files.push(todayLogFile(y));
+  let files;
+  try {
+    const names = fs.readdirSync(LOG_DIR)
+      .filter(f => /^zcode-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))
+      .sort()
+      .reverse();
+    files = names.slice(0, 2).map(n => path.join(LOG_DIR, n));
+  } catch { /* LOG_DIR 不可读：回退日期映射 */ }
+  if (!files || !files.length) {
+    const y = new Date(); y.setUTCDate(y.getUTCDate() - 1);
+    files = [todayLogFile(), todayLogFile(y)];
+  }
+  files = [...new Set(files)];
 
   const out = [];
   for (const file of files) {
@@ -107,7 +125,8 @@ function buildSpanForest(events) {
 
 // ── watch 增量路径（WP3-lite）───────────────────────────────
 // fs.watch 监听日志目录（不是单文件句柄）：任一目录事件都按 todayFile() 重新
-// 解析当日文件名，日切换（换名）由此覆盖，新文件从偏移 0 起读。追加 →
+// 解析当日文件名，日切换（换名，名字更新且从未读过）由此覆盖、新文件从偏移 0
+// 起读；名字回退/回归按 size 锚定不回放（见 pump 内注释）。追加 →
 // 30ms 防抖合并后立即增量读取；watch 报错（ENOENT/EPERM/EMFILE/重命名风暴
 // 挤掉句柄）→ 关闭监听、降级 pollMs 短轮询并只告警一次；reconcile 周期对账
 // 定时器恒在——偏移读幂等，watch 静默漏事件由它补齐（最终一致）。
@@ -122,16 +141,23 @@ function buildSpanForest(events) {
 // 按 UTC 映射会在本地午夜后追错文件最长 8 小时。故缺省取 LOG_DIR 内名字最新
 // 的匹配文件（对 UTC/本地命名惯例都成立，readdir 免 stat）；解析失败回退
 // todayLogFile()。既有导出 todayLogFile 的语义不动（行为对外不变）。
+// seenFiles：最近一次 readdir 见过的匹配名，供 createLogWatcher 的 ENOENT 分支
+// 区分「曾存在后被删」与「从未存在」（复活文件按 size 锚定、不整文件回放）。
+const readdirSeen = new Set();
 function defaultTodayFile() {
   try {
     const names = fs.readdirSync(LOG_DIR)
       .filter(f => /^zcode-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))
       .sort()
       .reverse();
-    if (names.length) return path.join(LOG_DIR, names[0]);
+    if (names.length) {
+      for (const n of names) readdirSeen.add(n);
+      return path.join(LOG_DIR, names[0]);
+    }
   } catch { /* LOG_DIR 不可读：回退日期映射 */ }
   return todayLogFile(new Date());
 }
+defaultTodayFile.seenFiles = readdirSeen;
 
 // 单次 pump 的同步读上限：进程挂起恢复/事件循环长停滞后，一次性读入的增量可达
 // 数百 MB（真实日志 ~295MB/日）——整段 Buffer.alloc + 同步 split/parse 正是
@@ -149,13 +175,14 @@ function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
                             statFile = (p) => fs.statSync(p) } = {}) {
   if (typeof onEvents !== 'function') throw new TypeError('onEvents required');
   let curFile = null, offset = 0, remainder = Buffer.alloc(0);
+  const readFileNames = new Set(); // 本 watcher 已锚定/读过的文件名：换名回到读过的文件时按 size 锚定，绝不二次回放
   let watcher = null, reconcileTimer = 0, pollTimer = 0, stopped = false;
   let pending = 0;
   let degradedWarned = false;
   // 首文件尾部锚定完成标记：锚定失败（readdir 已见文件、紧随的 stat 抛错的窄窗）
   // 时若直接进入增量读，会从偏移 0 整文件回放历史（真实日志 ~295MB/日）——
   // 违反「起点对账不回放历史」。未锚定前每次 pump 先补做尾部锚定。
-  // 日切换（换名）到的新文件无历史，从 0 起读即视为已锚定。
+  // 真日切换（名字更新且从未读过）到的新文件无历史，从 0 起读即视为已锚定。
   let anchoredToTail = false;
 
   function warnDegraded(why) {
@@ -170,26 +197,43 @@ function createLogWatcher({ onEvents, reconcileMs = 5000, pollMs = 1000,
     let file;
     try { file = todayFile(); } catch { return; }
     if (file !== curFile) {
-      const isFirst = curFile === null;
-      curFile = file; offset = 0; remainder = Buffer.alloc(0); // 日切换（换名）→ 新文件从偏移 0 起读
-      if (isFirst) { // 起点对账：已存在的当日文件从尾部开始，不回放历史
+      const nextName = path.basename(file);
+      const prevName = curFile === null ? '' : path.basename(curFile);
+      // 真日切换 = 名字更新（字典序更大）且从未读过 → 从 0 起读（新文件的内容
+      // 都是本 watcher 未见过的新事件）。其余换名一律按 size 锚定、不回放：
+      // - 名字回退（readdir 失败时 defaultTodayFile 回退 UTC 名 < 本地日名）：
+      //   那是同一活跃文件的旧视角，从 0 起读会整文件回放；
+      // - 名字回归到读过的文件（回退窗口结束、名字又跳回最新）：该文件此前
+      //   的内容已投递过，必须从上次语义上未读的位置锚定。
+      const freshDay = prevName !== '' && nextName > prevName && !readFileNames.has(nextName);
+      curFile = file; offset = 0; remainder = Buffer.alloc(0);
+      if (!freshDay) {
         try {
           offset = statFile(curFile).size;
+          readFileNames.add(nextName);
         } catch (e) {
           if ((e && e.code) !== 'ENOENT') return; // 文件在但 stat 瞬时失败（EPERM/EBUSY）：
                                                   // 历史未知、保持未锚定，下次 pump 先补锚定，
                                                   // 绝不从 0 整文件回放
-          // ENOENT = 启动时文件还不存在 = 启动前无历史 → 从 0 增量读即安全
-          // （不能等下次"补锚定"：那会锚掉启动后已写入的新行、直接丢事件）
+          // ENOENT：名字若来自 readdir（defaultTodayFile 的 seenFiles）或本 watcher
+          // 读过它，则是「曾存在后被删」——同名复活时历史未知，保持未锚定、复活后
+          // 按 size 锚定（与 EPERM 同路径）。只有「从未存在」（注入式 todayFile 的
+          // 新日文件尚未创建）才允许从 0 增量读：那类文件的内容都是新事件，等补
+          // 锚定反而会锚掉启动后已写入的新行、直接丢事件。
+          const seenBefore = !!(todayFile.seenFiles && todayFile.seenFiles.has
+            && todayFile.seenFiles.has(nextName));
+          if (seenBefore || readFileNames.has(nextName)) return;
         }
-        anchoredToTail = true;
-        return;
+      } else {
+        readFileNames.add(nextName);
       }
-      anchoredToTail = true; // 日切换的新文件无历史可回放，从 0 增量读即安全
+      anchoredToTail = true;
+      return;
     }
     if (!anchoredToTail) { // 首次非 ENOENT 失败过的补锚定（再失败则继续等）
       try {
         offset = statFile(curFile).size;
+        readFileNames.add(path.basename(curFile));
         anchoredToTail = true;
       } catch { return; }
       return;

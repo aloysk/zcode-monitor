@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 // import-pet.js <包名|包目录> [--id <id>] [--source <url|text>] [--author <name>]
-//               [--license <spdx|text>] [--force] [--root <targetRoot>] [--staging <dir>]
+//               [--license <spdx|text>] [--force] [--ack-unlicensed]
+//               [--root <targetRoot>] [--staging <dir>]
 // 把一个 Codex 宠物包（pet.json + spritesheet.webp）校验并导入 zcode-monitor。
 // 裸包名默认在 tools/pets-staging/ 下解析（--staging 可换根）；给路径则按路径导入。
 // targetRoot 默认 <repo>/public/pets（导入产物不入 git，见 .gitignore 白名单）。
+// 许可证缺失/unknown 时缺省拒绝（LICENSE_UNKNOWN）：确认来源与授权后加
+// --ack-unlicensed 显式放行（NOTICE 仍如实记录 license: unknown 并出警告）。
 'use strict';
 const path = require('path');
 const {
@@ -28,7 +31,7 @@ const opt = (name) => {
 
 if (!positional) {
   console.error('用法: node tools/import-pet.js <包名|包目录> [--id <id>] [--source <url>] '
-    + '[--author <name>] [--license <l>] [--force] [--root <dir>] [--staging <dir>]');
+    + '[--author <name>] [--license <l>] [--force] [--ack-unlicensed] [--root <dir>] [--staging <dir>]');
   process.exit(1);
 }
 
@@ -54,6 +57,7 @@ try {
     author: opt('author'),
     license: opt('license'),
     force: args.includes('--force'),
+    ackUnknownLicense: args.includes('--ack-unlicensed'),
   });
   for (const w of r.warnings) {
     if (w === 'source_missing') console.warn('警告: 未提供来源，NOTICE 记为 source: <未提供>（导入未阻断）');

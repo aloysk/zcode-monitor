@@ -95,11 +95,68 @@ test('A4-5: JWT 三段（eyJ 前缀）整体剥除，头/载荷/签名无任何�
 test('A4-5: JWT 规则先于长 hex/base64 规则（顺序不变量）', () => {
   // 顺序敏感的守护：若 RULES 重排致长 base64 规则（≥40 位）先跑，签名段先被
   // 剥、三段整体匹配失配，头与载荷（可解出 claims）将原样残留且无报警。
-  // 构造短签名段 JWT：签名不足 40 位时只有 JWT 规则能整体剥除——重排后本用例必红。
-  const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeK';
+  // 签名段取 ≥40 位：短签名段对重排不敏感（JWT 规则与 base64 规则都各自收敛
+  // 到占位符，重排下用例仍绿=假守护）；≥40 位签名被 base64 规则先行剥除时
+  // 三段匹配必失配——重排后本用例必红。
+  const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0'
+              + '.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c'; // 签名段 43 位 ≥40
   const out = sanitizeSpeech('jwt:' + jwt + ';end');
   assert.equal(out, 'jwt:[凭证];end');
   assert.equal(out.indexOf('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9'), -1);
+});
+
+test('A4-5: Bearer 先于长 base64 规则（顺序不变量）：≥40 位 token 收敛为单一 [凭证]', () => {
+  // 重排（长 base64 先跑）时 token 先被剥成 [密钥]、"Bearer " 残留为孤立头，
+  // 断言整体收敛即失配——本用例锁住 Bearer 规则先于长 base64 的顺序。
+  const tok = 'Tm9kZS5qcyBpcyBhd2Vzb21lIGFuZCB2ZXJ5IHNlY3VyZQ=='; // 44 位 + padding ≥40
+  const out = sanitizeSpeech('Authorization: Bearer ' + tok + ' 已带上');
+  assert.equal(out, 'Authorization: [凭证] 已带上');
+});
+
+test('A4-5: 跨行/分段凭据不泄漏（空白收敛先于规则循环）', () => {
+  // 顺序守护：空白收敛若放回规则之后，分段样式的密钥各段都低于规则阈值、
+  // 最后又被拼回一条——凭据原样泄漏。
+  assert.equal(sanitizeSpeech('sk-abc12\ndef34567890'), '[密钥]');
+  // JWT 跨点空格：三段被空白拆开时各段均不达长 base64 阈值
+  const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 . eyJzdWIiOiIxIn0'
+              + ' . SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
+  assert.equal(sanitizeSpeech('token=' + jwt + ' end'), 'token=[凭证] end');
+  // Bearer 凭据分段：token 与续段一并收敛（续段后的普通词同被吞入属过杀取舍）
+  assert.equal(sanitizeSpeech('Authorization: Bearer abc123\nXYZ_~def ok'), 'Authorization: [凭证]');
+});
+
+test('A4-5: 粘连前缀的 sk-/JWT/AKIA 不整体漏过（锚不依赖词边界）', () => {
+  // 'keysk-…'/'xeyJ…'/'keyAKIA…'：前缀粘连时 \b/lookbehind 锚在词中失配、整条
+  // 漏过——规则从特征前缀起剥除，残留的前缀字符不是密钥材料。
+  const sk = sanitizeSpeech('看 keysk-abcdefgh123456 尾');
+  assert.equal(sk.indexOf('abcdefgh123456'), -1, 'sk- 密钥材料不得残留');
+  assert.ok(sk.includes('[密钥]'));
+  const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeK';
+  const jw = sanitizeSpeech('值x' + jwt + '尾');
+  assert.equal(jw.indexOf('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9'), -1, 'JWT 材料不得残留');
+  assert.ok(jw.includes('[凭证]'));
+  const ak = sanitizeSpeech('keyAKIA1234567890ABCDEF x');
+  assert.equal(ak.indexOf('AKIA1234567890ABCDEF'), -1, 'AKIA 密钥材料不得残留');
+  assert.ok(ak.includes('[密钥]'));
+});
+
+test('A4-5: AWS AccessKeyId（AKIA + 20 位大写字母数字）', () => {
+  const key = 'AKIA1234567890ABCDEF'; // AKIA + 16 位 = 20 位标准形态
+  const out = sanitizeSpeech('身份 ' + key + ' 已带');
+  assert.equal(out.indexOf(key), -1);
+  assert.equal(out, '身份 [密钥] 已带');
+});
+
+test('A4-5: UNC 路径（\\\\host\\share\\…）', () => {
+  const out = sanitizeSpeech('挂载 \\\\fileserver\\share\\data 后读取');
+  assert.equal(out.indexOf('fileserver'), -1);
+  assert.equal(out, '挂载 [本地路径] 后读取');
+});
+
+test('A4-5: data:/javascript: 内联 URI 整串剥除', () => {
+  assert.equal(sanitizeSpeech('图 data:image/png;base64,iVBORw0KGgo= 完'),
+    '图 [链接] 完');
+  assert.equal(sanitizeSpeech('打 javascript:alert(1) 看'), '打 [链接] 看');
 });
 
 test('A4-5: 普通中文短句原样保留（含标点与数字）', () => {

@@ -91,6 +91,10 @@ function walIdleMs(dbPath) {
 
 // Fold the WAL into the main db so read-only connections can see all history.
 // ONLY call this when ZCode is NOT running (verified by caller).
+// busy_timeout 用短等待（800ms）：这是同步 better-sqlite3 调用，长 busy_timeout
+// 会把事件循环按 timeout 时长冻结（曾为 10s）。调用方已有 walIdleMs 即时否决
+// （writer 静默 ≥60s 才会走到这里），正常路径抢不到锁的窗口极小；真抢不到就让
+// busy=1 如实上抛，由调用方决定重试——绝不为罕见竞争冻结事件循环。
 // Returns { ok, before, after, checkpointed }.
 function checkpointNow(dbPath) {
   const before = walStatus(dbPath);
@@ -98,8 +102,8 @@ function checkpointNow(dbPath) {
   try {
     // Writable connection: opening it lets SQLite recover the WAL journal,
     // then TRUNCATE checkpoint folds it into the main db and zeroes the -wal.
-    db = new Database(dbPath, { timeout: 10000 });
-    db.pragma('busy_timeout = 10000');
+    db = new Database(dbPath, { timeout: 800 });
+    db.pragma('busy_timeout = 800');
     // TRUNCATE = checkpoint as much as possible, then truncate -wal to 0.
     const result = db.pragma('wal_checkpoint(TRUNCATE)');
     // result is [busy, log_frames, checkpointed_frames]

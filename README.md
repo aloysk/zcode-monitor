@@ -198,11 +198,13 @@ ZCode 用 SQLite 内嵌库（WAL 模式）并持续写入，读时会和它的�
 zcode-monitor/
 ├── package.json
 ├── server/
-│   ├── index.js              # 入口：Express + 自动开浏览器
+│   ├── index.js              # 入口：Express + 自动开浏览器 + 安全响应头（CSP/nosniff）
 │   ├── db.js                 # 只读 DB 连接 + 查询函数
 │   ├── zcode-runtime.js      # ZCode 运行状态探测 + WAL checkpoint
+│   ├── livegen.js            # 生成态引擎（呼吸动画/×N 车道的 SSE 边沿）
 │   ├── transcript.js         # 解析 transcript.jsonl + metadata.json
-│   ├── log-tail.js           # 日志读取 + trace 还原
+│   ├── log-tail.js           # 日志读取 + trace 还原 + fs.watch 实时增量
+│   ├── pet-import.js         # 宠物包导入共享模块（校验/白名单复制/端点中间件）
 │   └── routes/
 │       ├── overview.js       # 实时监控
 │       ├── sessions.js       # 会话列表 + 详情 7 端点
@@ -215,6 +217,12 @@ zcode-monitor/
 │   ├── index.html            # 单页 shell
 │   ├── app.js                # 路由 + 辅助函数
 │   ├── styles.css            # 暗色主题（对齐参考页配色 token）
+│   ├── widget.html           # token 速度胶囊页（WebView2 壳常驻）
+│   ├── pet.html              # 桌宠页（精灵动画 + 手势 + 心情）
+│   ├── pets-preview.html     # 宠物候选预览 + 从暂存导入面板
+│   ├── pet-state.js          # 桌宠行为纯决策模块（单测面）
+│   ├── sanitize.js           # 气泡文本消毒共享模块（双端导出）
+│   ├── pets/                 # 宠物包目录（<id>/pet.json + spritesheet.webp）
 │   └── views/                # 各标签渲染逻辑
 │       ├── overview.js
 │       ├── sessions.js       # 7 标签
@@ -223,6 +231,13 @@ zcode-monitor/
 │       ├── errors.js
 │       ├── raw.js
 │       └── how.js            # 运行原理
+├── tools/
+│   ├── import-pet.js         # 宠物包导入 CLI
+│   ├── webp-size.js          # webp 头尺寸读取（导入校验）
+│   ├── log-latency-probe.js  # 日志摄取延迟探针
+│   └── pets-staging/         # 导入暂存区（gitignored）
+├── test/                     # node:test 套件（test/index.js 聚合入口）
+├── docs/                     # 计划/规格/验收记录（acceptance/）
 └── README.md
 ```
 

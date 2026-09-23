@@ -22,8 +22,41 @@ const PORT = +process.env.PORT || 7331;
 const HOST = process.env.HOST || '127.0.0.1';
 const OPEN = process.env.OPEN_BROWSER !== '0';
 
+// pet pack registry for the pet page: every public/pets/<id>/ holding
+// pet.json + spritesheet.webp is a selectable pack — drop a folder in and it
+// joins the cycle. Discovery lives in server/pet-import.js (shared with the
+// import CLI/endpoint); the two original packs stay first so the cycle feels
+// stable as packs are added.
+const PETS_ROOT = path.join(__dirname, '..', 'public', 'pets');
+// staging root for candidate packs: imports may only source from inside this
+// directory — the endpoint rejects any source that resolves outside of it.
+const PETS_STAGING_ROOT = path.join(__dirname, '..', 'tools', 'pets-staging');
+
 const app = express();
 app.use(express.json());
+
+// 全站安全响应头：
+// - X-Content-Type-Options: nosniff —— 阻止浏览器对响应体做 MIME 嗅探（无它时
+//   一个被当 text/plain 下发的文件仍可能被嗅成 HTML 执行）。
+// - CSP —— 把页面的可执行面钉死在自身来源。本仓前端为无构建器的内联形态，
+//   script/style 需 'unsafe-inline'（无 nonce 基建，务实取舍）；仅有的两处外联
+//   显式列白：Chart.js（jsdelivr，index.html）与字体 CSS（fonts.googleapis.com，
+//   字体文件在 fonts.gstatic.com）。SSE/fetch 全部同源（connect-src 'self'）。
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' data:",
+  "connect-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+].join('; ');
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', CSP);
+  next();
+});
 
 // tiny request logger
 app.use((req, _res, next) => {
@@ -118,6 +151,17 @@ setInterval(pollZCodeRuntime, 5000);
 // Manual checkpoint endpoint (for a "preserve now" button). Refuses to run
 // while ZCode is running to avoid contending with its writer (unless ?force=1).
 app.get('/api/checkpoint', (req, res) => {
+  // 执行前即时否决（硬证据优先）：runtimeState.running 最多 ~37s 陈旧（探测节流
+  // 30s + tasklist 单次 4-7s），而 -wal 近期有写入即真实 writer 在场的直接证据——
+  // force 也不越过这道闸（「绝不与真实 writer 抢锁」是本模块的不变量）。
+  const idle = runtime.walIdleMs(dbq.DB_PATH);
+  if (idle != null && idle < WAL_ACTIVE_WINDOW_MS) {
+    return res.status(409).json({
+      ok: false,
+      error: 'wal_active',
+      message: `WAL 最近 ${Math.round(idle / 1000)}s 内有写入（真实 writer 在场），拒绝 checkpoint。请待写入静默后再试。`,
+    });
+  }
   if (runtimeState.running && !req.query.force) {
     return res.status(409).json({
       ok: false,
@@ -127,6 +171,16 @@ app.get('/api/checkpoint', (req, res) => {
   }
   const before = runtime.walStatus(dbq.DB_PATH);
   const result = runtime.checkpointNow(dbq.DB_PATH);
+  if (result.ok && result.busy === 1) {
+    // busy_timeout 已降为短等待（zcode-runtime.checkpointNow）：抢不到锁立即
+    // 如实上报可重试，而不是同步阻塞事件循环长等。
+    return res.status(503).json({
+      ok: false,
+      error: 'checkpoint_busy',
+      message: '数据库锁被占用，checkpoint 未完成。请稍后重试。',
+      retryable: true,
+    });
+  }
   if (result.ok) {
     dbq.invalidateDb();
     runtimeState.lastCheckpoint = {
@@ -196,6 +250,21 @@ app.use((err, _req, res, next) => {
   }
   next(err);
 });
+
+// /pets 静态服务收紧（须挂在与下面通用的 express.static 之前，注册顺序即命中
+// 顺序）：本仓精灵图全部是 spritesheet.webp，目录内其余类型（pet.json/NOTICE.md，
+// 或任何经手工放入的白名单外文件）一律以 octet-stream + attachment 下发——即使
+// 有可执行面（.html/.svg）混进 public/pets，也不能再以面板同源在浏览器里执行。
+// SVG 有脚本载体能力，不按图片放行（精灵管线只产 webp）。
+const PETS_RASTER_RE = /\.(webp|png|gif|jpe?g)$/i;
+app.use('/pets', express.static(PETS_ROOT, {
+  setHeaders(res, filePath) {
+    if (!PETS_RASTER_RE.test(filePath)) {
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', 'attachment');
+    }
+  },
+}));
 
 // static frontend
 app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -272,16 +341,8 @@ app.get('/pet', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public',
 // exact rolling-window seed for the widget page (no LIMIT cap — see db.js completedSince)
 app.get('/api/widget/recent', (_req, res) => res.json(dbq.completedSince(Date.now() - 5 * 60 * 1000)));
 
-// pet pack registry for the pet page: every public/pets/<id>/ holding
-// pet.json + spritesheet.webp is a selectable pack — drop a folder in and it
-// joins the cycle. Discovery lives in server/pet-import.js (shared with the
-// import CLI/endpoint); the two original packs stay first so the cycle feels
-// stable as packs are added.
-const PETS_ROOT = path.join(__dirname, '..', 'public', 'pets');
-// staging root for candidate packs: imports may only source from inside this
-// directory — the endpoint rejects any source that resolves outside of it.
-const PETS_STAGING_ROOT = path.join(__dirname, '..', 'tools', 'pets-staging');
-
+// pet pack registry for the pet page (PETS_ROOT 见文件头部定义)：/api/pets 与
+// staging/导入端点共用 server/pet-import.js 的发现与校验管线。
 app.get('/api/pets', (_req, res) => {
   try { res.json(petImport.listPetPacks(PETS_ROOT)); }
   catch { res.json([]); }
@@ -293,7 +354,8 @@ app.get('/api/pets/staging', (_req, res) => {
 });
 
 // 导入端点：缺 X-Zcode-Monitor-Import 首部一律 403（跨源简单 POST 无法携带自定义首部）。
-// body: { source: <staging 内的包目录名>, id?, sourceUrl?, author?, license?, force? }
+// body: { source: <staging 内的包目录名>, id?, sourceUrl?, author?, license?, force?,
+//         ackUnknownLicense? }（许可证缺失/unknown 需 ackUnknownLicense:true 显式确认）
 app.post('/api/pets/import',
   petImport.importEndpointMiddleware({ petsRoot: PETS_ROOT, stagingRoot: PETS_STAGING_ROOT }));
 

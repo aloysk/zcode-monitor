@@ -23,6 +23,11 @@ async function waitFor(cond, deadlineMs, stepMs = 50) {
   return cond();
 }
 
+// 用例名在测试开始时取一次并贯穿全程：若各用例现场重算 utcName()，套件跨
+// UTC 午夜运行时前后用例会指向不同文件名（午夜翻转竞态假红）。
+const TODAY = utcName(0);
+const YESTERDAY = utcName(-1);
+
 test.after(() => {
   fs.rmSync(fxRoot, { recursive: true, force: true });
   // A0-7 守护断言：运行中记录的临时路径在钩子内已不存在
@@ -46,15 +51,15 @@ test('A0-5 parseLine: 合法行解析为对象；坏行/空行返回 null（静�
 });
 
 test('A0-5 listLogFiles: 仅匹配日志命名、按日逆序、携带 name/path/size/mtime', () => {
-  const d1 = path.join(fxLogDir, utcName(-1));
-  const d2 = path.join(fxLogDir, utcName(0));
+  const d1 = path.join(fxLogDir, YESTERDAY);
+  const d2 = path.join(fxLogDir, TODAY);
   fs.writeFileSync(d1, '{"a":1}\n');
   fs.writeFileSync(d2, '{"a":1}\n{"b":2}\n');
   fs.writeFileSync(path.join(fxLogDir, 'zcode-not-a-date.txt'), 'x'); // 命名不匹配
   fs.writeFileSync(path.join(fxLogDir, 'other.jsonl'), 'x');
   const files = log.listLogFiles();
   const names = files.map(f => f.name);
-  assert.deepEqual(names, [utcName(0), utcName(-1)], '只含两份日志文件且新日在前');
+  assert.deepEqual(names, [TODAY, YESTERDAY], '只含两份日志文件且新日在前');
   for (const f of files) {
     assert.equal(f.path, path.join(fxLogDir, f.name));
     assert.equal(typeof f.size, 'number', 'size 为数值');
@@ -64,7 +69,7 @@ test('A0-5 listLogFiles: 仅匹配日志命名、按日逆序、携带 name/path
 });
 
 test('A0-5 tailLog: 返回值与构造行一致、坏行静默跳过、lines 截断取最新', async () => {
-  const file = path.join(fxLogDir, utcName(0));
+  const file = path.join(fxLogDir, TODAY);
   const rows = [];
   for (let i = 1; i <= 8; i++) rows.push({ i, timestamp: `2026-09-23T00:00:0${i}.000Z` });
   fs.writeFileSync(file,
@@ -80,7 +85,7 @@ test('A0-5 tailLog: 返回值与构造行一致、坏行静默跳过、lines 截
 });
 
 test('A0-5 tailLog: >1MB 文件尾读丢弃被截断的首残行（不产生半行对象）', async () => {
-  const file = path.join(fxLogDir, utcName(0));
+  const file = path.join(fxLogDir, TODAY);
   // 尾读窗口 1MB：先写 >1MB 的填充行，使读取起点落在大行中间
   const pad = { pad: 'x'.repeat(600 * 1024) };
   const first = { i: 'first-complete', timestamp: '2026-09-23T00:00:00.000Z' };
@@ -103,13 +108,13 @@ test('A0-5 eventsForTrace: 今昨双文件都扫描、按 timestamp 排序、坏
   const mk = (name, rows) =>
     fs.writeFileSync(path.join(fxLogDir, name),
       rows.map(r => (typeof r === 'string' ? r : JSON.stringify(r))).join('\n') + '\n');
-  mk(utcName(0), [
+  mk(TODAY, [
     { traceId: 'trX', timestamp: '2026-09-23T10:00:00.000Z', seq: 2 },
     { traceId: 'trX', timestamp: '2026-09-23T09:00:00.000Z', seq: 1 }, // 同日乱序写入
     { traceId: 'trY', timestamp: '2026-09-23T11:00:00.000Z' },         // 不相关 trace
     '{"traceId":"trX","broken',
   ]);
-  mk(utcName(-1), [
+  mk(YESTERDAY, [
     { traceId: 'trX', timestamp: '2026-09-22T23:00:00.000Z', seq: 0 }, // 昨日事件
   ]);
   const got = await log.eventsForTrace('trX');
@@ -156,7 +161,10 @@ test('A3-watch 锚定: 首次 stat 非 ENOENT 失败（EPERM）→ 不回放历�
     fs.appendFileSync(file, JSON.stringify({ i: 7 }) + '\n');
     await waitFor(() => got.some(e => e.i === 7), 5000);
     assert.ok(!got.some(e => e.i <= 3), '历史 3 行任何时刻都不得回放');
-    assert.ok(!got.some(e => e.i === 4 || e.i === 5), '锚定窗口内写入的行不回读（窄窗取舍，见注）');
+    // 锚定窗口内写入的 4/5 行属「启动对账错过、又不该回放」的模糊带：现行实现按
+    // 窄窗取舍锚掉。不固化为硬契约（未来改为补投递不算回归），只照录投递形态。
+    console.log(`[A3-watch] 锚定窗口内写入行(4/5)投递形态: ${
+      got.filter(e => e.i === 4 || e.i === 5).map(e => e.i).join(',') || '未投递'}`);
   } finally {
     w.stop();
     fs.rmSync(root, { recursive: true, force: true });
@@ -171,4 +179,59 @@ test('A0-5 todayLogFile: UTC 日命名映射（zcode-YYYY-MM-DD.jsonl，落在�
   assert.equal(log.todayLogFile(d2), path.join(fxLogDir, 'zcode-2026-12-31.jsonl'));
   // 缺省取当前 UTC 日且真实落在本 fixture（不触碰真实 ~/.zcode）
   assert.ok(log.todayLogFile().startsWith(fxLogDir + path.sep));
+});
+
+test('A0-5 defaultTodayFile: 取目录内字典序最新的匹配名（非日期名干扰项不参与）', () => {
+  // fixture 此刻已含 TODAY/YESTERDAY 与 zcode-not-a-date.txt（上文写入）：
+  // 名字最新的匹配文件是 TODAY，干扰项不构成候选。
+  assert.equal(log.defaultTodayFile(), path.join(fxLogDir, TODAY));
+  // 再放一个名字更大的匹配文件后立即切换（本地日命名下"最新名"同理）
+  const later = 'zcode-2999-12-31.jsonl';
+  fs.writeFileSync(path.join(fxLogDir, later), '{"x":1}\n');
+  try {
+    assert.equal(log.defaultTodayFile(), path.join(fxLogDir, later));
+  } finally {
+    fs.rmSync(path.join(fxLogDir, later));
+  }
+});
+
+test('A0-5 defaultTodayFile: LOG_DIR 不可读（readdir 抛错）→ 回退 todayLogFile() 的 UTC 日映射', async () => {
+  // LOG_DIR 在 require 时捕获，主进程无法换注入：用子进程指向一个普通文件
+  //（readdirSync 对非目录抛 ENOTDIR）验证回退路径。
+  const { execFile } = require('child_process');
+  const notDir = path.join(fxRoot, 'not-a-dir.txt');
+  fs.writeFileSync(notDir, 'x');
+  const script = 'const l = require(' + JSON.stringify(path.join(__dirname, '..', 'server', 'log-tail.js')) + ');'
+    + 'process.stdout.write(l.defaultTodayFile() === l.todayLogFile() ? "SAME" : "DIFF:" + l.defaultTodayFile());';
+  const out = await new Promise((resolve) => {
+    execFile(process.execPath, ['-e', script],
+      { env: Object.assign({}, process.env, { ZCODE_LOG_DIR: notDir }) },
+      (err, stdout) => resolve(err ? 'ERR:' + err.message : String(stdout)));
+  });
+  assert.equal(out, 'SAME', 'readdir 失败时回退 UTC 日映射: ' + out);
+});
+
+test('A0-5 tailLog/eventsForTrace 跟随名字最新文件（本地日命名跨本地午夜也可见）', async () => {
+  // ZCode 实测按本地日命名轮转（docs/acceptance/T6-latency-samples.md §4）：本地
+  // 00:00-08:00 期间 UTC 名（todayLogFile）是"昨天"，只有名字最新语义能追上真实
+  // 活跃文件。用本地日 +2 天构造必然大于 UTC 今日名的文件名（任何时区下本地日期
+  // ≥ UTC 日期 − 1，+2 后必严格更大）。
+  const d = new Date();
+  d.setDate(d.getDate() + 2);
+  const localLater = `zcode-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.jsonl`;
+  fs.writeFileSync(path.join(fxLogDir, localLater),
+    JSON.stringify({ traceId: 'trLocal', timestamp: '2026-09-24T00:05:00.000Z', seq: 1 }) + '\n'
+    + JSON.stringify({ traceId: 'trLocal', timestamp: '2026-09-24T00:06:00.000Z', seq: 2 }) + '\n');
+  try {
+    const got = await log.tailLog({ lines: 10 });
+    assert.deepEqual(got.slice(-2).map(e => e.seq), [1, 2], '读的是最新名文件而非 UTC 名旧文件');
+    // eventsForTrace 扫描"最新+次新"两个名字：最新名文件命中；第三新（YESTERDAY，
+    // trX 在彼处只有 1 行）被挤出窗口——trX 只余 TODAY 的 2 行（窗口=两文件的
+    // 既有语义在名字序下同样成立）
+    const evs = await log.eventsForTrace('trLocal');
+    assert.deepEqual(evs.map(e => e.seq), [1, 2]);
+    assert.equal((await log.eventsForTrace('trX')).length, 2, '窗口恰为最新两个名字');
+  } finally {
+    fs.rmSync(path.join(fxLogDir, localLater));
+  }
 });

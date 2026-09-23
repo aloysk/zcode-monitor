@@ -1,7 +1,7 @@
 # 生态采纳需求规格 v1（ecosystem-adoption）
 
 - 日期：2026-09-22
-- 状态：**已实施（2026-09-22）**。v1.2（2026-09-22 第二轮规格评审修订——9 条发现全部采纳落实，验证证据见提交说明；v1.1 为首轮修订）
+- 状态：**已实施（2026-09-22）**。v1.2（2026-09-22 第二轮规格评审修订——9 条发现全部采纳落实，验证证据见提交说明；v1.1 为首轮修订）。已知未决：A1-8 与 A4-7 壳内侧待人工实机评审（复现步骤见 docs/acceptance/T2-import-e2e.md、T5-behavior-e2e.md；全部遗留项统一登记于 docs/acceptance/residuals.md）
 - 上游：`docs/ecosystem-adoption-plan.md`（v1，已通过架构 / 对抗性 / 事实核查三视角评审）。本 Spec 把该计划转化为**可验收的需求**；任务级实施计划（How、步骤、代码骨架）在上游计划基础上另行编写。
 - 实施位置：worktree `F:/project/zcode-monitor-plan`，分支 `feature/ecosystem-adoption-plan`；主仓库 `F:/project/zcode-monitor` 一律只读。
 - 本文行号基于 worktree HEAD `5933a1f`（2026-09-22 核实）。
@@ -72,7 +72,7 @@
 1. 共享导入模块 `server/pet-import.js`：校验 + 落位 + NOTICE 生成，导出纯函数（输入：来源目录路径、目标根路径、元数据参数；输出：结构化结果对象）。CLI `tools/import-pet.js` 与图鉴页导入入口（经一个本地 HTTP 端点包装同一模块）复用之。目标根路径必须可注入（服务端校验测试才可能落在 tmpdir），默认值为现行 `public/pets`。
 2. 服务端校验判据（与 `tools/webp-size.js:33` 字面一致）：webp 可解析（RIFF/WEBP 魔数）；宽 = 1536（= `CELL_W 192 × COLS 8`）；高能被 208 整除且行数 ≥ 9。`pet.json` 可解析（容忍 BOM 与 snake_case，对齐 `/api/pets` 的容忍面，`server/index.js:274-276`）；`spritesheetPath` 指向存在的文件。像素级空行检测**不在**服务端校验范围（仍由页面 `scanRow` 承担，`public/pet.html:283-300`）——校验层不得引入图像解码依赖（依赖门槛，§4.3）。页面侧 `PACK_OVERRIDES` 例外机制保留不动（`public/pet.html:190-192`，上游计划 WP1 明确要求），导入校验不改变其语义。**对上游计划 WP1"帧表规范化 / 行列越界 / 非 9 行布局报错"的削减记录**（显式声明，避免静默缩水）：(i) 现行 Codex 包的 `pet.json` 不含帧表，sheet 像素是帧布局的唯一事实来源（`public/pet.html:279-281`），服务端无图像解码（§4.3）无从推导帧表；(ii) 列方向由"宽 = 1536 = 192×8"判据与页面 `scanRow` 固定 `COLS=8` 采样天然约束（`public/pet.html:284-299`），越界列不会被采样；(iii) "非 9 行布局报错"与实测事实冲突——行数判据按实测放宽为 ≥9（A1-9：maid-deepseek-whale 为 1536x2288 rows=11 的合法包），以本 Spec 为准。
 3. 错误路径：缺 `pet.json`、webp 无法解析、宽 / 高 / 行数不符、JSON 损坏（BOM 之外的语法错误）——每类给出指明原因的报错；落位必须原子（先校验后复制，或落临时名再改名），失败时目标根不残留半成品目录。
-4. NOTICE 管线：导入时在包目录生成 `NOTICE.md`，含三要素——来源、许可证、非商用声明，三要素各以固定字面量承载（断言对象固定，见 A1-4）：来源缺失记 `source: <未提供>`，许可证缺失记 `license: unknown` 且 CLI 输出警告（导入不阻断），非商用声明含 `非商用` 字样。整体格式参照现行包（如 `public/pets/yuexinmiao/NOTICE.md`），固定字面量为纯增量的标记行，不与其自由格式冲突。
+4. NOTICE 管线：导入时在包目录生成 `NOTICE.md`，含三要素——来源、许可证、非商用声明，三要素各以固定字面量承载（断言对象固定，见 A1-4）：来源缺失记 `source: <未提供>`，许可证缺失记 `license: unknown` 且 CLI 输出警告（**R1 加固修订（2026-09-22）**：许可证缺失/unknown 缺省拒绝导入，须显式确认——API `ackUnknownLicense: true` / CLI `--ack-unlicensed`；确认后放行且仍输出警告与占位。免责声明同步改为中性措辞，不再自动断言「粉丝自制」——来源与授权状态未核实。留痕见 docs/acceptance/residuals.md R-7），非商用声明含 `非商用` 字样。整体格式参照现行包（如 `public/pets/yuexinmiao/NOTICE.md`），固定字面量为纯增量的标记行，不与其自由格式冲突。
 5. 导入产物默认不进版本库：导入的包与精选 10 包共享同一格式与发现管线，但**不得被 git 跟踪**（防止 IP 敏感素材经一次 `git add -A` 进入默认分发——上游计划 §8"不作为默认分发主张 / 宝可梦、米哈游系不入默认图鉴"的可执行化）。**机制定为单根方案（默认）**：导入产物直接落位 `public/pets/<id>/`（与精选包同层，`/api/pets` 发现管线零改动、无合并逻辑），git 排除经 `.gitignore` 的 `public/pets/*` + 精选 10 包 `!` 白名单规则实现；验收以 git 命令为准（A1-5）。
 6. `/api/pets` 行为兼容：现有 10 包的发现结果与排序不变（`order` 前置不变）。发现扫描根须可注入（现行硬编码于 `server/index.js:264`），否则 A1-6 无法在 tmpdir 上验证。备选双根方案（仅在单根白名单被证伪时启用，如精选包频繁增删使白名单维护成本过高）：`/api/pets` 合并扫描两根且精选根保持在前。
 7. 明确不做（承上游计划 WP1"明确不做"）：双格式注册表；包目录根 `pets.json` 对外索引（对外可被第三方抓取，构成再分发）。
@@ -83,7 +83,7 @@
 - **A1-1** `[测试]` Given 一个 fixture Codex 包目录（1536×1872 的最小可解析 webp + 合法 `pet.json`），When 调用导入模块（目标根注入 tmpdir），Then 结果为成功、目标根出现 `<id>/pet.json` + `spritesheet.webp` + `NOTICE.md`，且 `node tools/webp-size.js <落位 webp>` 输出含 `OK`。fixture webp 的构造方式固定：**恰 30 字节的手工 RIFF/VP8X 头二进制资产**（`webpSize` 只读前 30 字节：`RIFF` + 4B 尺寸 + `WEBP` + `VP8X` + 4B payload 尺寸 + 标志 / 保留 4B + 宽、高各减一的 3B 小端——w-1=1535、h-1=1871；2026-09-22 已按此构造实测解析出 1536×1872、rows=9、判据 OK），入库 `tests/fixtures/` 仅供服务端尺寸校验、非可渲染图像——不引入任何图像编码依赖（§4.3）。
 - **A1-2** `[测试]`（参数化五案，与需求 3 的错误类一一对应）Given 分别为缺 `pet.json` / webp 魔数损坏（不可解析）/ 宽 ≠ 1536 / 高不能被 208 整除 / 行数 < 9 的来源目录，When 导入，Then 每案失败且错误信息指明对应原因（后三案各自断言宽 / 高 / 行数的具体报错文案，不共用一条），目标根无新增目录（原子性）。
 - **A1-3** `[测试]` Given `pet.json` 带 UTF-8 BOM 且字段为 snake_case（`display_name` / `spritesheet_path`），When 导入，Then 成功且显示名解析正确。
-- **A1-4** `[测试]` Given 未提供许可证与来源元数据，When 导入，Then 生成的 `NOTICE.md` 以固定字面量承载三要素并逐一断言（`indexOf !== -1`）：`source: <未提供>`（来源占位）、`license: unknown`（许可证占位）、`非商用`（非商用声明），且导入结果为"成功但带警告"。
+- **A1-4** `[测试]` Given 未提供许可证与来源元数据，When 导入，Then 生成的 `NOTICE.md` 以固定字面量承载三要素并逐一断言（`indexOf !== -1`）：`source: <未提供>`（来源占位）、`license: unknown`（许可证占位）、`非商用`（非商用声明），且导入结果为"成功但带警告"（R1 修订：Given 未确认未知许可证，When 导入，Then 拒绝并报 `LICENSE_UNKNOWN`；Given 已确认（ackUnknownLicense/--ack-unlicensed），Then 回到"成功但带警告"）。
 - **A1-5** `[命令]` Given 用 CLI 完成的一次真实导入到默认根（前置命令固定：`node tools/import-pet.js "F:/project/zcode-monitor/tools/pets-staging/<任一含 pet.json 的包目录>"`——staging 仅存在于主仓库、worktree 下无此目录（2026-09-22 实测 `ls` 报 os error 2），为本地 gitignored 暂存区且内容随时间变化，不硬编码包名，来源目录仅读取；staging 不可达或为空时改用任一本地 Codex 包目录并照录所用命令），When `git -C "F:/project/zcode-monitor-plan" status --porcelain`，Then 导入产物不出现在待提交清单（`git check-ignore` 命中导入产物路径亦可作为等价证据）。
 - **A1-6** `[测试]` Given 现仓库 `public/pets`（10 包），When 调用 `/api/pets` 的发现逻辑（注入该根），Then 返回 10 包、前两位为 `yuexinmiao` 与 `maid-deepseek-whale`（回归守护）。修订注记 2026-09-23：实现把套件的「10 包」数量断言放宽为「≥2 包」——数量硬编码随图鉴 roster 增删假红（roster 已实际变更过一次），测试注释留痕；回归守护的实质（order 前置两名恒定 + 其余按序性质稳定）保持硬断言不变。
 - **A1-7** `[测试]` Given 模拟跨源简单 POST（无自定义首部），When 调用导入端点，Then 403 拒绝；带约定首部的同源请求正常放行。
