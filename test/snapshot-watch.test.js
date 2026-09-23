@@ -1,12 +1,14 @@
 'use strict';
 // test/snapshot-watch.test.js — 快照绊线（server/snapshot-watch.js）。
-// R1（实现轮）：纯函数 + tmpdir 集成 + 路由 + 源码契约。
-// R2（五视角加固轮，按审查发现补强）：
-//   - FSWatcher error 监听（异步错误不崩进程，降级轮询）——错误桩用例；
-//   - 目录不可读（EPERM）分级为 unreadable 态：不折叠成 clear、运行中
-//     锁定不误判 removed 假报活动、boot 时已锁→解锁后重锚零点；
-//   - diffScans totals 语义钉住（签名全同 → 不判活动）；
-//   - state() 明细截断/排序/_sig 剥离；封顶三条全测；真实 fs.watch 快路径。
+// 实现轮：纯函数 + tmpdir 集成 + 路由 + 源码契约。
+// 加固轮（实现后五视角对抗评审）：FSWatcher error 监听、EPERM 分级+零点
+// 重锚、modified 集成路径、明细截断/排序/_sig 剥离、封顶三条、真实 fs.watch。
+// 终审轮（pr-review-toolkit 六视角全量审查）：子目录级读失败 partial 分级
+// （读失败不得折叠成签名变化——防假告警/防吞活动）、截断的 boot 扫描不得
+// 锚零点、`__proto__` 目录名、slice 截断置位 truncated、parent 降级分支与
+// filename 过滤、armWatch 部分成功回收、stop() 语义、挂载序契约、组合 diff。
+// （轮次措辞刻意不用 R1/R2 编号——与 docs/acceptance/residuals.md 的加固
+// 轮次编号撞车易混。）
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -46,12 +48,22 @@ function makeWs(root, hash, { stateJson, encBytes = 1024 } = {}) {
 }
 
 const stateOf = (p, fail) => JSON.stringify({ workspacePath: p, failureCount: fail });
-/// 可翻转 EPERM 的 fsapi 包装（默认透传真实 fs.promises）
+/// 可翻转 EPERM 的 fsapi 包装（默认透传真实 fs.promises）——顶层 readdir 整目录不可读
 function flakyFs(real, flag) {
   return {
     readdir: (...a) => flag.on
       ? Promise.reject(Object.assign(new Error('EPERM: operation not permitted, readdir'), { code: 'EPERM' }))
       : real.readdir(...a),
+    stat: (...a) => real.stat(...a),
+    readFile: (...a) => real.readFile(...a),
+  };
+}
+/// 可翻转 EPERM 的 fsapi 包装——仅 pending/ 子目录读失败（子目录级部分不可读）
+function partialFs(real, flag) {
+  return {
+    readdir: (p, ...rest) => (flag.on && String(p).endsWith('pending')
+      ? Promise.reject(Object.assign(new Error('EPERM: operation not permitted, readdir'), { code: 'EPERM' }))
+      : real.readdir(p, ...rest)),
     stat: (...a) => real.stat(...a),
     readFile: (...a) => real.readFile(...a),
   };
@@ -124,6 +136,33 @@ test('diffScans totals 语义钉住: 逐 hash 签名全同 → 不判活动（to
                       { ws, totals: { workspaces: 9, artifacts: 9, bytes: 900 } });
   assert.equal(r.changed, false);
   assert.equal(r.bytesDelta, 800);
+});
+
+test('diffScans 组合迁移: 一次 diff 同时 added+removed+modified', () => {
+  const sig = (m, s, c, b) => ({ m, s, c, b });
+  const base = { ws: { a: sig(1, 10, 1, 100), b: sig(2, 20, 2, 200), c: sig(3, 30, 3, 300) },
+                 totals: { workspaces: 3, artifacts: 6, bytes: 600 } };
+  const cur = { ws: { a: sig(9, 99, 9, 900), c: sig(3, 30, 3, 300), d: sig(4, 40, 4, 400) },
+                totals: { workspaces: 3, artifacts: 16, bytes: 1600 } };
+  const r = diffScans(base, cur);
+  assert.equal(r.changed, true);
+  assert.deepEqual(r.modified, ['a']);
+  assert.deepEqual(r.removed, ['b']);
+  assert.deepEqual(r.added, ['d']);
+  assert.equal(r.bytesDelta, 1000); // +900(a) -200(b) +400(d) 净值
+});
+
+test('fingerprintOf: `__proto__` 目录名不 Invisible（null 原型键容器）', () => {
+  // validHashName 放行 `__proto__` 形态名；普通对象下它会改写原型而非建
+  // 自有键（Object.keys 不可见 → 该目录对绊线隐形）。null 原型容器修复。
+  const scan = { exists: true, unreadable: false, partial: false, truncated: false, readError: null,
+                 totals: { workspaces: 2, artifacts: 0, bytes: 0 }, lastWriteMs: 1,
+                 workspaces: [
+                   { hash: '__proto__', path: null, failureCount: 0, recordedAtMs: null, encCount: 0, encBytes: 0, lastWriteMs: 1, _sig: { m: 5, s: 5, c: 0, b: 0 } },
+                   { hash: 'aa', path: null, failureCount: 0, recordedAtMs: null, encCount: 0, encBytes: 0, lastWriteMs: 1, _sig: { m: 5, s: 5, c: 0, b: 0 } },
+                 ] };
+  const fp = fingerprintOf(scan);
+  assert.deepEqual(Object.keys(fp.ws).sort(), ['__proto__', 'aa'], '__proto__ 目录须是可见自有键');
 });
 
 test('classify: 闩锁恒 active；不可读单列 unreadable；无内容 clear；有内容 static', () => {
@@ -202,7 +241,7 @@ test('scanDir: readdir 错误码分级——ENOENT=缺失、EPERM=不可读（�
   assert.equal(eperm.totals.workspaces, 0);
 });
 
-test('scanDir: 工作区数封顶（异常大的目录不得变长任务）', async () => {
+test('scanDir: 工作区数封顶（异常大的目录不得变长任务）且如实置 truncated', async () => {
   const root = tmpRoot('zcmon-snap-cap-');
   try {
     for (let i = 0; i < LIMITS.MAX_WORKSPACES + 3; i++) {
@@ -210,6 +249,7 @@ test('scanDir: 工作区数封顶（异常大的目录不得变长任务）', as
     }
     const s = await scanDir(fsPromises, root);
     assert.equal(s.totals.workspaces, LIMITS.MAX_WORKSPACES);
+    assert.equal(s.truncated, true, 'slice 截断须置位 truncated（截断如实标注，调用方据此豁免差异判定）');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -234,7 +274,7 @@ test('scanDir: 单区工件数封顶（桩 fsapi：2003 个 .enc 只 stat 2000�
   const ws = s.workspaces[0];
   assert.equal(ws.encCount, LIMITS.MAX_ENC_PER_WS);
   assert.equal(ws.encBytes, LIMITS.MAX_ENC_PER_WS * 10);
-  assert.ok(s.truncated !== undefined); // 截断标记字段存在（本用例未触总预算）
+  assert.equal(s.truncated, true, '单区工件 slice 截断须置位 truncated（截断如实标注）');
 });
 
 test('scanDir: state.json 超 64KB 不读（字段空），但 stat 仍进签名（变化检测不失效）', async () => {
@@ -332,8 +372,172 @@ test('绊线: 目录缺失起步 → 建目录落内容同样告警；boot 已�
   }
 });
 
+test('绊线×部分不可读: 子目录读失败置 partial、此拍不判差异（防假告警/防吞活动）', async () => {
+  // 方向 A（防假告警）：基线可读含 pending 工件，运行中 pending/ 变 EPERM——
+  // 若读失败被折叠成「签名为零」，下一拍 diff 判 modified → 假报机制复活
+  const root = tmpRoot('zcmon-snap-partialA-');
+  const ckpt = path.join(root, 'checkpoints');
+  makeWs(ckpt, 'aa11', { stateJson: stateOf('F:\\p', 1), encBytes: 4096 });
+  const flag = { on: false };
+  const w = createSnapshotWatcher({ dir: ckpt, pollMs: 120, watch: watchStubUnavailable, fsapi: partialFs(fsPromises, flag) });
+  try {
+    assert.ok(await until(() => w.state().status === 'static'), '可读基线 → static');
+    flag.on = true; // pending/ 读被拒
+    assert.ok(await until(() => w.state().partial === true), '子目录读失败 → partial 标记');
+    assert.equal(w.state().readError, 'EPERM');
+    await new Promise((r) => setTimeout(r, 350)); // 再等几拍确认不闩锁假告警
+    assert.equal(w.state().status, 'static', '读失败绝不折叠成签名变化（无假 active）');
+    assert.equal(w.state().firstActivityAt, null);
+    flag.on = false; // 恢复：内容未变 → 仍 static
+    assert.ok(await until(() => w.state().partial === false), '恢复后 partial 清除');
+    assert.equal(w.state().status, 'static');
+  } finally {
+    w.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+
+  // 方向 B（防吞活动）：boot 起 pending/ 持续不可读 → partial 扫描不锚零点；
+  // 恢复可读后的首个完整扫描重锚（期间出现的既有内容吸收进零点，不假报），
+  // 重锚后的真实新增仍然设防
+  const root2 = tmpRoot('zcmon-snap-partialB-');
+  const ckpt2 = path.join(root2, 'checkpoints');
+  makeWs(ckpt2, 'bb22', { stateJson: stateOf('F:\\q', 2), encBytes: 8192 });
+  const flag2 = { on: true };
+  const w2 = createSnapshotWatcher({ dir: ckpt2, pollMs: 120, watch: watchStubUnavailable, fsapi: partialFs(fsPromises, flag2) });
+  try {
+    assert.ok(await until(() => w2.state().partial === true), 'boot 即部分不可读');
+    assert.equal(w2.state().baseline, null, 'partial 扫描不得锚零点');
+    flag2.on = false; // 恢复（期间内容未再变化）
+    assert.ok(await until(() => w2.state().partial === false && w2.state().baseline !== null), '完整扫描重锚零点');
+    assert.equal(w2.state().status, 'static', '既有内容吸收进零点，不假报 active');
+    makeWs(ckpt2, 'cc33', { stateJson: stateOf('F:\\r', 0), encBytes: 64 });
+    assert.ok(await until(() => w2.state().status === 'active'), '重锚后真实新增 → active');
+  } finally {
+    w2.stop();
+    fs.rmSync(root2, { recursive: true, force: true });
+  }
+});
+
+test('绊线×截断: boot 扫描被截断 → 不得锚零点（缩量后不假报 active）', async () => {
+  // 桩 fsapi：先返回超 MAX_WORKSPACES 的大目录（截断），再切回预算内子集。
+  // 若截断扫描被锚成零点，后续完整扫描会把截断外的工作区判 removed → 假红。
+  const mkDirents = (n) => Array.from({ length: n }, (_, i) => ({
+    name: 'w' + String(i).padStart(4, '0'), isDirectory: () => true, isFile: () => false,
+  }));
+  const mode = { n: LIMITS.MAX_WORKSPACES + 40 };
+  const stub = {
+    readdir: async () => mkDirents(mode.n),
+    stat: () => Promise.reject(Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' })),
+    readFile: () => Promise.reject(Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' })),
+  };
+  const w = createSnapshotWatcher({ dir: 'X:/trunc', pollMs: 120, watch: watchStubUnavailable, fsapi: stub });
+  try {
+    assert.ok(await until(() => w.state().truncated === true), 'boot 大目录扫描被截断');
+    assert.equal(w.state().baseline, null, '截断扫描不得锚零点');
+    mode.n = 100; // 目录缩量到预算内（扫描不再截断）
+    assert.ok(await until(() => w.state().truncated === false && w.state().baseline !== null), '完整扫描重锚零点');
+    assert.equal(w.state().status, 'static', '缩量不假报 active（无 removed 闩锁）');
+    assert.equal(w.state().firstActivityAt, null);
+  } finally {
+    w.stop();
+  }
+});
+
+test('绊线×parent 降级: 递归 watch 抛错 → 父目录监视；filename 过滤只认 checkpoints 条目', async () => {
+  const root = tmpRoot('zcmon-snap-parent-');
+  const ckpt = path.join(root, 'checkpoints');
+  fs.mkdirSync(ckpt);
+  // 桩序列：第 1 次（递归 watch checkpoints）抛错；第 2 次（父目录）成功并捕获事件回调
+  const calls = [];
+  let parentCb = null;
+  const watchStub = (_dir, _opt, cb) => {
+    calls.push(_dir);
+    if (calls.length === 1) throw new Error('ENOENT: recursive unavailable');
+    parentCb = cb;
+    const stub = { close() {}, on() { return stub; } };
+    return stub;
+  };
+  const w = createSnapshotWatcher({ dir: ckpt, pollMs: 500, watch: watchStub });
+  try {
+    assert.equal(w.state().watchMode, 'parent', '递归失败 → parent 降级');
+    assert.ok(parentCb, '父目录事件回调已接线');
+    // 父目录（~/.zcode/v2 同级）高频活动：非 checkpoints 条目不得触发重扫
+    parentCb('rename', 'db');
+    parentCb('change', 'log.txt');
+    assert.equal(w.state().lastWatchEventAt, null, '无关条目被 filename 过滤');
+    // checkpoints 条目本身的事件（目录被创建/更名）= 快路径触发
+    parentCb('rename', 'checkpoints');
+    assert.ok(w.state().lastWatchEventAt, 'checkpoints 条目事件触发');
+    // 无 filename 的事件（形态保守起见）同样触发
+    w.state(); // no-op，确保读取路径无异常
+  } finally {
+    w.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('绊线×armWatch 部分成功: dir watcher 建成后 parent 抛错 → 已建成者必须被 close 回收', async () => {
+  const root = tmpRoot('zcmon-snap-leak-');
+  const ckpt = path.join(root, 'checkpoints');
+  fs.mkdirSync(ckpt);
+  // 桩序列：递归 watch 成功(A) → parent 抛错 → 重试 parent 成功(C)。
+  // A 若只置 null 不 close，句柄脱管且事件持续触发——泄漏防护回归锁。
+  const mkStub = () => { const s = { closed: false, close() { s.closed = true; }, on() { return s; } }; return s; };
+  const plan = ['ok', 'throw', 'ok'];
+  let i = 0;
+  const watchers = [];
+  const watchStub = () => {
+    const step = plan[i++];
+    if (step === 'throw') throw new Error('EPERM: parent unavailable');
+    const s = mkStub(); watchers.push(s); return s;
+  };
+  const w = createSnapshotWatcher({ dir: ckpt, pollMs: 500, watch: watchStub });
+  try {
+    assert.equal(w.state().watchMode, 'parent');
+    assert.equal(watchers[0].closed, true, '部分成功的 dir watcher 必须被 close（不脱管）');
+    assert.equal(watchers[1].closed, false, '最终存活的 parent watcher 未被误关');
+  } finally {
+    w.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('绊线×stop: 停机后不再扫描、watch 事件/error 回调静默无害', async () => {
+  const root = tmpRoot('zcmon-snap-stop-');
+  const ckpt = path.join(root, 'checkpoints');
+  fs.mkdirSync(ckpt);
+  let scans = 0;
+  const countingFs = {
+    readdir: async (...a) => { scans++; return fsPromises.readdir(...a); },
+    stat: (...a) => fsPromises.stat(...a),
+    readFile: (...a) => fsPromises.readFile(...a),
+  };
+  const errorSinks = [];
+  const eventCbs = [];
+  const watchStub = () => {
+    const s = { close() {}, on(evt, cb) { if (evt === 'error') errorSinks.push(cb); return s; } };
+    return s;
+  };
+  const w = createSnapshotWatcher({ dir: ckpt, pollMs: 100, watch: watchStub, fsapi: countingFs });
+  try {
+    assert.ok(await until(() => scans >= 2), 'boot + 至少一拍轮询');
+    w.stop();
+    const scansAt = scans;
+    const stateAt = JSON.stringify(w.state());
+    await new Promise((r) => setTimeout(r, 350));
+    assert.equal(scans, scansAt, '停机后不再扫描');
+    // 停机后迟到的回调（error 事件/文件事件）不得抛、不得改状态
+    for (const sink of errorSinks) assert.doesNotThrow(() => sink(new Error('late EPERM')));
+    assert.equal(JSON.stringify(w.state()), stateAt, '迟到回调不改变状态');
+  } finally {
+    w.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('绊线×不可读: 运行中锁定不假报活动（unreadable 态）；解锁恢复 static；boot 已锁→解锁重锚零点', async () => {
-  // 场景 1（F2 修复）：基线含遗留内容，运行中目录变不可读 → 绝不判 removed/active
+  // 场景 1：基线含遗留内容，运行中目录变不可读 → 绝不判 removed/active
+  // （若走 diff 会把全部工作区判 removed，在用户刚锁目录那一刻假报「复活」）
   const root = tmpRoot('zcmon-snap-lock-');
   const ckpt = path.join(root, 'checkpoints');
   makeWs(ckpt, 'aa11', { stateJson: stateOf('F:\\p', 1), encBytes: 4096 });
@@ -407,7 +611,7 @@ test('绊线: state() 明细截断 50、按最近活动倒序、_sig 不外泄',
   const ckpt = path.join(root, 'checkpoints');
   fs.mkdirSync(ckpt);
   // 55 个工作区，lastWriteMs 依创建次序递增（文件系统 mtime 分辨率足够时）；
-  // 显式等待 2ms 间隔拉开 mtime
+  // 显式等待 3ms 间隔拉开 mtime
   for (let i = 0; i < LIMITS.API_WS_LIST_CAP + 5; i++) {
     makeWs(ckpt, 'w' + String(i).padStart(3, '0'), { stateJson: stateOf('F:\\p' + i, i), encBytes: 0 });
     await new Promise((r) => setTimeout(r, 3));
@@ -437,11 +641,11 @@ test('绊线: 真实 fs.watch 快路径——落盘后数秒内 active（win32�
   fs.mkdirSync(ckpt);
   const w = createSnapshotWatcher({ dir: ckpt, pollMs: 6000 }); // 真实 fs 与 watch
   try {
-    assert.ok(await until(() => w.state().status === 'clear'), { timeoutMs: 8000 });
+    assert.ok(await until(() => w.state().status === 'clear', { timeoutMs: 8000 }));
     assert.equal(w.state().watchMode, 'watch', '真实递归 watch 建立成功');
     makeWs(ckpt, 'ee55', { stateJson: stateOf('F:\\real', 0), encBytes: 256 });
-    // 快路径 = watch 去抖 3s + 扫描；轮询 6s 只作兜底。12s 上限内应到 active
-    assert.ok(await until(() => w.state().status === 'active', ), 'watch 快路径应在数秒内检出');
+    // 快路径 = watch 去抖 3s + 扫描；轮询 6s 只作兜底。12s 预算覆盖两跳
+    assert.ok(await until(() => w.state().status === 'active', { timeoutMs: 12000 }), 'watch 快路径应在数秒内检出');
     assert.ok(w.state().lastWatchEventAt, 'watch 事件时间戳落位');
   } finally {
     w.stop();
@@ -468,7 +672,7 @@ test('makeSnapshotRoute: 200 + 契约字段形态', async () => {
         .on('error', reject);
     });
     const j = JSON.parse(body);
-    for (const k of ['dir', 'exists', 'unreadable', 'readError', 'truncated', 'status',
+    for (const k of ['dir', 'exists', 'unreadable', 'partial', 'readError', 'truncated', 'scanStuck', 'status',
                      'baseline', 'current', 'firstActivityAt', 'lastWatchEventAt',
                      'watchMode', 'watchError', 'scanError', 'scannedAt', 'workspaces']) {
       assert.ok(k in j, `响应须含 ${k}`);
@@ -486,35 +690,44 @@ test('makeSnapshotRoute: 200 + 契约字段形态', async () => {
 // ── 源码契约（渲染消毒与告警接线，frontend-contract 同款形态）─────────
 const readPublic = (name) => fs.readFileSync(path.join(__dirname, '..', 'public', name), 'utf8');
 
-test('契约: 绊线卡不可信文本渲染点全过 escapeHtml（path/hash/dir/scanError/readError）', () => {
+test('契约: 绊线卡不可信文本渲染点全过 escapeHtml（path/hash/dir/scanError/readError/watchError）', () => {
   const src = readPublic('views/overview.js');
   assert.ok(/escapeHtml\(w\.path\)/.test(src), 'workspacePath 须过 escapeHtml');
   assert.ok(/escapeHtml\(shortHash\(w\.hash\)\)/.test(src), 'hash 须过 escapeHtml');
   assert.ok(/escapeHtml\(s\.dir\)/.test(src), '目录路径须过 escapeHtml');
   assert.ok(/escapeHtml\(s\.scanError\)/.test(src), 'scanError 须过 escapeHtml');
   assert.ok(/escapeHtml\(s\.readError\)/.test(src), 'readError 须过 escapeHtml');
+  assert.ok(/escapeHtml\(s\.watchError\)/.test(src), 'watchError 消息体须过 escapeHtml');
   // 反向守护：不得存在未消毒直插
   for (const bad of [/\$\{w\.path\}/, /\$\{w\.hash\}/, /\$\{s\.dir\}/]) {
     assert.ok(!bad.test(src), `不得以 ${bad} 直插模板`);
   }
 });
 
-test('契约: 顶栏告警 chip 默认隐藏 + CSS [hidden] 兜底；仅 active 显示；接口失败不告警', () => {
+test('契约: /api/snapshot 挂载先于 companion tracker（30s 轮询不给孤儿服务续命）', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
+  const routeAt = src.indexOf("app.get('/api/snapshot'");
+  const trackerAt = src.indexOf('ZCODE_WIDGET_CHILD');
+  assert.ok(routeAt > 0 && trackerAt > 0, '两处接线都在');
+  assert.ok(routeAt < trackerAt, '快照路由须挂在 companion tracker 之前（注册顺序即 lastSeen 语义）');
+});
+
+test('契约: 顶栏告警 chip 默认隐藏 + CSS [hidden] 兜底；仅 active 显示；接口失败不告警且留痕', () => {
   const html = readPublic('index.html');
   const appSrc = readPublic('app.js');
   const css = readPublic('styles.css');
   // index.html：chip 带 hidden 初始态（fail-safe：默认不可见）
   assert.ok(/id="snapshot-alert"[^>]*hidden/.test(html), 'chip 须默认 hidden');
-  // B-1 修复锁：.badge 的 display:inline-block 会盖过 UA 的 [hidden] 规则，
+  // CSS 兜底锁：.badge 的 display:inline-block 会盖过 UA 的 [hidden] 规则，
   // 必须有 .snap-alert[hidden] 显式兜底（仓库 .privacy-notice[hidden] 同款教训）
   assert.ok(/\.snap-alert\[hidden\]\s*\{\s*display:\s*none/.test(css),
     'styles.css 须含 .snap-alert[hidden] display:none 兜底');
-  // app.js：只在 status==='active' 时亮；catch 静默（失败不误报）。
-  // 断言用 \s* 放宽空白（重构换行不假红），只锁语义形态。
+  // app.js：只在 status==='active' 时亮（\s* 放宽空白，只锁语义形态）
   assert.ok(/chip\.hidden\s*=\s*!\(\s*s\s*&&\s*s\.status\s*===\s*'active'\s*\)/.test(appSrc),
     'chip 仅 active 显示');
-  assert.ok(/getJSON\(\s*'\/api\/snapshot'\s*,\s*\{\s*retries:\s*1\s*\}\s*\)\s*;\s*\}\s*catch/.test(appSrc),
-    '轮询失败须静默（fail-safe 不告警）');
+  // 轮询失败不无声：连续失败留痕（fail-safe 不亮告警，但 DevTools 可归因）
+  assert.ok(/snapFailStreak\s*===\s*3[^\n]*console\.warn/.test(appSrc),
+    '连续 3 次失败须 console.warn 留痕');
 });
 
 test('契约: 隐私横幅措辞已升级（本机实证+冻结时间线），旧措辞退场', () => {

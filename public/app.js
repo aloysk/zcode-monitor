@@ -223,10 +223,20 @@ async function healthLoop() {
 // 快照绊线告警（语义见 server/snapshot-watch.js）：顶栏红标只在 /api/snapshot
 // 判定 active（面板启动后检测到新增快照活动，闩锁态）时亮起——任何视图下都
 // 可见，点击跳回「实时监控」的绊线卡。fail-safe：接口失败/不可达不告警
-// （绊线只在正面证据下动作，绝不因轮询失败误报）。
+// （绊线只在正面证据下动作，绝不因轮询失败误报）；但连续失败不无声——
+// DevTools 留痕（3 次起一条、恢复一条），否则「服务活着唯独此路由死了」
+// 时 chip 静默停摆无任何可回看证据。
+let snapFailStreak = 0;
 async function snapshotLoop() {
   let s = null;
-  try { s = await getJSON('/api/snapshot', { retries: 1 }); } catch { /* 静默，下拍再试 */ }
+  try {
+    s = await getJSON('/api/snapshot', { retries: 1 });
+    if (snapFailStreak >= 3) console.warn(`[snapshot] 轮询恢复（此前连续失败 ${snapFailStreak} 次）`);
+    snapFailStreak = 0;
+  } catch (e) {
+    snapFailStreak++;
+    if (snapFailStreak === 3) console.warn('[snapshot] 轮询持续失败，告警 chip 已停摆：', e && e.message);
+  }
   const chip = $('#snapshot-alert');
   if (chip) chip.hidden = !(s && s.status === 'active');
   setTimeout(snapshotLoop, 30 * 1000);
