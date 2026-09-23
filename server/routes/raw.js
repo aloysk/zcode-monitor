@@ -41,9 +41,9 @@ const ALLOWED = new Set([
   // dwf_* 是动态工作流的真身运行册（2026-09-23 实测：workflow_run/
   // workflow_activity 全空；dwf_* 行数 COUNT(*)：run≈53 / actor≈0.8k /
   // node≈2.9k / event≈1.7万——落在「≤1.8万行」小表量级带内，排序/where
-  // 维持小表默认策略；event 因 payload_json 行宽较宽，ORDER BY 实测
-  // ~140ms（亚百毫秒~百毫秒级，仍远低于文件头 ≤300ms 目标），增长绊线
-  // 登记 residuals R-16）。
+  // 维持小表默认策略；event 因 payload_json 长尾行较宽，ORDER BY 安静态
+  // 实测 ~20-30ms、三工作流并行重载下 ~140ms，远低于文件头 ≤300ms 目标，
+  // 增长绊线登记 residuals R-16①）。
   'dwf_run', 'dwf_actor', 'dwf_node', 'dwf_event',
 ]);
 
@@ -212,6 +212,13 @@ router.get('/:table', (req, res) => {
   // SQL 引用仍用输入原大小写（SQLite 标识符本就大小写不敏感）
   const columnsLower = new Set(
     dbq.db().prepare(`PRAGMA table_info(${table})`).all().map(c => String(c.name).toLowerCase()));
+  // 白名单放行但本库没有这张表（老 ZCode 库无 dwf_*/workflow_* 等）：PRAGMA 对
+  // 不存在的表返回空列集而不报错，放行到 SELECT 会抛 no such table → 落 Express
+  // 默认 500 HTML（六视角终审实测复现）。列集为空即以 400 如实拒绝——UI 下拉
+  // 可达（本轮已把 dwf_*/workflow_* 补进下拉），错误必须可读（R-16② 由此销账）。
+  if (!columnsLower.size) {
+    return res.status(400).json({ error: `table '${table}' not present in this database（ZCode 版本较旧？）` });
+  }
 
   // where 受限文法：字段标识符 + 表列白名单复核 + 值绑定参数；巨表再过
   // 「可索引列」白名单与 LIKE 禁令（见文件头性能红线）

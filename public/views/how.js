@@ -43,10 +43,11 @@
       ]);
       const k = ov.kpis;
       const byModel = ov.by_model;
-      const mainSrc = byModel.find(m => m.query_source === 'main_turn');
-      const subSrc = byModel.find(m => m.query_source === 'subagent');
-      const wfSrc = byModel.find(m => m.query_source === 'workflow_child');
-      const titleSrc = byModel.find(m => m.query_source === 'session_title');
+      // by_model 按 (provider,model,variant,source) 分组：同一 query_source 可跨
+      // 多个模型组（workflow_child 同时跑在 GLM-5.3 与 FlashX 上），示例数字须
+      // 跨组求和——find() 只取首组曾少报 41%，且与正文 renderQuerySources 的
+      // 跨组累加自相矛盾（六视角终审发现）。
+      const sumSrc = q => byModel.filter(m => m.query_source === q).reduce((a, m) => a + (m.calls || 0), 0);
 
       const concepts = [
         {
@@ -62,7 +63,7 @@
         {
           h: 'query_source（请求来源）',
           p: `区分这次模型调用是为什么：${renderQuerySources(byModel)}。<b>main_turn</b> 是真正回答你的；<b>subagent</b> 是 Task 派生的子 agent 干活；<b>workflow_child</b> 是动态工作流（dwf）派生的 actor 在干活（两者都算 agent 侧请求，速度卡的「子agent」= subagent + workflow_child）；<b>compact</b> 是上下文压缩；<b>session_title</b> 只是给会话起个标题（很便宜）。`,
-          ex: `24h 内：main_turn ${fmtInt(mainSrc?.calls||0)} 次、subagent ${fmtInt(subSrc?.calls||0)} 次、工作流 actor ${fmtInt(wfSrc?.calls||0)} 次、标题生成 ${fmtInt(titleSrc?.calls||0)} 次`,
+          ex: `24h 内：main_turn ${fmtInt(sumSrc('main_turn'))} 次、subagent ${fmtInt(sumSrc('subagent'))} 次、工作流 actor ${fmtInt(sumSrc('workflow_child'))} 次、标题生成 ${fmtInt(sumSrc('session_title'))} 次`,
         },
         {
           h: 'mode（运行模式）',
@@ -120,7 +121,7 @@
       const el = $('#reason-example');
       if (!found) { el.innerHTML = '<span class="faint">暂无 reasoning 记录（当前会话未启用思考，或已被清理）</span>'; return; }
       el.innerHTML = `<div class="faint" style="margin-bottom:4px">来自你机器的真实推理片段（节选）：</div>${escapeHtml(found.text.slice(0, 400))}${found.text.length>400?'…':''}`;
-    } catch (e) { $('#reason-example').innerHTML = '<span class="faint">加载失败</span>'; }
+    } catch (e) { $('#reason-example').innerHTML = '<span class="faint">加载失败</span>'; console.warn('[how] reasoning 示例加载失败', e); }
   }
 
   const ER_DIAGRAM =

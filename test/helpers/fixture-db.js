@@ -100,7 +100,7 @@ function createFixtureDb() {
       buildSession(conn, [
         { id: 's1', title: '主会话', task_type: 'interactive', directory: 'F:/demo',
           parent_id: null, project_id: 'p1', time_created: now - 3600e3, time_updated: now - 60e3 },
-        { id: 's2', title: '子代理', task_type: 'subagent', directory: 'F:/demo',
+        { id: 's2', title: '子代理', task_type: 'subagent_child', directory: 'F:/demo',
           parent_id: 's1', project_id: 'p1', time_created: now - 1800e3, time_updated: now - 120e3 },
       ]);
       buildModelUsage(conn, [

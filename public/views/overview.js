@@ -215,6 +215,7 @@
   }
 
   function renderKpis(k, w) {
+    if (!$('#kpis')) return; // 视图已切走（loadOverview 在途）：整批渲染自弃，防 errorCard 覆写新视图
     const errRate = k.model.calls ? (k.model.errors / k.model.calls * 100) : 0;
     const cacheRate = pct(k.tokens.cache_read, k.tokens.input);
     const reasonPct = k.tokens.reasoning_ratio != null ? (k.tokens.reasoning_ratio * 100) : null;
@@ -250,6 +251,11 @@
     return 'spd-green';
   }
 
+  // query_source → 徽标色：速度表行与 by_model 来源列共用（收敛单点正是
+  // dwf 轮漏计 bug 的防复发——同一映射散落多处时新增来源必漏改）；未知
+  // 来源落 dim+原值文本，不冒充已知类别。
+  const SRC_COLOR = { main_turn: 'blue', subagent: 'teal', workflow_child: 'purple' };
+
   function renderSpeedKpi(s) {
     const host = $('#kpi-speed');
     if (!host) return;
@@ -263,6 +269,7 @@
   }
 
   function renderSeries(series, w) {
+    if (!$('#series-range')) return; // 视图已切走：自弃（同 renderKpis 守卫家族）
     $('#series-range').textContent = w === '7d' ? '近 7 天·按小时' : '近 24 小时';
     if (!series.length) return;
     // 轴刻度统一带日期（M/D HH:MM）：fmtTime 的 sameDay 分支只出时间，24h 窗的
@@ -393,7 +400,7 @@
               <td class="num">${r.reasoning ? fmtInt(r.reasoning) : '<span class="faint">0</span>'}</td>
               <td class="num">${fmtMs(r.duration_ms)}</td>
               <td class="num">${r.tps != null ? `<span class="spd-chip ${cls}">${r.tps} t/s</span>` : '<span class="faint">—</span>'}</td>
-              <td><span class="badge ${r.query_source==='main_turn'?'blue':r.query_source==='subagent'?'teal':r.query_source==='workflow_child'?'purple':'dim'}">${escapeHtml(r.query_source||'')}</span></td>
+              <td><span class="badge ${SRC_COLOR[r.query_source] || 'dim'}">${escapeHtml(r.query_source||'')}</span></td>
             </tr>`;
           }).join('')
         }</tbody>
@@ -419,10 +426,12 @@
   }
 
   function renderBreakdown(byModel, byTool) {
-    $('#tbl-model').querySelector('thead').innerHTML = `<tr><th>provider / model</th><th>来源</th><th class="num">调用</th><th class="num">输入</th><th class="num">输出</th><th class="num">推理</th><th class="num">均时延</th></tr>`;
-    $('#tbl-model').querySelector('tbody').innerHTML = byModel.map(m => `<tr>
+    const tm = $('#tbl-model');
+    if (!tm) return; // 视图已切走：自弃（同 renderKpis 守卫家族）
+    tm.querySelector('thead').innerHTML = `<tr><th>provider / model</th><th>来源</th><th class="num">调用</th><th class="num">输入</th><th class="num">输出</th><th class="num">推理</th><th class="num">均时延</th></tr>`;
+    tm.querySelector('tbody').innerHTML = byModel.map(m => `<tr>
       <td><span class="mono">${escapeHtml(m.model_id||'?')}</span><div class="faint mono" style="font-size:10px">${escapeHtml((m.provider_id||'').replace('builtin:',''))} ${m.variant?'· '+escapeHtml(m.variant):''}</div></td>
-      <td><span class="badge ${m.query_source==='main_turn'?'blue':m.query_source==='subagent'?'teal':m.query_source==='workflow_child'?'purple':'dim'}">${escapeHtml(m.query_source)}</span></td>
+      <td><span class="badge ${SRC_COLOR[m.query_source] || 'dim'}">${escapeHtml(m.query_source)}</span></td>
       <td class="num">${fmtInt(m.calls)}</td><td class="num">${fmtNum(m.in_tok)}</td><td class="num">${fmtNum(m.out_tok)}</td><td class="num">${fmtNum(m.reason_tok)}</td><td class="num">${fmtMs(m.avg_ms)}</td></tr>`).join('') || `<tr><td colspan="7" class="empty">无数据</td></tr>`;
 
     $('#tbl-tool').querySelector('thead').innerHTML = `<tr><th>工具</th><th class="num">调用</th><th class="num">错误</th><th class="num">均时延</th><th class="num">最大</th><th class="num">输出字节</th></tr>`;
@@ -435,12 +444,34 @@
 
   // ── live feed (maps DB rows to wire-style rows) ──
   function startLive() {
+    // 快速 overview→X→overview 时，第二次 startLive 可能晚于 view() 入口的
+    // 同步 close 执行——这里幂等再关一次，杜绝孤儿 EventSource（连接泄漏+双行）。
+    if (liveEs) { liveEs.close(); liveEs = null; }
     const status = $('#live-status');
-    try { liveEs = new EventSource('/api/live/events'); } catch { status.textContent = '不支持 SSE'; return; }
-    liveEs.onopen = () => { status.className = 'badge green'; status.textContent = '已连接'; };
-    liveEs.onerror = () => { status.className = 'badge red'; status.textContent = '重连中…'; };
-    liveEs.addEventListener('model', e => pushRow('model', JSON.parse(e.data)));
-    liveEs.addEventListener('tool', e => pushRow('tool', JSON.parse(e.data)));
+    try { liveEs = new EventSource('/api/live/events'); }
+    catch (e) {
+      console.error('[overview] EventSource 创建失败', e);
+      if (status) status.textContent = '不支持 SSE';
+      return;
+    }
+    liveEs.onopen = () => { if (!status) return; status.className = 'badge green'; status.textContent = '已连接'; };
+    // onerror 兼两种形态：连接断开（浏览器自动重连中）与服务端 error 帧（live.js
+    // 轮询失败时携带 {"message"})——后者连接还活着，标「重连中」会误导排查。
+    liveEs.onerror = e => {
+      if (!status) return;
+      status.className = 'badge red';
+      let msg = null;
+      if (e && e.data) { try { msg = JSON.parse(e.data).message; } catch { /* 畸形帧按连接错误处理 */ } }
+      status.textContent = msg ? ('服务端: ' + msg) : '重连中…';
+    };
+    liveEs.addEventListener('model', e => {
+      try { pushRow('model', JSON.parse(e.data)); }
+      catch (err) { console.warn('[overview] live model 帧解析失败', err); }
+    });
+    liveEs.addEventListener('tool', e => {
+      try { pushRow('tool', JSON.parse(e.data)); }
+      catch (err) { console.warn('[overview] live tool 帧解析失败', err); }
+    });
   }
 
   function pushRow(kind, r) {

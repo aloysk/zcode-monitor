@@ -45,6 +45,10 @@ npm test                   # node --test test/index.js（聚合入口）
   会话徽标与筛选/raw 页 dwf 运行册表/How 文档，顺带修复 overview 切页后 SSE
   刷错（renderFeed 自愈）。三子代理对抗评审（code/API 兼容/测试质量）通过，
   已知边界登记 residuals R-16。
+- workflow_child 六视角终审轮（zcode-pr-review-toolkit）：How 页示例行跨模型组
+  求和（find 少报 41% 缺陷）、raw 缺表 400 化（R-16② 销账）、未知 task_type 不再
+  冒充 main、startLive/renderKpis 竞态家族加固、SRC_COLOR/childBadge 收敛；
+  测试补强至 5 例，全套 179 用例全绿（node --test 直列计数口径）。
 - 快照绊线（server/snapshot-watch.js）：只读监视 `~/.zcode/v2/checkpoints/`，
   机制复活即告警；语义（零点/闩锁/unreadable 态/watch 降级）见模块头注，
   已知边界登记 residuals R-14。
