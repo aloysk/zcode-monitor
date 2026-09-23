@@ -152,7 +152,7 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
 
 监控读路径对 `~/.zcode/` 全程只读。唯一例外是 WAL checkpoint 功能（ZCode 退出后自动折叠，或经 `/api/checkpoint` 手动触发）：它以短时可写连接执行 `wal_checkpoint(TRUNCATE)`，只把 WAL 日志折叠进主库、清空 `-wal` 文件，不改变任何数据行内容。
 
-安全姿态（与隐私相关的部分）：面板无鉴权、默认只绑 `127.0.0.1`，全部 `/api` 仅接受回环 Host（`127.0.0.1` / `localhost`，防 DNS rebinding 整库转录）；全站下发 CSP 与 `X-Content-Type-Options: nosniff`，前端脚本零外联（Chart.js 已本地化到 `public/assets/`，仅 pet/widget 两页保留 Google Fonts 字体 CSS 外联，见 `docs/acceptance/residuals.md`）；`/pets` 静态目录内非图片一律强制下载，导入夹带的页面类文件无法以面板同源执行。手动 checkpoint 的拒绝语义：WAL 近 60s 内有写入 → `409 wal_active`（`?force=1` 也不越过，绝不与真实写入方抢锁）；探测显示 ZCode 运行中 → `409 zcode_running`（`?force=1` 可越过）；锁竞争 → `503 checkpoint_busy`（可重试）。
+安全姿态（与隐私相关的部分）：面板无鉴权、默认只绑 `127.0.0.1`，全部 `/api` 仅接受回环 Host（`127.0.0.1` / `localhost`，防 DNS rebinding 整库转录）；全站下发 CSP 与 `X-Content-Type-Options: nosniff`，前端脚本零外联（Chart.js 已本地化到 `public/assets/`，仅 pet/widget 两页保留 Google Fonts 字体 CSS 外联，见 `docs/acceptance/residuals.md`）；`/pets` 静态目录内非图片一律强制下载，导入夹带的页面类文件无法以面板同源执行。手动 checkpoint 的拒绝语义：WAL 近 60s 内有写入 → `409 wal_active`（`?force=1` 也不越过，绝不与真实写入方抢锁）；探测显示 ZCode 运行中 → `409 zcode_running`（`?force=1` 可越过）；锁竞争 → `503 checkpoint_busy`（可重试）；`?force=1` 另要求请求头 `X-Zcode-Monitor-Checkpoint: 1`（面板按钮自动携带；防跨站简单请求触发，缺头 → `403`）。全部 `/api` 行数参数（limit/max/offset）统一钳界，负值不再构成无上限查询。
 
 ## 故障排查
 
@@ -207,6 +207,9 @@ zcode-monitor/
 │   ├── transcript.js         # 解析 transcript.jsonl + metadata.json
 │   ├── log-tail.js           # 日志读取 + trace 还原 + fs.watch 实时增量
 │   ├── pet-import.js         # 宠物包导入共享模块（校验/白名单复制/端点中间件）
+│   ├── http-hardening.js     # 安全响应头 + /api 回环 Host 闸 + 错误翻译/行数钳界工具
+│   ├── checkpoint-route.js   # /api/checkpoint 工厂（force 首部闸 + wal_active 否决）
+│   ├── health-route.js       # /api/health 工厂（连接自愈探测）
 │   └── routes/
 │       ├── overview.js       # 实时监控
 │       ├── sessions.js       # 会话列表 + 详情 7 端点
