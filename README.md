@@ -138,7 +138,7 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
 ## 隐私提示
 
 有第三方报告称 ZCode 可能会在后台上传工作区快照到云端（涉及本机 `~/.zcode/v2/checkpoints/` 目录）。
-**该机制在本机已实证（2026-09-23 只读核查）**：该目录存在 21 个工作区目录（共约 1.1GB），其中 5 个滞留加密上传工件（`pending/*.tar.gz.enc`，各带重试失败计数），且多个 `state.json` 的 `lastAcceptedManifestHash` 非空——快照打包与上传机制确实在活动。**仍未验证的部分**：上传目的地与云端用途（未做网络侧取证），本项目对此不下断言；以下来源供参考：
+**该机制在本机活动过且留下实证（只读核查，2026-09-23）**：该目录存在 21 个工作区目录（共约 1.1GB），其中 5 个滞留加密上传工件（`pending/*.tar.gz.enc`，各带重试失败计数），多个 `state.json` 的 `lastAcceptedManifestHash` 非空（存在被接受的上传）。**当前状态：整条快照/上传链路自 2026-09-18 13:32 起零活动**——此后 ZCode 每日重度使用，但全部 `state.json` 无任何更新、近两日日志亦无快照/上传操作命中（只读检索）；停止当日无本地版本或配置变更，推断为服务端开关，可能随更新恢复。**仍未验证的部分**：上传目的地与云端用途（未做网络侧取证），本项目对此不下断言；以下来源供参考：
 
 - 第三方项目：Masterchiefm/zcode-speed-panel 的「快照防护」说明（早期版本曾引 HumanAILoop/zemote 的「停更声明」，经核实全网查无此项目，已弃用该来源——与 docs/specs/ecosystem-adoption-v1.md WP5 的裁定一致）
 - 社区报道：Hacker News「Zcode silent workspace snapshot upload」讨论串、知乎文章《智谱ZCode，你打包上传我的代码仓库干什么》、开源中国 2026-09 相关报道
