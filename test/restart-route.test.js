@@ -255,7 +255,7 @@ test('restart: 壳侧接线源码契约（Program.cs）——首部名与值/双
     '壳首部值须为 "1"（值变即全线 403 而测试照绿）');
   assert.ok(/if \(_restartBusy\)/.test(src), '双击竞态闩：交接窗内的第二次点击不得再走 was-down 分支双拉起 node');
   assert.ok(/if \(_ensureBusy\)/.test(src), 'Shown 启动拉起与菜单重启并发时的 ensure 闩');
-  assert.ok(/if \(!resp\.IsSuccessStatusCode\) return;/.test(src), '非 2xx 早退：拒绝的重启不得烧 4s 等待并做无谓重载');
+  assert.ok(/if \(!resp\.IsSuccessStatusCode\) return false;/.test(src), '非 2xx 早退：拒绝的重启不得烧 4s 等待并做无谓重载（终审轮随 Task<bool> 化同步）');
   assert.ok(/_navRetries < 3/.test(src), '导航失败（错误页无脚本=菜单也没了）须有界重试');
   assert.ok(/HttpLong\.SendAsync/.test(src), '重启 POST 须走长超时客户端（2s 探测预算会被冷查询拖爆）');
   // 三态探测：Blocked（活着但事件循环卡死）不得当 down 处理——否则兜底分支
@@ -272,15 +272,29 @@ test('restart: 壳侧接线源码契约（Program.cs）——首部名与值/双
   assert.ok(/probe = await WatchBlockedAsync\(\);/.test(src), 'Blocked 分支须先有界观察（冷查询会自己结束、垂死进程会自己放端口——两者都优于杀）');
   assert.ok(/KillBlockedListenerAsync/.test(src), '观察耗尽后须走强杀恢复路径（卡死服务永不答 POST 且永占端口）');
   assert.ok(/string\.Equals\(proc\.ProcessName, "node"/.test(src), '强杀守卫：端口占用者非 node 时拒绝杀（外来进程不是我们的）');
-  assert.ok(/FileName = "netstat"[\s\S]{0,220}?CreateNoWindow = true/.test(src),
+  assert.ok(/FileName = "netstat"[\s\S]{0,220}?CreateNoWindow = true/.test(src)
+    || /Path\.Combine\(Environment\.SystemDirectory, "netstat\.exe"\)[\s\S]{0,300}?CreateNoWindow = true/.test(src),
     'netstat 是控制台程序而壳也可能无控制台——必须隐藏拉起（AGENTS windowsHide 红线同款）');
   assert.ok(/Kill\(entireProcessTree: true\)/.test(src), '强杀须整树（node 可能带子进程）');
   assert.ok(/ProbeServerAsync\(\) == ServerProbe\.Refused/.test(src), '强杀后须等端口真正释放再拉起（否则对残端双拉起竞速）');
   // 首轮实机验证抓出的两个实现级缺陷的钉（2026-09-24）：
   assert.ok(/Stopwatch\.StartNew\(\)/.test(src) && /still blocked after 12s/.test(src),
     '观察须按墙钟预算：Blocked 探测自身耗满 2s 客户端超时，按次数计数的「10s」实跑 30s');
+  assert.ok(/watching up to 12s/.test(src),
+    '入口日志/tooltip 的时长口径须与 12s 墙钟实现一致（六视角终审：10s 遗物文案与实现漂移）');
   assert.ok(/Contains\("LISTENING"/.test(src) && !/EndsWith\("LISTENING"/.test(src),
     'netstat -ano 行尾是 pid 而非 LISTENING：状态只能作包含 token 匹配（EndsWith 恒空集，强杀路径从未执行）');
   assert.ok(/netstat shows no listener after kill/.test(src),
     '等端口释放须有 netstat 旁路：吊死的连接可比死监听者活得更久（实机 25s 探测全超时而监听表已空），内核监听表才是端口可绑的事实源');
+  // 六视角终审补强（测试席/静默失败席）：
+  assert.ok(/if \(!await KillBlockedListenerAsync\(\)\) return false;/.test(src),
+    '强杀调用点钉（删调用留死方法时裸存在性钉照绿——Blocked 不杀会退回 19:40 搁浅形态）');
+  assert.ok(/pids is null/.test(src) && /pids\.Length == 0/.test(src),
+    'netstat 两义须并存且分流：null=工具失败拒动，空=确认无监听者放行拉起（塌缩任一侧都通向 racer/误诊）');
+  assert.ok(/netstat failed during bypass/.test(src),
+    '旁路轮询里 netstat 失败（null）须落日志——静默折叠成「监听者仍在」会永久误诊（SF-3）');
+  assert.ok(/already gone — continuing/.test(src),
+    '同批其余监听者不得被 already-gone 早退跳过（SF-6：return true 会把该杀没杀的 pid 误诊成端口不放）');
+  assert.ok(/重启中…（最长约1分钟）/.test(src) && /重启失败——详见 widget-run\.log/.test(src),
+    '恢复失败须有用户可见反馈（菜单文本态）——失败只写日志正是 19:40 事故的残余形态（SF-1）');
 });
