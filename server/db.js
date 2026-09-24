@@ -480,15 +480,30 @@ function completedSince(sinceMs) {
 // and same token caliber as overviewSpeed: output + reasoning count as
 // generated tokens; reasoning_tokens is nullable so COALESCE to 0.
 function todayUsage() {
-  // schema source: zai-org/ZCode MIG 0010_usage_observability（速度口径，见 overviewSpeed）
+  // schema source: zai-org/ZCode MIG 0010_usage_observability（速度口径见 overviewSpeed；
+  // input/cache_read 两 SUM 与 cache_hit_rate 是 C2 widget 缓存命中副行的数据面扩展）
   const r = db().prepare(`
     SELECT SUM(output_tokens + COALESCE(reasoning_tokens, 0)) AS tokens,
-           COUNT(*)                                            AS requests
+           COUNT(*)                                            AS requests,
+           SUM(input_tokens)                   AS in_tok,
+           SUM(cache_read_input_tokens)        AS cache_read
     FROM model_usage
     WHERE status = 'completed'
       AND started_at >= @since
   `).get({ since: startOfDayMs(Date.now()) });
-  return { tokens: r.tokens || 0, requests: r.requests || 0 };
+  // cache_hit_rate = cache_read/input：分母 input_tokens 官方语义已含 cache_read
+  //（Overview 区头注），照搬「input+cache_read」作分母会 ≈2 倍虚高；当日全零行日
+  //（§2.0 勘误承认存在）input=0 → null（widget 副行显「—」），禁 NaN/Infinity。
+  // 比率在响应侧算好，widget 纯渲染。
+  const input = r.in_tok || 0;
+  const cacheRead = r.cache_read || 0;
+  return {
+    tokens: r.tokens || 0,
+    requests: r.requests || 0,
+    input_tokens: input,
+    cache_read_tokens: cacheRead,
+    cache_hit_rate: input > 0 ? +((cacheRead / input)).toFixed(4) : null,
+  };
 }
 
 // boot/connect 的 SSE 水位 init 亦是 MAX(rowid)（见 recentModelRowsAfterRowid
@@ -532,11 +547,30 @@ function sessionList({ limit = 100, offset = 0, q = '', taskType = '', status = 
     SELECT session_id, COUNT(*) AS c
     FROM tool_usage WHERE session_id IN (${ph}) GROUP BY session_id
   `).all(...ids).map(r => [r.session_id, r]));
+  // 「最新 model 行」第三聚合（C2 mini 水位条数据面，两段先例同款页内 IN 寻址）：
+  // SQLite bare-column+MAX 特性——GROUP BY session_id 且聚合含 MAX(rowid) 时，
+  // 裸列（model_id/input_tokens）确定取自该组 MAX(rowid) 所在行（SQLite 文档
+  // lang_select.html#bareagg 的特例）。取 rowid 最大行＝写入序最新行，**非
+  // MAX(input_tokens)**——后者会选「历史最大输入」而非「最近一次请求」。
+  // schema source: zai-org/ZCode MIG 0010_usage_observability
+  const latestModel = new Map(db().prepare(`
+    SELECT session_id, model_id, input_tokens, MAX(rowid) AS rid
+    FROM model_usage WHERE session_id IN (${ph}) GROUP BY session_id
+  `).all(...ids).map(r => [r.session_id, r]));
   return page.map(r => {
     const m = modelAgg.get(r.id);
     const t = toolAgg.get(r.id);
+    const lm = latestModel.get(r.id);
     return { ...r, model_calls: m ? m.c : 0, tool_calls: t ? t.c : 0,
-             total_tokens: m ? m.s : null };
+             total_tokens: m ? m.s : null,
+             // 无 model 行会话三字段均为 null 且字段存在（C2-4 钉：字段存在值为
+             // null，非缺字段）。context_tokens 由路由层经 models-meta resolve
+             // 附带（窗口值唯一通路，本层不持模型表；此处先置 null 补全形状）。
+             latest_model: {
+               model_id: lm ? lm.model_id : null,
+               input_tokens: lm ? lm.input_tokens : null,
+               context_tokens: null,
+             } };
   });
 }
 
@@ -1195,6 +1229,41 @@ function usageAttributionByTurn(sessionId, limit = 50) {
   return { rows: page, truncated };
 }
 
+// ───────────────────────── Context gauge ─────────────────────────
+// C2 上下水位查询族（ecosystem-round2-batch1 §2.2）：会话内 token 序列。
+// 口径钉（§2.0 勘误的执行义务——db 层返回原始三列，不预判回退）：
+//   - 水位分子 = 逐行 input_tokens（官方语义 input 已含 cache_read——Overview
+//     区头注；照抄上游「input+cache_read+cache_creation 累计」会 ≈2 倍虚高）；
+//     input_tokens=0 的行（error/cancelled 全零行）回退官方 fallback
+//     cache_creation+cache_read（USAGE inputSideTokensFromNormalizedUsage）。
+//     回退计算在 T7 组件纯函数做（live 行缺列形态也由那边判空），本层只返回
+//     原始三列。
+//   - query_source='compact' 行即 compaction 边界（30d 窗实测 341 行，§9-3）；
+//     边界标记 compact_boundary 由路由层判定。
+//   - 窗口值（context_tokens）不经本层——路由层经 server/models-meta.js resolve
+//     附带（未知模型 null），前端不持有模型窗口表（窗口值唯一通路）。
+// 性能（红线 2）：WHERE session_id = ? 走 session 索引（sessionTurns 同款；
+// fixture 对应 idx_model_usage_session），会话内小集合 + 小排序，无整表物化
+// 风险。真实库 EXPLAIN/计时照录 docs/acceptance/round2-batch1-explain-timing.md。
+function contextGaugeRows(sessionId, limit = 100) {
+  // 方向钉（本仓首次引入会话内序列 limit）：ORDER BY started_at DESC LIMIT ?
+  // 取最新端 → JS 反转为 ASC 返回。ASC+LIMIT 直取会错取会话最旧端——长会话
+  // 超 100 行常态（真实库 model_usage 40 万行），截错端则 live 水位种子停在
+  // 远古、SSE 只推 connect 后新行、中间段永久缺失。limit 由路由层 clampLimit
+  // 钳界后传入；此处 attrLimit 兜底直调（负/NaN → 1，Usage attribution 区的
+  // 同款防线）。
+  // schema source: zai-org/ZCode MIG 0010_usage_observability（model_usage 逐行）
+  const rows = db().prepare(`
+    SELECT started_at, turn_id, model_id, query_source,
+           input_tokens, cache_read_input_tokens, cache_creation_input_tokens
+    FROM model_usage
+    WHERE session_id = ?
+    ORDER BY started_at DESC
+    LIMIT ?
+  `).all(sessionId, attrLimit(limit));
+  return rows.reverse().map(r => ({ ...r, started_at: ts(r.started_at) }));
+}
+
 module.exports = {
   DB_PATH, LOG_DIR, ROLLOUT_DIR,
   db, warmDb, invalidateDb,
@@ -1211,4 +1280,5 @@ module.exports = {
   usageTurnsSummary, usageTurnTimeline, usageToolBreakdown,
   usageAttributionBySession, usageAttributionByTurn,
   USAGE_CANDIDATE_CAP_ROWS, // 规模钳制口径常量（路由 meta 注明 scope 用，slow_tools_scope 先例）
+  contextGaugeRows,
 };

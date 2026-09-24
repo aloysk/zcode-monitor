@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const dbq = require('../db');
+const modelsMeta = require('../models-meta');
 const { clampLimit } = require('../http-hardening');
 
 const router = express.Router();
@@ -40,17 +41,24 @@ function resolveSubdir(base, segment) {
 
 // GET /api/sessions?q=&task_type=&limit=&offset=
 router.get('/', (req, res) => {
-  res.json({
-    sessions: dbq.sessionList({
-      // limit/max 双侧钳界（R5 修-high）：旧形态 Math.min(+q || 默认, 上限) 对
-      // ?limit=-1 产出 -1 = SQLite 无上限 LIMIT（真实库 1.77万会话实测 6.4s
-      // 同步冻结）。helper 语义见 http-hardening.js。
-      limit: clampLimit(req.query.limit, 100, 500),
-      offset: +req.query.offset || 0, // SQLite 负 OFFSET 语义即 0，无横面风险
-      q: req.query.q || '',
-      taskType: req.query.task_type || '',
-    }),
+  const sessions = dbq.sessionList({
+    // limit/max 双侧钳界（R5 修-high）：旧形态 Math.min(+q || 默认, 上限) 对
+    // ?limit=-1 产出 -1 = SQLite 无上限 LIMIT（真实库 1.77万会话实测 6.4s
+    // 同步冻结）。helper 语义见 http-hardening.js。
+    limit: clampLimit(req.query.limit, 100, 500),
+    offset: +req.query.offset || 0, // SQLite 负 OFFSET 语义即 0，无横面风险
+    q: req.query.q || '',
+    taskType: req.query.task_type || '',
   });
+  // C2：每会话最新 model 行的窗口值经 models-meta resolve 附带——窗口值唯一
+  // 通路（前端不持有、不复制模型窗口表）；未知模型 → null（不猜窗口，
+  // models-meta 头注 (d)）。db 层已置 null 补全三字段形状，此处覆写。
+  for (const s of sessions) {
+    const meta = s.latest_model.model_id != null
+      ? modelsMeta.resolve(s.latest_model.model_id) : null;
+    s.latest_model.context_tokens = meta ? meta.context_tokens : null;
+  }
+  res.json({ sessions });
 });
 
 // GET /api/sessions/:id
@@ -63,6 +71,25 @@ router.get('/:id', (req, res) => {
 // GET /api/sessions/:id/turns
 router.get('/:id/turns', (req, res) => {
   res.json({ turns: dbq.sessionTurns(req.params.id) });
+});
+
+// GET /api/sessions/:id/context-gauge?limit=100 — C2 会话 token 序列（水位种子）
+router.get('/:id/context-gauge', (req, res) => {
+  const rows = dbq.contextGaugeRows(req.params.id,
+    clampLimit(req.query.limit, 100, 500)); // :48 先例同款二元组（负值钳 1、超上限钳 500）
+  res.json({
+    rows: rows.map(r => {
+      // 窗口值唯一通路：路由层经 models-meta resolve 附带，未知模型 → null。
+      // 回退分子（input=0 行的 cache_creation+cache_read）在 T7 组件纯函数算，
+      // 本层只透传原始三列（db.js Context gauge 区头注口径钉）。
+      const meta = r.model_id != null ? modelsMeta.resolve(r.model_id) : null;
+      return {
+        ...r,
+        context_tokens: meta ? meta.context_tokens : null,
+        compact_boundary: r.query_source === 'compact',
+      };
+    }),
+  });
 });
 
 // GET /api/sessions/:id/conversation?max=400

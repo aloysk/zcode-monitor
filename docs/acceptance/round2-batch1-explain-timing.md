@@ -188,3 +188,99 @@ EXPLAIN 实测 `SCAN model_usage USING INDEX idx_model_usage_session`，真实�
 
 > T6（C2-8：contextGaugeRows / sessionList 扩展 / model_id 值域侦察）的记录由
 > T6 任务追加至本文件，此处不预留占位。
+
+---
+
+## 5. T6（C2 服务端）：model_id 值域侦察 + C2-8 EXPLAIN/计时（2026-09-25 追加）
+
+- 环境同 §头部（Windows 10.0.26200 x64，Node v24.11.1，worktree
+  `F:/project/zcode-monitor-plan`，分支 `feature/ecosystem-round2-batch1`）。
+  全程**只读**（`server/db.js` readonly 连接；EXPLAIN QUERY PLAN + console.time，
+  `~/.zcode` 零写入）。探针脚本 `os.tmpdir()`（`zcmon-t6-c28-probe.js`），非仓内文件
+  （T2 §头部同款纪律）。
+
+### 5.1 model_id 值域侦察（models-meta 定值前先行，任务卡「真实库 [命令]」段①）
+
+命令（rowid 尾界 5000 行采样，红线允许路径；不用全表 GROUP BY）：
+
+```sql
+SELECT DISTINCT model_id FROM (SELECT model_id FROM model_usage
+  WHERE rowid > (SELECT MAX(rowid) FROM model_usage) - 5000)
+```
+
+实测（2026-09-25，15.6ms）：**恰两值——`GLM-5.3`、`GLM-5.3-FlashX`**。
+
+对齐结论：`server/models-meta.js` 表键完整覆盖实测值域（GLM-5.3＝表首键/主力
+模型；GLM-5.3-FlashX 已收录）。两值均「已核对官方源码常量」——出处
+zai-org/ZCode `config/provider/zcode-builtin.json`（revision 30，blob eb48d99d）
+`modelConfigRules.modelRules`，按官方解析语义（`packages/provider/src/config/
+model-config.ts` matchesRule：`^(?:<modelMatch>)$` 大小写不敏感 + 规则数组序
+overlay，`config-overlay.ts` overlayValue 后值覆盖）实跑求值：
+
+| id | 命中规则（overlay 终值） | context_tokens | max_output_tokens |
+|---|---|---|---|
+| GLM-5.3 | `.*`→`.*glm-5(?:[.\-:/\[].*)?`→`.*glm-5\.3(?:-flash)?(?:[.\-:/\[].*)?` | 1000000 | 128000 |
+| GLM-5.3-FlashX | 同上（glm-5.3 规则后缀组覆盖；id 不在 canonical 名单 official-glm-model-id.ts，本机值域实测成员） | 1000000 | 128000 |
+
+两点如实申报：
+
+1. **zcode-api 数值分歧以官方为准**：其 README 记 GLM-5.3 上下文 200K，官方
+   常量为 1M（glm-5.3 规则 contextWindow=1000000，后序 overlay 覆盖 `.*glm-5`
+   层的 200000）——models-meta 取 1M 并在头注记名分歧（许可证纪律：只取数值
+   事实，不复制其文本）。
+2. **GLM-5.3-FlashX 的核对路径**：官方规则族无逐字命名该 id 的规则，但其值由
+   glm-5.3 规则的后缀组 `(?:[.\-:/\[].*)?` 确定覆盖（官方解析语义实跑核实命中
+   `.*` / `.*glm-5…` / `.*glm-5\.3(?:-flash)?…` 三层、终值 1M/128000）；本机
+   在用副本 `~/.zcode/v2/runtime/provider/windows-x86_64/3.14.3/**/zcode-builtin.json`
+   与 master 同 revision 30 实读一致。
+
+### 5.2 C2-8：context-gauge 序列查询 + sessionList 第三聚合 EXPLAIN/计时
+
+操作数（尾样本最忙会话，165 行/5000 样本；字面量内联）：
+`sess_dwf-dwfrun-55669306-3a62-410c-8aee-b7f0db491b4a-actor_9_1`；IN 页取尾样本
+前 5 会话。输出照录：
+
+```
+== gauge-seq/session-id/LIMIT100 ==   SEARCH model_usage USING INDEX model_usage_session_turn_idx (session_id=?)
+                                      USE TEMP B-TREE FOR ORDER BY
+                                      gauge-seq/session-id/LIMIT100/cold: 1.032ms   warm: 0.263ms
+== sessionList-latest-model/IN5 ==    SEARCH model_usage USING INDEX model_usage_session_turn_idx (session_id=?)
+                                      sessionList-latest-model/IN5/cold: 1.143ms    warm: 0.205ms
+== todayUsage-增列后（C2-6 数据面，顺带核）==
+                                      SEARCH model_usage USING INDEX model_usage_started_model_idx (started_at>?)
+                                      todayUsage-modified/24h-cold: 28.866ms        warm: 25.918ms
+```
+
+函数级终验（T2 §3 同款 prepare 缝捕获，零漂移）——实现本体直调计时：
+
+```
+fn-contextGaugeRows(100)/cold: 1.173ms   warm: 0.446ms
+   （165 行会话截最新 100 行，ASC 首/末：2026-09-24T17:24:01Z → 18:30:20Z）
+fn-sessionList(5)/cold: 22.139ms         warm: 3.932ms
+   （含既有页查询 session 表 ORDER BY time_updated 的排序成本——T2 前既有形态，
+    本批未改；第三聚合自身即上面的 1.143ms/0.205ms）
+CAPTURED（节选，与上面探针字面量 SQL 逐字一致）:
+   SELECT started_at, turn_id, model_id, query_source, input_tokens,
+     cache_read_input_tokens, cache_creation_input_tokens FROM model_usage
+     WHERE session_id = ? ORDER BY started_at DESC LIMIT ?
+   SELECT session_id, model_id, input_tokens, MAX(rowid) AS rid FROM model_usage
+     WHERE session_id IN (?,?,?,?,?) GROUP BY session_id
+```
+
+真实数据顺带目检：sessionList 样例会话 latest_model 取到
+`{model_id:'GLM-5.3', input_tokens:77022}` / `{model_id:'GLM-5.3', input_tokens:198059}`
+（rowid 最大行；db 层 context_tokens 恒 null 待路由层 resolve——探针直调 db 层，
+null 为预期形状）。
+
+### 5.3 判据核对结论（C2-8）
+
+- contextGaugeRows 序列查询：`SEARCH ... USING INDEX model_usage_session_turn_idx
+  (session_id=?)`（session 复合索引）+ TEMP B-TREE 排序（判据允许项），**无 SCAN** ✓；
+  计时照录（≤1.2ms）✓。
+- sessionList 最新行扩展第三聚合：`SEARCH ... USING INDEX model_usage_session_turn_idx
+  (session_id=?)`（IN 寻址，GROUP BY 走索引序、无 TEMP B-TREE），**无 SCAN** ✓；
+  计时照录（≤1.2ms）✓。
+- todayUsage 增列（SELECT 清单扩展，非新查询）：仍 `SEARCH ... USING INDEX
+  model_usage_started_model_idx (started_at>?)`，计划形态不变，24h 档 26-29ms
+  （与 Overview 既有 started_at 窗查询同量级）✓。
+- model_id 值域侦察结果照录在案（§5.1），models-meta 表键与实测值域对齐 ✓。
