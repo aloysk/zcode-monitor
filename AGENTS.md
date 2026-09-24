@@ -35,11 +35,13 @@ npm test                   # node --test test/index.js（聚合入口）
 - 遗留项唯一登记处：`docs/acceptance/residuals.md`（新遗留入册、解决销账、不删条目）。
 - 推送目标：`origin` = fork（aloysk/zcode-monitor）；`upstream` = yiyanwannian 原仓库（只读参考）。
 
-## 当前状态（2026-09-23）
+## 当前状态（2026-09-24）
 
-- main：生态采纳计划 + 四轮多视角加固审查 + 快照绊线（五视角对抗评审 + 六视角
-  zcode-pr-review-toolkit 终审：子目录读失败 partial 分级 / 截断拍零点拒绝 /
-  README 锁定矛盾修正 / __proto__ 与截断置位 / 测试补强至 29 例）全部合并。
+- main（476fbf2）：生态采纳计划 + 四轮多视角加固审查 + 快照绊线（五视角对抗评审 +
+  六视角 zcode-pr-review-toolkit 终审）+ 洁癖收尾轮 + workflow_child 计数轮及其
+  六视角终审 + 桌宠重启菜单轮及其四席加固三轮（并发/失败模式/安全/测试质量 ×3：
+  CRITICAL 退出定时器撤销 / 早夭 exit 守卫 / SEC-002·004·006 泄露面闭合 /
+  EADDRINUSE 65s 自愈 / 壳三态探测）全部合并并推送 fork。
 - workflow_child 计数轮（fix/workflow-child-accounting）：动态工作流（dwf）actor
   此前在全面板被漏计（24h 窗口 ≈17% 请求）；本轮分列纳入——速度卡/速度表徽标/
   会话徽标与筛选/raw 页 dwf 运行册表/How 文档，顺带修复 overview 切页后 SSE
@@ -49,9 +51,11 @@ npm test                   # node --test test/index.js（聚合入口）
   求和（find 少报 41% 缺陷）、raw 缺表 400 化（R-16② 销账）、未知 task_type 不再
   冒充 main、startLive/renderKpis 竞态家族加固、SRC_COLOR/childBadge 收敛；
   测试补强至 5 例，全套 179 用例全绿（node --test 直列计数口径）。
-- 重启菜单轮（feat/widget-restart-menu）：桌宠右键菜单「重启面板」+ 服务端
-  `POST /api/restart`（首部闸/自 spawn 接替进程/端口交接时序见
-  server/restart-route.js 头注）；壳侧 RestartServerAsync 兼容自有/收养两态。
+- 重启菜单轮（feat/widget-restart-menu）+ 四席加固三轮（fix/restart-gauntlet）：
+  桌宠右键菜单「重启面板」+ 服务端 `POST /api/restart`（首部闸/自 spawn 接替
+  进程/端口交接时序/三种失败形态旧进程都不退出——语义见 server/restart-route.js
+  头注）；壳侧 RestartServerAsync 兼容自有/收养两态（三态探测：阻塞服务不误判
+  down）。接替进程 stderr 落盘 `logs/restart-child.log`（gitignored）。
   测试 test/restart-route.test.js 11 例；7399 真重启循环实机验证过（含
   EADDRINUSE 重试自愈、SEC-006 Range 泄露闭合复验）。R-17 登记。
 - 快照绊线（server/snapshot-watch.js）：只读监视 `~/.zcode/v2/checkpoints/`，
