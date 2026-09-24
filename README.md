@@ -275,7 +275,7 @@ npm run dev
 
 前端入口 `public/index.html` + `public/app.js`；后端入口 `server/index.js`。各路由按文件拆分在 `server/routes/`。
 
-生产实例换新代码无需手动找进程：桌宠右键菜单 **「重启面板」**（壳 `shell/Program.cs`）→ `POST /api/restart`（要求请求头 `X-Zcode-Monitor-Restart: 1`，缺头 `403`，防跨站触发；语义见 `server/restart-route.js` 头注）——服务端先 spawn 接替进程（延迟 ~600ms 再 listen 完成端口交接、强制 `OPEN_BROWSER=0`、继承 `PORT`/`ZCODE_WIDGET_CHILD` 等环境）再退出旧进程，全程 1-2 秒，桌宠页面随后自动重载拿到新前端。壳对「自有」与「收养」两种服务形态走同一调用路径；服务不在时退回 `EnsureServerAsync` 直接拉起。
+生产实例换新代码无需手动找进程：桌宠右键菜单 **「重启面板」**（壳 `shell/Program.cs`）→ `POST /api/restart`（要求请求头 `X-Zcode-Monitor-Restart: 1`，缺头 `403`，防跨站触发；语义见 `server/restart-route.js` 头注）——服务端先 spawn 接替进程（延迟 ~600ms 再 listen 完成端口交接、强制 `OPEN_BROWSER=0`、继承 `PORT`/`ZCODE_WIDGET_CHILD` 等环境）再退出旧进程，常规 1-2 秒（极端：旧进程被冷查询阻塞迟迟不退时，接替进程最长重试 ~65s 自愈），桌宠页面随后自动重载拿到新前端。三种失败形态（spawn 同步抛错/异步 error/接替早夭）旧进程都不退出、可重试，痕迹落 `logs/restart-child.log`。壳对「自有」与「收养」两种服务形态走同一调用路径；服务不在时退回 `EnsureServerAsync` 直接拉起。
 
 ## 贡献
 
