@@ -100,6 +100,18 @@
     window.addEventListener('zc-theme-changed', themeHandler);
   }
 
+  // 取数失败兜底（评审修复）：reload/drill 由按钮/容器点击触发、不经 route() 的
+  // try/catch——getJSON reject 即未处理 rejection，视图会永久停在 spinner。失败时
+  // 目标容器写错误空态卡（errorCard 需在 route 上下文，此处用 C9-3 共享组件
+  // emptyState 同款出口形态）+ 撤掉已被 loading() 覆写的明细区与副行（不留
+  // 永久 spinner/旧层残文），st.data 保留旧层旧数据，主题重绘/重入仍可恢复。
+  function failCard(msg) {
+    setHtml('#attr-flame-card', window.ZC.emptyState('model_usage', msg));
+    setHtml('#attr-detail', '');
+    const sub = $('#attr-table-sub');
+    if (sub) sub.textContent = '';
+  }
+
   async function reload() {
     st.window = $('#attr-window') ? $('#attr-window').value : st.window;
     setHtml('#attr-flame-card', loading());
@@ -107,8 +119,14 @@
     const q = st.level === 'turn' && st.sessionId
       ? `window=${st.window}&level=turn&session_id=${encodeURIComponent(st.sessionId)}`
       : `window=${st.window}&level=session`;
-    // 先取数后改状态：请求失败（抛给 route 的 errorCard）时保留旧层旧数据可回退。
-    const data = await getJSON('/api/usage/attribution?' + q);
+    let data;
+    try {
+      data = await getJSON('/api/usage/attribution?' + q);
+    } catch (e) {
+      console.warn('[attribution] 取数失败', e);
+      failCard('取数失败——稍后点「↻ 刷新」重试；详情见控制台。');
+      return;
+    }
     st.data = data;
     if (data.level === 'session') {
       st.level = 'session'; st.sessionId = null; st.sessionTitle = null;
@@ -120,7 +138,14 @@
     if (!sid) return;
     setHtml('#attr-flame-card', loading('下钻回合层…'));
     setHtml('#attr-detail', loading());
-    const data = await getJSON(`/api/usage/attribution?window=${st.window}&level=turn&session_id=${encodeURIComponent(sid)}`);
+    let data;
+    try {
+      data = await getJSON(`/api/usage/attribution?window=${st.window}&level=turn&session_id=${encodeURIComponent(sid)}`);
+    } catch (e) {
+      console.warn('[attribution] 下钻取数失败', e);
+      failCard('下钻取数失败——重试再点该帧，或点「↻ 刷新」回到会话层；详情见控制台。');
+      return;
+    }
     st.level = 'turn'; st.sessionId = sid; st.sessionTitle = title; st.data = data;
     render();
   }
@@ -150,7 +175,7 @@
         bits.push(`session 层 · ${rows.length} 个会话 · 点击帧下钻回合层，帧下 ↗ 直达会话详情`);
       }
       if (meta.truncated) bits.push(`仅前 ${rows.length} 项（被裁）`);
-      if (meta.scope) bits.push(`${meta.scope}（宽窗候选集钳制，读数上限=最新 20 万行）`);
+      if (meta.scope) bits.push(`${meta.scope}（宽窗候选集钳制，读数上限以 scope 为准）`);
       if (total) bits.push(`合计 ${fmtNum(total)} tok`);
       sub.textContent = bits.join(' · ');
     }

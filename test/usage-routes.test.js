@@ -9,6 +9,14 @@
 // node:test 顺序执行，各测试按「先断言后插行」推进——每阶段断言只看当时已在
 // 库的行，24h 窗内的跨阶段行按构造值累计（w1/tl 等基线行的值均已计入期望值，
 // 逐处标注）。窗口边界行：3d 行入 7d/30d 档、31d 行不入 30d 档（C1-1 钉）。
+// ⚠ 禁止单筛本文件用例（node --test --test-name-pattern / IDE 单用例重跑）及
+// 删除/改名早段用例：阶段 1 是空库断言（须最先跑），其后各阶段在同库上累计
+// 插行、晚段期望值计入早段基线行（如阶段 4 totals 计入阶段 2 的 w1）——单筛
+// 晚段会因基线行缺失而失红。整文件顺序跑是唯一受支持形态（I-测-1 评审钉：
+// test.before 前插基线与阶段 1 空库断言互斥，故以头注警告为约）。
+// 构造行与 usage-queries.test.js 共享 test/helpers/usage-baselines.js 单点定义
+//（I-测-7）；HTTP 层期望值因跨阶段累计语义独有、互补不重叠（数值钉因累计
+// 口径相异而各自持有——queries 是窗口隔离，本文件是 24h 窗累计）。
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -17,6 +25,7 @@ const http = require('http');
 const express = require('express');
 const { createFixtureDb, buildSession, buildModelUsage, buildToolUsage, buildTurnUsage } =
   require('./helpers/fixture-db');
+const { wsemRows, nailRows, tnailRows, attrRows } = require('./helpers/usage-baselines');
 
 const fx = createFixtureDb(); // 不 seed：空库起步（C1-9 的「新库首次部署」形态）
 process.env.ZCODE_DB = fx.dbPath;
@@ -27,7 +36,7 @@ const { makeUsageRouter } = require('../server/routes/usage');
 const usageRouter = makeUsageRouter(); // 缺省 retentionDays=30（生产 index.js 同款）
 
 const now = Date.now();
-const MIN = 60e3, DAY = 86400e3;
+const MIN = 60e3; // DAY 不再本文件使用（构造行经 helpers/usage-baselines.js 注入）
 const H = (m) => now - m * MIN; // now − m 分钟
 
 test.after(() => {
@@ -105,33 +114,10 @@ test('C1-9 空库: turns/tools 200、totals 全零/数组空、meta 完整不抛
 
 // ── 阶段 2：C1-1 窗口语义（wsem 三组行：65min / 3d / 31d）──
 test('C1-1 表驱动: 三端点 × {24h,7d,30d,999d}——999d 回退回显 24h；30d 含 3d 行不含 31d 边界行', async () => {
-  buildTurnUsage(fx.conn, [
-    { turn_id: 'w1', session_id: 'wsem', status: 'completed', started_at: H(65),
-      duration_ms: 1000, model_request_count: 1 },
-    { turn_id: 'w2', session_id: 'wsem', status: 'completed', started_at: now - 3 * DAY,
-      duration_ms: 1000, model_request_count: 1 },
-    { turn_id: 'w3', session_id: 'wsem', status: 'completed', started_at: now - 31 * DAY,
-      duration_ms: 1000, model_request_count: 1 },
-  ]);
-  buildToolUsage(fx.conn, [
-    { id: 'wt1', session_id: 'wsem', turn_id: 'w1', tool_name: 'Bash', status: 'completed',
-      started_at: H(65), duration_ms: 100, read_only: 1, destructive: 0,
-      approval_status: 'none', output_bytes: 100 },
-    { id: 'wt2', session_id: 'wsem', turn_id: 'w2', tool_name: 'Bash', status: 'completed',
-      started_at: now - 3 * DAY, duration_ms: 100, read_only: 1, destructive: 0,
-      approval_status: 'none', output_bytes: 100 },
-    { id: 'wt3', session_id: 'wsem', turn_id: 'w3', tool_name: 'Bash', status: 'completed',
-      started_at: now - 31 * DAY, duration_ms: 100, read_only: 1, destructive: 0,
-      approval_status: 'none', output_bytes: 100 },
-  ]);
-  buildModelUsage(fx.conn, [
-    { id: 'wm1', session_id: 'wsA', turn_id: 'w1', status: 'completed', started_at: H(65),
-      duration_ms: 1000, computed_total_tokens: 10, query_source: 'main_turn' },
-    { id: 'wm2', session_id: 'wsB', turn_id: 'w2', status: 'completed', started_at: now - 3 * DAY,
-      duration_ms: 1000, computed_total_tokens: 10, query_source: 'main_turn' },
-    { id: 'wm3', session_id: 'wsC', turn_id: 'w3', status: 'completed', started_at: now - 31 * DAY,
-      duration_ms: 1000, computed_total_tokens: 10, query_source: 'main_turn' },
-  ]);
+  const wsem = wsemRows(H, now);
+  buildTurnUsage(fx.conn, wsem.turns);
+  buildToolUsage(fx.conn, wsem.tools);
+  buildModelUsage(fx.conn, wsem.models);
 
   await withUsageServer(async (port) => {
     // [请求 window, 期望回显, 期望窗内行数]：999d 未知值回退 24h（回显+行为一致）；
@@ -173,20 +159,9 @@ test('C1-1 表驱动: 三端点 × {24h,7d,30d,999d}——999d 回退回显 24h�
 // ── 阶段 3：C5-1/C5-2 归因两级数值钉 + 400 锚钉（sA/sB 行 8min；wsA 为阶段 2
 // 基线行，累计值计入期望）──
 test('C5-1 两级数值: session 层聚合/降序/分解/标题 + turn 层逐项按 token 降序 + 400 缺 session_id', async () => {
-  buildSession(fx.conn, [
-    { id: 'sA', title: '会话A', task_type: 'interactive', time_created: H(30), time_updated: H(8) },
-    { id: 'sB', title: '会话B', task_type: 'interactive', time_created: H(30), time_updated: H(8) },
-  ]);
-  buildModelUsage(fx.conn, [
-    { id: 'am1', session_id: 'sA', turn_id: 'ta', status: 'completed', started_at: H(8),
-      duration_ms: 1000, computed_total_tokens: 100, query_source: 'main_turn', tool_call_count: 2 },
-    { id: 'am2', session_id: 'sA', turn_id: 'tb', status: 'completed', started_at: H(8),
-      duration_ms: 2000, computed_total_tokens: 50, query_source: 'subagent', tool_call_count: 0 },
-    { id: 'am4', session_id: 'sA', turn_id: 'ta', status: 'completed', started_at: H(8),
-      duration_ms: 100, computed_total_tokens: 25, query_source: 'workflow_child', tool_call_count: 1 },
-    { id: 'bm3', session_id: 'sB', turn_id: 'tc', status: 'completed', started_at: H(8),
-      duration_ms: 500, computed_total_tokens: 300, query_source: 'main_turn', tool_call_count: 1 },
-  ]);
+  const attr = attrRows(H);
+  buildSession(fx.conn, attr.sessions);
+  buildModelUsage(fx.conn, attr.models);
 
   await withUsageServer(async (port) => {
     // session 层：按 tokens 降序（sB 300 > sA 175 > wsA 10——wsA 是阶段 2 的 65min
@@ -249,26 +224,16 @@ test('C5-2 截断钳界: ?limit=1 → top1 + meta.truncated 如实；?limit=-1 �
 // ── 阶段 4：C1-2/C1-3 数值钉（nail 三行 45-50min、工具两行 15min；24h 窗内
 // 累计含阶段 2 基线行 w1/wt1——其构造值计入期望）──
 test('C1-2 turns 数值钉: totals 逐项/by_error_type 与构造值相等；meta.retention_days===30、since ISO', async () => {
-  buildTurnUsage(fx.conn, [
-    { turn_id: 'tn1', session_id: 'nail', status: 'error', error_type: 'api_error',
-      started_at: H(50), duration_ms: 8000, time_to_first_token_ms: 1000,
-      model_request_count: 3, model_retry_count: 2, tool_error_count: 1,
-      computed_total_tokens: 500, context_exceeded: 1 },
-    { turn_id: 'tn2', session_id: 'nail', status: 'completed',
-      started_at: H(48), duration_ms: 12000, time_to_first_token_ms: 3000,
-      model_request_count: 2, computed_total_tokens: 900 },
-    { turn_id: 'tn3', session_id: 'nail', status: 'cancelled',
-      started_at: H(45), duration_ms: 4000, time_to_first_token_ms: 2000,
-      model_request_count: 1, computed_total_tokens: 200 },
-  ]);
+  buildTurnUsage(fx.conn, nailRows(H));
   await withUsageServer(async (port) => {
     const j = await getJson(port, '/api/usage/turns?window=24h');
     assert.equal(j.status, 200);
-    // 24h 窗 = 阶段2 w1（completed、mrc=1、ttft NULL——AVG 忽略）+ nail 三行
+    // 24h 窗 = 阶段2 w1（completed、mrc=1、ttft=500——I-测-9 补回字段后计入 AVG）
+    // + nail 三行
     assert.deepEqual(j.body.totals, {
       turns: 4, completed: 2, errors: 1, cancelled: 1,
       model_requests: 7, retries: 2, tool_errors: 1,
-      avg_ttft_ms: 2000, // (1000+3000+2000)/3（w1 无 ttft，SQLite AVG 忽略 NULL）
+      avg_ttft_ms: 1625, // (500+1000+3000+2000)/4（w1 ttft=500 计入平均）
       context_exceeded: 1,
     });
     assert.deepEqual(j.body.by_error_type, [
@@ -282,14 +247,7 @@ test('C1-2 turns 数值钉: totals 逐项/by_error_type 与构造值相等；met
 });
 
 test('C1-3 tools 数值钉: 分组逐项与构造值相等（含三分布对象）；meta 与 turns 对称断言', async () => {
-  buildToolUsage(fx.conn, [
-    { id: 'bg1', session_id: 'tnail', turn_id: 't1', tool_name: 'Bash', status: 'completed',
-      started_at: H(15), duration_ms: 900, read_only: 0, destructive: 1,
-      approval_status: 'none', output_bytes: 120 },
-    { id: 'rd1', session_id: 'tnail', turn_id: 't1', tool_name: 'Read', status: 'error',
-      started_at: H(15), duration_ms: 50, read_only: 1, destructive: 0,
-      approval_status: 'denied', output_bytes: 0 },
-  ]);
+  buildToolUsage(fx.conn, tnailRows(H));
   await withUsageServer(async (port) => {
     const j = await getJson(port, '/api/usage/tools?window=24h');
     assert.equal(j.status, 200);

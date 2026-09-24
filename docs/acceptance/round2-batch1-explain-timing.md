@@ -67,9 +67,15 @@
 ### 1.2 取舍决策（C1-6 的「必须存在」项）
 
 **启用 slowTools 先例的 rowid 尾部候选集钳制**（db.js `slowTools` 同款；
-`USAGE_CANDIDATE_CAP_ROWS = 200_000`，`USAGE_CAP_WINDOW_MS = 7d`——窗宽 >7d 的
-查询走 `WHERE rowid > (SELECT MAX(rowid) FROM tool_usage) - @cap AND
-started_at >= @since` + `NOT INDEXED`；≤7d 窗保持 started_at 精确路径）。理由与
+`USAGE_CANDIDATE_CAP_ROWS = 200_000`，`USAGE_CAP_WINDOW_MS = 8d`（第二轮评审
+修正，原 7d）——窗宽 ≥8d 的查询走 `WHERE rowid > (SELECT MAX(rowid) FROM
+tool_usage) - @cap AND started_at >= @since` + `NOT INDEXED`；<8d 窗（本族值域
+24h/7d）保持 started_at 精确路径。修正缘由：宽窄判定在 db 层对 `Date.now()`
+二次求值，而 `sinceMs` 由路由在更早时刻算出（T1≤T2 恒真）——阈值取 7d 时 7d
+请求的窗宽（7d+求值延迟）恒过线、被静默尾界收窄且路由（按 window 标签仅对
+30d 申报 meta.scope）无申报；8d=7d 档加 1 天余量，令 7d 恒走精确路径，与 meta
+申报机制同源。回归钉：test/usage-queries.test.js 阶段 9 补 7d 直调捕获——无
+NOT INDEXED/无 rowid 尾界、归因页查询钉 INDEXED BY started_at 索引）。理由与
 边界：
 
 1. **cap=200,000 的定标**：7d 档行数 161,181（tools）/127,385（model_usage，C5），
@@ -107,6 +113,17 @@ started_at >= @since` + `NOT INDEXED`；≤7d 窗保持 started_at 精确路径�
                                         tools-approval/30d/cap200000-warm: 154.252ms
 ```
 
+**跨进程冷态补充实测（第二轮评审 + 评审修复轮，2026-09-25）**：上表为探针
+进程内数字，冷态受 OS 页缓存状态影响显著——评审席冷态实测 tools-main 30d
+capped 338.7ms、attr-page 30d capped 509.4ms；修复轮冷态复测（函数本体直调、
+readonly、探针 `zcmon-i-sql-2-cold-probe.js` 留 os.tmpdir()）：
+`usageToolBreakdown/30d 301-313ms`、`usageAttributionBySession(50)/30d 309.8ms`
+（归因单趟化后的现行形态——见 §2 sources 修正注的演进；两段式+宽窗 sources
+钉死形态曾实测 535-605ms 超线，单趟化回线内）。tools 30d 冷态贴线属页缓存
+依赖（热态 177-193ms），与 §1.2 取舍共存；/api/usage 30d 请求还会叠加 titles
+（~0.2ms）与 turns 查询（12ms 冷）。7d 档（恒走窄窗精确路径）冷态 184-251ms
+在线内。
+
 ---
 
 ## 2. C5-5：attribution 两级 SQL EXPLAIN + 计时（24h/7d/30d 三档 + 会话内单跑）
@@ -128,7 +145,8 @@ started_at >= @since` + `NOT INDEXED`；≤7d 窗保持 started_at 精确路径�
                                 attr-session-sources/7d-cold: 3.191ms  warm: 1.728ms
 == attr-session-page / 30d（未钳形态，超线实证）==
                                 attr-session-page/30d-cold: 820.331ms warm: 810.228ms
-== attr-session-sources / 30d ==（同 24h 计划形态）
+== attr-session-sources / 30d ==（同 24h 计划形态；该独立查询已随第二轮评审的
+                                单趟化移除——分解并入页查询，见下注）
                                 attr-session-sources/30d-cold: 10.696ms warm: 1.298ms
 == attr-session-titles（单跑）== SEARCH session USING INDEX sqlite_autoindex_session_1 (id=?)
                                 attr-session-titles: 0.227ms
@@ -145,7 +163,23 @@ started_at >= @since` + `NOT INDEXED`；≤7d 窗保持 started_at 精确路径�
 
 **C5-5 30d 决策**：attr-session-page 30d 未钳 810-820ms **> 500ms** → 与 C1 共用
 §1.2 的 rowid 尾界 cap 取舍（同一条决策覆盖两族——spec 明言「两族共用同一判据」）；
-钳制后 337-357ms。sources/titles/attr-turn 均为个位数毫秒，不钳。
+钳制后 337-357ms（两段式页查询单条；终态单趟双键分组见下注，30d 299-310ms）。
+titles/attr-turn 均为个位数毫秒；sources 独立查询已随单趟化移除（并入页查询）。
+
+**sources 分解同口径修正与单趟化（第二轮评审修复，2026-09-25）**：原实现宽窗
+页查询带 rowid 尾界 cap 而 sources 分解按全窗 started_at 聚合——同一响应行内
+tokens 为 cap 窗值、by_query_source 为全窗值（小 cap 下分解和可达行总量 11 倍，
+子条份额超 100%），「份额与该行窗口总量可对账」失实。第一版修复给 sources 加
+同款 rowid 尾界谓词（NOT INDEXED），正确性成立但宽窗成双尾界扫描：真实库只读
+实测页 270-360ms + sources 200-246ms ≈ 541-605ms、整函数新进程 cold 535.1ms，
+持续超 500ms 触发线（I-SQL-4）。终版修复（方案 a）：分解并入页查询——同趟
+`GROUP BY session_id, query_source` 一次尾界扫描，JS 侧归并出每会话总量/分解/
+排序截断（30d 5187 分组行 → 4978 会话，归并 3.2ms）；成本探针
+（`zcmon-i-sql-4-merge-probe.js` 留 os.tmpdir()）：单趟双键 30d 299.3ms 冷/
+290.2ms 热、7d 189.7ms 冷、24h 33.4ms 冷——均优于两段式（7d 两段 207ms、24h
+40ms），实现本体冷态复测 30d 309.8ms / 7d 183.8ms 回线内。正确性回归钉
+test/usage-queries.test.js 阶段 8（cap=1 对拍 by_query_source={main_turn:50}，
+全窗聚合旧实现得 550）。
 
 ---
 
@@ -161,6 +195,12 @@ started_at >= @since` + `NOT INDEXED`；≤7d 窗保持 started_at 精确路径�
 | usageToolBreakdown | 32.8 / 19.9ms | 281.1 / 261.7ms | 289.4 / 293.0ms |
 | usageAttributionBySession(50) | 43.1 / 34.2ms | 324.0 / 282.2ms | 390.6 / 393.3ms |
 | usageAttributionByTurn(50) | — | — | 单跑 1.04 / 1.11ms |
+
+注：本表 7d 档两函数的数字采于宽窄判定阈值仍为 7d 时——彼时 7d 请求因
+「路由早时刻 sinceMs vs db 晚时刻 now」恒被判宽窗、实走 rowid 钳制路径（I-码-1
+评审发现）；修复（阈值 8d）后 7d 走窄窗精确路径，冷态复测见 §1.3 补记
+（184-251ms）。30d 档数字不受该修复影响（两态同为宽窗）。usageAttributionBySession
+的行另采于两段式形态——单趟化（§2 注）后函数级冷态 30d 309.8ms / 7d 183.8ms。
 
 15 条 SQL 的计划逐条核对：**全部为 `SEARCH ... USING INDEX` 或 `SEARCH ...
 USING INTEGER PRIMARY KEY (rowid>?)`，无对任何基表（turn_usage/tool_usage/
@@ -183,8 +223,10 @@ EXPLAIN 实测 `SCAN model_usage USING INDEX idx_model_usage_session`，真实�
   （§1.1/§1.3）✓；30d >500ms 的取舍与理由存在（§1.2）✓。
 - **C5-5**：attribution 两级 SQL 三档计划无 SCAN、计时照录（§2/§3）✓；30d >500ms
   的取舍记录存在（与 C1 共用 §1.2）✓。
-- fixture 侧 EXPLAIN 形态钉（`test/usage-queries.test.js` 阶段 9）：窄窗 9 条 +
-  宽窗 5 条（NOT INDEXED×3）全部无基表 SCAN，随测试套持续守护。
+- fixture 侧 EXPLAIN 形态钉（`test/usage-queries.test.js` 阶段 9，评审修复后
+  扩容）：窄窗 8 条 + 宽窗 4 条（NOT INDEXED×3——归因单趟化后 sources 独立
+  查询移除）+ 7d 直调 4 条（I-码-1 回归钉：7d 恒走窄窗精确路径、无 NOT
+  INDEXED）全部无基表 SCAN，随测试套持续守护。
 
 > T6（C2-8：contextGaugeRows / sessionList 扩展 / model_id 值域侦察）的记录由
 > T6 任务追加至本文件，此处不预留占位。

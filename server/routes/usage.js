@@ -12,10 +12,10 @@ const dbq = require('../db');
 const { clampLimit } = require('../http-hardening');
 
 // 宽窗（30d 档）候选钳制副作用的 meta 申报（slow_tools_scope 先例）：db 层对
-// >7d 窗的 tool/attribution session 层查询启用 rowid 尾部候选集上界
-// （USAGE_CANDIDATE_CAP_ROWS；启用依据与实测数字见 db.js 分节头注及
-// docs/acceptance/round2-batch1-explain-timing.md）——读数上限=最新 cap 行，
-// 如实注明不静默。值域内 24h/7d 走 started_at 索引精确窗口，无此副作用；
+// 窗宽 ≥8d（本族值域即 30d 档）的 tool/attribution session 层查询启用 rowid
+// 尾部候选集上界（USAGE_CANDIDATE_CAP_ROWS；启用依据与实测数字见 db.js 分节
+// 头注及 docs/acceptance/round2-batch1-explain-timing.md）——读数上限=最新 cap
+// 行，如实注明不静默。值域内 24h/7d 走 started_at 索引精确窗口，无此副作用；
 // turn_usage 与 attribution turn 层不启用钳制（会话内天然小集合）。
 function wideWindowScope(window) {
   return window === '30d'

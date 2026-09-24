@@ -12,17 +12,20 @@
 //     行（error/cancelled 全零行）回退官方 fallback 公式 cache_creation+cache_read
 //     （USAGE inputSideTokensFromNormalizedUsage），回退行标 fallback:true，UI 如实
 //     标注。SSE model 行载荷不含 cache 两列（live.js recentModelRowsAfterRowid），
-//     回退分子按 0 计——缺列即未知，不猜。
-//   - ratio = context_tokens ? +(分子/context_tokens).toFixed(4) : null。窗口值
-//     唯一通路：行由路由层经 server/models-meta.js resolve 附带 context_tokens
-//     （未知模型 → null）。本组件不持有、不复制模型窗口表；ratio=null 即 unknown
-//     态——不显示百分比（不猜窗口）。
-//   - 增量 = 当前行分子 − 前一行分子（首行 null）；compact 边界后一行为负
-//     （压掉的上下文）。
+//     该缺列形态分子=null——缺列即未知，绝不按 0 计（plan 拍板：JS 语义
+//     null/N === 0，仅判 context_tokens 会把缺列行算成 0% 占用）；缺列行不推进
+//     水位（currentLevel 维持上一已知读数并标 unavailable）、不参与增量（delta
+//     null，下一行相对最近已知分子）。
+//   - ratio = (分子 != null && context_tokens) ? +(分子/context_tokens).toFixed(4)
+//     : null。窗口值唯一通路：行由路由层经 server/models-meta.js resolve 附带
+//     context_tokens（未知模型 → null）。本组件不持有、不复制模型窗口表；
+//     ratio=null 即 unknown 态——不显示百分比（不猜窗口）。
+//   - 增量 = 当前行分子 − 前一已知分子（首行/分子不可得行 null）；compact 边界
+//     后一行为负（压掉的上下文）。
 //   - compactDrops：边界行（query_source='compact'）与紧随其后的行——「边界前」
 //     = compact 行自身（该次请求读入的就是被压缩前的全部上下文），「边界后」=
 //     压缩后首个请求；回落值 = 前后两行占用差（分子差照发——窗口未知时比率侧
-//     诚实为 null，token 差是事实不依赖窗口）。
+//     诚实为 null，token 差是事实不依赖窗口；任一侧分子不可得 → dropTokens null）。
 //   - 档位阈值（呈现层分档，数据不因分档改变；与速度 tier 三档同构）：
 //     占用 <60% ok / ≥60% warn / ≥85% err——色值一律 var(--sev-ok/warn/err)
 //     （styles.css 双主题同源变量），本文件全文禁硬编码色值（C2-5 契约：十六进制
@@ -74,10 +77,15 @@
     return 'err';
   }
 
-  // 逐行分子：input_tokens>0 → input_tokens；否则回退 cache_creation+cache_read
-  // （§2.0 勘误回退，标 fallback:true）。缺列（SSE 行无 cache 列）按 0 计。
+  // 逐行分子：input_tokens>0 → input_tokens；否则（DB 行，cache 两列在）回退
+  // cache_creation+cache_read（§2.0 勘误回退，标 fallback:true）；cache 两列均
+  // undefined/null（SSE live 行缺列形态）→ molecule:null——缺列即未知，绝不按
+  // 0 计（plan 拍板；混合形态——仅一列在——按在册列事实值回退）。
   function moleculeOf(r) {
     if ((r.input_tokens || 0) > 0) return { molecule: r.input_tokens, fallback: false };
+    if (r.cache_creation_input_tokens == null && r.cache_read_input_tokens == null) {
+      return { molecule: null, fallback: false };
+    }
     const fb = (r.cache_creation_input_tokens || 0) + (r.cache_read_input_tokens || 0);
     return { molecule: fb, fallback: true };
   }
@@ -87,19 +95,23 @@
   // 核心纯函数：token 序列 → 水位序列。输入行形状 = GET /api/sessions/:id/
   // context-gauge 的行（context_tokens 由路由层经 models-meta 附带；unknown →
   // null）或视图层补窗后的 SSE model 行。输出逐行 {…原行, molecule, fallback,
-  // ratio, delta, compact_boundary}。
+  // ratio, delta, compact_boundary}。分子不可得行（molecule:null）delta=null 且
+  // 不作下一行的增量基准（下一行相对最近已知分子——缺列行不参与增量，绝不
+  // 按 0 计出大负值）。
   function computeGaugeSeries(rows) {
     const src = Array.isArray(rows) ? rows : [];
     const out = [];
+    let prevMolecule = null; // 最近已知分子（缺列行跳过，不进基准）
     for (let i = 0; i < src.length; i++) {
       const r = src[i] || {};
       const { molecule, fallback } = moleculeOf(r);
-      const ratio = r.context_tokens ? +((molecule / r.context_tokens).toFixed(4)) : null;
-      const prev = i > 0 ? out[i - 1].molecule : null;
+      const ratio = molecule != null && r.context_tokens
+        ? +((molecule / r.context_tokens).toFixed(4)) : null;
+      const delta = molecule != null && prevMolecule != null ? molecule - prevMolecule : null;
+      if (molecule != null) prevMolecule = molecule;
       out.push({
         ...r,
-        molecule, fallback, ratio,
-        delta: i > 0 ? molecule - prev : null,
+        molecule, fallback, ratio, delta,
         compact_boundary: isBoundary(r),
       });
     }
@@ -124,28 +136,49 @@
         after: after.ratio,
         drop: before.ratio != null && after.ratio != null
           ? +((before.ratio - after.ratio).toFixed(4)) : null,
-        dropTokens: before.molecule - after.molecule,
+        dropTokens: before.molecule != null && after.molecule != null
+          ? before.molecule - after.molecule : null,
       });
     }
     return drops;
   }
 
-  // 当前水位（live 水位条数据）：取末行分子；窗口从未行起向前取最近一个非空
-  // context_tokens（「会话内模型切换以最新种子行为准」——SSE 行不带窗口字段，
-  // 视图层补窗后此处直接命中末行自身；此处兜底扫描保未补窗消费面的语义）。
+  // 当前水位（live 水位条数据）：取末行分子；末行分子不可得（SSE 缺列行）→
+  // 不推进水位——回退最近已知分子读数并标 unavailable:true（plan 拍板「水位条
+  // 维持上一已知读数并如实标注」，绝不按 0 计；全序列无已知分子 → 分子 null）。
+  // 窗口从未行起向前取最近一个非空 context_tokens（「会话内模型切换以最新种子
+  // 行为准」——SSE 行不带窗口字段，视图层补窗后此处直接命中末行自身；此处
+  // 兜底扫描保未补窗消费面的语义）。
   function currentLevel(series) {
     if (!series || !series.length) {
       return { molecule: null, window: null, ratio: null, severity: null,
-               fallback: false, compact_boundary: false };
+               fallback: false, compact_boundary: false, unavailable: false };
     }
     let window = null;
     for (let i = series.length - 1; i >= 0; i--) {
       if (series[i].context_tokens != null) { window = series[i].context_tokens; break; }
     }
     const last = series[series.length - 1];
-    const ratio = window ? +((last.molecule / window).toFixed(4)) : null;
-    return { molecule: last.molecule, window, ratio, severity: severityClass(ratio),
-             fallback: last.fallback, compact_boundary: last.compact_boundary };
+    let molecule = last.molecule;
+    if (molecule == null) {
+      for (let i = series.length - 2; i >= 0; i--) {
+        if (series[i].molecule != null) { molecule = series[i].molecule; break; }
+      }
+    }
+    const ratio = molecule != null && window ? +((molecule / window).toFixed(4)) : null;
+    return { molecule, window, ratio, severity: severityClass(ratio),
+             fallback: last.fallback, compact_boundary: last.compact_boundary,
+             unavailable: last.molecule == null };
+  }
+
+  // SSE live 行防重叠闸（sessions.js startGaugeLive 消费）：SSE 连接建立晚于
+  // 种子查询，(连接, 查询] 间落库的行会经流重放——以末种子行 started_at 为闸，
+  // 早于等于它的重复行跳过（双计污染增量曲线）。比较是 ISO 字符串字典序
+  // （种子与 SSE 行同经 db.js ts() ISO 化，同格式字典序=时序）；任一侧时间戳
+  // 缺失 → 兜底接受（无法判序时不丢行）。
+  function shouldAcceptLiveRow(lastSeedAt, row) {
+    if (!lastSeedAt || !row || !row.started_at) return true;
+    return row.started_at > lastSeedAt;
   }
 
   // 水位条（Context 标签大条）。ratio=null → unknown 态：空轨道 + 「—」，
@@ -199,9 +232,13 @@
       const bits = [`#${i + 1}`, fmtClock(p.started_at)];
       if (p.model_id) bits.push(String(p.model_id));
       bits.push(`分子 ${fmtTok(p.molecule)} tok`);
-      bits.push(p.delta == null ? '增量 —（首行）'
+      // 增量三态：分子不可得（缺列行，与首行同为 delta=null 但语义不同）→
+      // 「分子不可得」；首行（有分子无前值）→「首行」；否则数值。
+      bits.push(p.molecule == null ? '增量 —（分子不可得）'
+        : p.delta == null ? '增量 —（首行）'
         : `增量 ${p.delta >= 0 ? '+' : ''}${fmtTok(p.delta)} tok`);
-      if (p.fallback) bits.push('回退行（input=0，以 cache 两列估算）');
+      if (p.molecule == null) bits.push('分子不可得（缺 cache 列，不按 0 计）');
+      else if (p.fallback) bits.push('回退行（input=0，以 cache 两列估算）');
       if (p.compact_boundary) bits.push('compaction 边界');
       let bar = '';
       if (p.delta != null && p.delta !== 0) {
@@ -238,5 +275,6 @@
   return {
     computeGaugeSeries, compactDrops, currentLevel, severityClass,
     gaugeBarHtml, miniGaugeHtml, deltaCurveHtml, dropSummaryHtml,
+    shouldAcceptLiveRow,
   };
 });

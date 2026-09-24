@@ -6,10 +6,17 @@
 // fixture EXPLAIN 形态（本族每条 SQL 无基表 SCAN，TEMP B-TREE 允许）。
 // 约定（db-smoke 头注）：env 先注入再 require，db.js 模块级缓存连接 → 本文件
 // 共享一个 fixture，阶段按时间轴布局隔离窗口（now−X 标注），断言窗口只含目标行。
+// ⚠ 禁止单筛本文件用例（node --test --test-name-pattern / IDE 单用例重跑）及
+// 删除/改名早段用例：阶段 1 是空库断言（须最先跑），其后各阶段在同库上累计
+// 插行，早段构造是晚段窗口语义的一部分——单筛晚段会因基线行缺失而失红。
+// 整文件顺序跑是唯一受支持形态（I-测-1 评审钉：test.before 前插基线与阶段 1
+// 空库断言互斥，故以头注警告为约）。构造行与 usage-routes.test.js 共享
+// test/helpers/usage-baselines.js 单点定义（I-测-7）；期望值因窗口隔离语义独有。
 const test = require('node:test');
 const assert = require('node:assert');
 const { createFixtureDb, buildSession, buildModelUsage, buildToolUsage, buildTurnUsage } =
   require('./helpers/fixture-db');
+const { wsemRows, nailRows, tnailRows, attrRows } = require('./helpers/usage-baselines');
 
 const fx = createFixtureDb();
 process.env.ZCODE_DB = fx.dbPath;
@@ -46,30 +53,10 @@ test('空集稳健: 全函数不抛错、totals 全零/null、数组空', () => 
 
 // ── 阶段 2：窗口语义（wsem 三组行：65min / 3d / 31d；31d 行不入 30d 档）──
 test('窗口语义: 24h/7d/30d 三档聚合边界、31d 边界行不计入 30d 档', () => {
-  buildTurnUsage(fx.conn, [
-    { turn_id: 'w1', session_id: 'wsem', status: 'completed', started_at: H(65),
-      duration_ms: 1000, time_to_first_token_ms: 500, model_request_count: 1 },
-    { turn_id: 'w2', session_id: 'wsem', status: 'completed', started_at: now - 3 * DAY,
-      duration_ms: 1000, model_request_count: 1 },
-    { turn_id: 'w3', session_id: 'wsem', status: 'completed', started_at: now - 31 * DAY,
-      duration_ms: 1000, model_request_count: 1 },
-  ]);
-  buildToolUsage(fx.conn, [
-    { id: 'wt1', session_id: 'wsem', turn_id: 'w1', tool_name: 'Bash', status: 'completed',
-      started_at: H(65), duration_ms: 100 },
-    { id: 'wt2', session_id: 'wsem', turn_id: 'w2', tool_name: 'Bash', status: 'completed',
-      started_at: now - 3 * DAY, duration_ms: 100 },
-    { id: 'wt3', session_id: 'wsem', turn_id: 'w3', tool_name: 'Bash', status: 'completed',
-      started_at: now - 31 * DAY, duration_ms: 100 },
-  ]);
-  buildModelUsage(fx.conn, [
-    { id: 'wm1', session_id: 'wsA', turn_id: 'w1', status: 'completed', started_at: H(65),
-      duration_ms: 1000, computed_total_tokens: 10, query_source: 'main_turn' },
-    { id: 'wm2', session_id: 'wsB', turn_id: 'w2', status: 'completed', started_at: now - 3 * DAY,
-      duration_ms: 1000, computed_total_tokens: 10, query_source: 'main_turn' },
-    { id: 'wm3', session_id: 'wsC', turn_id: 'w3', status: 'completed', started_at: now - 31 * DAY,
-      duration_ms: 1000, computed_total_tokens: 10, query_source: 'main_turn' },
-  ]);
+  const wsem = wsemRows(H, now);
+  buildTurnUsage(fx.conn, wsem.turns);
+  buildToolUsage(fx.conn, wsem.tools);
+  buildModelUsage(fx.conn, wsem.models);
 
   const since24 = now - 24 * 60 * MIN, since7 = now - 7 * DAY, since30 = now - 30 * DAY;
   // turn 侧：24h 只含 65min 行；7d/30d 含 3d 行；31d 行两档都不计
@@ -94,18 +81,7 @@ test('窗口语义: 24h/7d/30d 三档聚合边界、31d 边界行不计入 30d �
 
 // ── 阶段 3：C1-2 数值钉（nail 三行，窗口 now−55min 只含本组）──
 test('C1-2 数值钉: totals 逐项与构造值相等、error_type 分布含 api_error', () => {
-  buildTurnUsage(fx.conn, [
-    { turn_id: 'tn1', session_id: 'nail', status: 'error', error_type: 'api_error',
-      started_at: H(50), duration_ms: 8000, time_to_first_token_ms: 1000,
-      model_request_count: 3, model_retry_count: 2, tool_error_count: 1,
-      computed_total_tokens: 500, context_exceeded: 1 },
-    { turn_id: 'tn2', session_id: 'nail', status: 'completed',
-      started_at: H(48), duration_ms: 12000, time_to_first_token_ms: 3000,
-      model_request_count: 2, computed_total_tokens: 900 },
-    { turn_id: 'tn3', session_id: 'nail', status: 'cancelled',
-      started_at: H(45), duration_ms: 4000, time_to_first_token_ms: 2000,
-      model_request_count: 1, computed_total_tokens: 200 },
-  ]);
+  buildTurnUsage(fx.conn, nailRows(H));
   const s = dbq.usageTurnsSummary(H(55));
   assert.deepEqual(s.totals, {
     turns: 3, completed: 1, errors: 1, cancelled: 1,
@@ -169,14 +145,7 @@ test('C1-2 空值钉: 窗口内 ttft 全 NULL → avg_ttft_ms === null', () => {
 
 // ── 阶段 6：C1-3 工具数值钉（Bash/Read 两行，含三分布对象）──
 test('C1-3 数值钉: 工具分组逐项相等（成功率/耗时口径/三分布形态）', () => {
-  buildToolUsage(fx.conn, [
-    { id: 'bg1', session_id: 'tnail', turn_id: 't1', tool_name: 'Bash', status: 'completed',
-      started_at: H(15), duration_ms: 900, read_only: 0, destructive: 1,
-      approval_status: 'none', output_bytes: 120 },
-    { id: 'rd1', session_id: 'tnail', turn_id: 't1', tool_name: 'Read', status: 'error',
-      started_at: H(15), duration_ms: 50, read_only: 1, destructive: 0,
-      approval_status: 'denied', output_bytes: 0 },
-  ]);
+  buildToolUsage(fx.conn, tnailRows(H));
   const groups = dbq.usageToolBreakdown(H(17)); // 只含 tnail 两行（wsem 65min 之外）
   const byName = Object.fromEntries(groups.map(g => [g.tool_name, g]));
   assert.deepEqual(byName.Bash, {
@@ -199,20 +168,9 @@ test('C1-3 数值钉: 工具分组逐项相等（成功率/耗时口径/三分�
 
 // ── 阶段 7：C5 归因两级数值钉 + 截断钉 ──
 test('C5-1/C5-2 数值钉: session 层聚合/降序/分解/标题 + turn 层逐项按 token 降序 + 截断', () => {
-  buildSession(fx.conn, [
-    { id: 'sA', title: '会话A', task_type: 'interactive', time_created: H(30), time_updated: H(8) },
-    { id: 'sB', title: '会话B', task_type: 'interactive', time_created: H(30), time_updated: H(8) },
-  ]);
-  buildModelUsage(fx.conn, [
-    { id: 'am1', session_id: 'sA', turn_id: 'ta', status: 'completed', started_at: H(8),
-      duration_ms: 1000, computed_total_tokens: 100, query_source: 'main_turn', tool_call_count: 2 },
-    { id: 'am2', session_id: 'sA', turn_id: 'tb', status: 'completed', started_at: H(8),
-      duration_ms: 2000, computed_total_tokens: 50, query_source: 'subagent', tool_call_count: 0 },
-    { id: 'am4', session_id: 'sA', turn_id: 'ta', status: 'completed', started_at: H(8),
-      duration_ms: 100, computed_total_tokens: 25, query_source: 'workflow_child', tool_call_count: 1 },
-    { id: 'bm3', session_id: 'sB', turn_id: 'tc', status: 'completed', started_at: H(8),
-      duration_ms: 500, computed_total_tokens: 300, query_source: 'main_turn', tool_call_count: 1 },
-  ]);
+  const attr = attrRows(H);
+  buildSession(fx.conn, attr.sessions);
+  buildModelUsage(fx.conn, attr.models);
   // session 层：按 tokens 降序（sB 300 > sA 175）、标题补齐、by_query_source
   // 为 token 口径分解（火焰宽度语义）
   const { rows, truncated } = dbq.usageAttributionBySession(H(10));
@@ -242,8 +200,8 @@ test('C5-1/C5-2 数值钉: session 层聚合/降序/分解/标题 + turn 层逐�
 });
 
 // ── 阶段 8：宽窗 rowid 尾界钳制行为（slowTools 先例；30d>500ms 启用依据见
-// docs/acceptance/round2-batch1-explain-timing.md）──
-test('规模钳制: 宽窗（>7d）小 cap 裁最旧 rowid、窄窗不启用 cap', () => {
+// docs/acceptance/round2-batch1-explain-timing.md；宽窗判定阈值 8d 见阶段 9）──
+test('规模钳制: 宽窗（≥8d）小 cap 裁最旧 rowid、窄窗不启用 cap', () => {
   // 追加 3 行工具 + 2 行 model，均落 now−9d（宽窗内）；insert 顺序=隐式 rowid
   // 升序（fixture TEXT 主键不占 rowid 别名，helpers/fixture-db.js 头注不变量）。
   buildToolUsage(fx.conn, [
@@ -271,6 +229,10 @@ test('规模钳制: 宽窗（>7d）小 cap 裁最旧 rowid、窄窗不启用 cap
   assert.equal(a.rows.length, 1);
   assert.equal(a.rows[0].session_id, 'capS');
   assert.equal(a.rows[0].tokens, 50, 'cm1（更旧 rowid）被尾界裁出，不得计入 550');
+  // 分解与行总量同口径（I-码-3 回归钉）：by_query_source 亦按 cap 窗聚合——
+  // 旧实现按全窗聚合会得 { main_turn: 550 }（11 倍于行 tokens，子条份额超 100%）。
+  assert.deepEqual(a.rows[0].by_query_source, { main_turn: 50 },
+    'by_query_source 与该行 tokens 同 cap 窗（对账一致），不得为全窗 550');
   // 对偶钉：窄窗（≤7d）不启用 cap——同参数小 cap 下若误启用，尾界只剩最新 1 行
   //（tc3/CapTool），Bash/Read（更旧 rowid 的窗内行）会消失。
   const narrow = dbq.usageToolBreakdown(now - 60 * MIN, { candidateCapRows: 1 });
@@ -281,8 +243,11 @@ test('规模钳制: 宽窗（>7d）小 cap 裁最旧 rowid、窄窗不启用 cap
 // ── 阶段 9：EXPLAIN 形态（fixture 上本族每条 SQL 无基表 SCAN）──
 // 经 db() 代理的 prepare 缝捕获真实执行 SQL（零漂移——不复制 SQL 字面量），
 // 对每条做 EXPLAIN QUERY PLAN：判据「不含对基表的 SCAN」，TEMP B-TREE 允许。
-// 窄窗与宽窗（>7d，rowid 尾界 + NOT INDEXED 形态）两路都捕获。
-test('EXPLAIN 形态: 本族每条 SQL 无基表 SCAN（TEMP B-TREE 允许）', () => {
+// 窄窗（24h/7d 两形态）、宽窗（rowid 尾界 + NOT INDEXED 形态）三路都捕获——
+// 7d 直调是 I-码-1 回归钉：宽窄判定阈值 8d 下 7d 必须走窄窗精确路径（无 cap、
+// 无 NOT INDEXED；旧阈值 7d 时 7d 因「路由早时刻 sinceMs vs db 晚时刻 now」
+// 恒被判宽窗，此路曾永不可达且套件全绿看不见）。
+test('EXPLAIN 形态: 本族每条 SQL 无基表 SCAN（TEMP B-TREE 允许）；7d 走窄窗', () => {
   const captureSql = (thunk) => {
     const proxy = dbq.db();
     const orig = proxy.prepare;
@@ -291,19 +256,28 @@ test('EXPLAIN 形态: 本族每条 SQL 无基表 SCAN（TEMP B-TREE 允许）', 
     try { thunk(); } finally { proxy.prepare = orig; }
     return seen;
   };
-  const since = H(10), wideSince = now - 10 * DAY;
+  const since = H(10), wideSince = now - 10 * DAY, since7d = now - 7 * DAY;
   const sqls = [
     ...captureSql(() => dbq.usageTurnsSummary(since)),            // 2 条（totals + 分布）
     ...captureSql(() => dbq.usageTurnTimeline(since, 5)),         // 1 条
     ...captureSql(() => dbq.usageToolBreakdown(since)),           // 2 条（聚合 + approval）
-    ...captureSql(() => dbq.usageAttributionBySession(since, 5)), // 3 条（两段 + 标题）
+    ...captureSql(() => dbq.usageAttributionBySession(since, 5)), // 2 条（单趟分组 + 标题）
     ...captureSql(() => dbq.usageAttributionByTurn('sA', 5)),     // 1 条
     ...captureSql(() => dbq.usageToolBreakdown(wideSince)),       // 2 条（宽窗形态）
-    ...captureSql(() => dbq.usageAttributionBySession(wideSince, 5)), // 1 条（宽窗页查询）
+    ...captureSql(() => dbq.usageAttributionBySession(wideSince, 5)), // 2 条（宽窗单趟分组 + 标题）
+    ...captureSql(() => dbq.usageToolBreakdown(since7d)),         // 2 条（7d 窄窗形态钉）
+    ...captureSql(() => dbq.usageAttributionBySession(since7d, 5)), // 2 条（7d 窄窗形态钉）
   ];
-  assert.equal(sqls.length, 14, '查询计数钉：窄窗 9 + 宽窗 5（宽窗含两段+标题）');
+  assert.equal(sqls.length, 16, '查询计数钉：窄窗 8 + 宽窗 4 + 7d 窄窗 4（归因单趟化后每档 2 条）');
   assert.equal(sqls.filter(s => /NOT INDEXED/.test(s)).length, 3,
-    '宽窗形态必须钉 NOT INDEXED（tools×2 + attr 页查询×1）');
+    '宽窗形态必须钉 NOT INDEXED（tools×2 + attr 单趟分组×1）');
+  // 7d 窄窗形态钉（I-码-1）：无 NOT INDEXED/无 rowid 尾界；归因分组查询钉
+  // INDEXED BY started_at 索引。
+  const d7 = sqls.slice(12);
+  assert.equal(d7.filter(s => /NOT INDEXED|rowid >/.test(s)).length, 0,
+    '7d 档不得走宽窗 rowid 钳制路径（阈值 8d 语义）');
+  assert.ok(d7.some(s => /INDEXED BY model_usage_started_model_idx/.test(s)),
+    '7d 归因分组查询须钉 started_at 索引（窄窗精确路径）');
   const explain = (sql) => {
     const named = [...sql.matchAll(/@(\w+)/g)].map(m => m[1]);
     const anon = (sql.match(/\?/g) || []).length;
@@ -320,5 +294,26 @@ test('EXPLAIN 形态: 本族每条 SQL 无基表 SCAN（TEMP B-TREE 允许）', 
       assert.ok(!/SCAN\s+(turn_usage|tool_usage|model_usage|session)\b/.test(line),
         `出现基表 SCAN：${line}（SQL：${sql.slice(0, 80)}…）`);
     }
+  }
+});
+
+// ── 阶段 10：缺索引库回退分支（I-测-2 零执行缺口）──
+// 窄窗归因页查询的「缺 model_usage_started_model_idx 库不加 INDEXED BY」回退
+// （服务外部 ZCODE_DB 无索引形态）此前从未被任何测试执行（fixture DDL 恒建
+// 索引）。DROP INDEX + 拨掉连接级探测记忆后同数据对拍：结果与带索引路径逐位
+// 一致（慢但可用取舍，overviewKpis 同款），结束前重建索引并拨正记忆。
+test('缺索引回退: 无 model_usage_started_model_idx 时窄窗归因不加 INDEXED BY、结果逐位一致', () => {
+  const withIdx = dbq.usageAttributionBySession(H(10), 50);
+  fx.conn.exec('DROP INDEX model_usage_started_model_idx');
+  const conn = dbq.db();
+  const cached = conn._hasStartedModelIdx;
+  conn._hasStartedModelIdx = undefined; // 拨掉探测记忆，强制走 sqlite_master 重探测
+  try {
+    const noIdx = dbq.usageAttributionBySession(H(10), 50);
+    assert.deepEqual(noIdx, withIdx, '同数据对拍：回退路径结果与带索引路径逐位一致');
+    assert.equal(conn._hasStartedModelIdx, false, '重探测须如实记下索引缺失');
+  } finally {
+    fx.conn.exec('CREATE INDEX IF NOT EXISTS model_usage_started_model_idx ON model_usage(started_at, provider_id, model_id)');
+    conn._hasStartedModelIdx = cached !== undefined ? cached : true;
   }
 });

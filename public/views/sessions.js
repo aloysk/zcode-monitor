@@ -389,13 +389,15 @@
     const sub = lvl.window
       ? `最新请求带入 ${fmtNum(lvl.molecule)} tok / 窗口 ${fmtNum(lvl.window)} tok`
         + (lvl.fallback ? ' · 末行为回退分子（input=0，以 cache 两列估算）' : '')
-      : `最新请求带入 ${fmtNum(lvl.molecule)} tok · 窗口未知（未收录模型，不猜）`;
+        + (lvl.unavailable ? ' · 末行分子不可得（SSE 行缺 cache 列），水位维持上一已知读数' : '')
+      : `最新请求带入 ${fmtNum(lvl.molecule)} tok · 窗口未知（未收录模型，不猜）`
+        + (lvl.unavailable ? ' · 末行分子不可得（SSE 行缺 cache 列），水位维持上一已知读数' : '');
     return wrap(`<div class="card">
       <h2 style="margin-bottom:4px">上下文水位
         <span class="caliber" title="窗口值来自静态整理表（server/models-meta.js，非官方权威）：只收录已核对官方源码常量的模型，未收录模型不猜窗口、不显百分比">非官方权威</span>
         <span class="sub">${sub}</span>
       </h2>
-      <div class="muted" style="font-size:11.5px;margin:2px 0 8px">水位随已落库请求推进、生成中不跳动（口径：分子=input_tokens，官方语义已含 cache_read；input=0 行回退 cache 两列估算${fbCount ? `——本段含 ${fbCount} 行回退行，曲线 hover 已逐行标注` : ''}）</div>
+      <div class="muted" style="font-size:11.5px;margin:2px 0 8px">水位随已落库请求推进、生成中不跳动（口径：分子=input_tokens，官方语义已含 cache_read；input=0 行回退 cache 两列估算；缺 cache 列的 live 行分子不可得、不推进水位${fbCount ? `——本段含 ${fbCount} 行回退行，曲线 hover 已逐行标注` : ''}）</div>
       ${CG.gaugeBarHtml(lvl.ratio, { title: '上下文占用 = 分子/窗口 · 档位：<60% 正常 / ≥60% 偏高 / ≥85% 逼近上限（呈现层分档，数据不因分档改变）' })}
       <div class="sub" style="margin:12px 0 4px">逐轮增量曲线<span class="faint">（上=增长 下=回落 · 竖线=compaction 边界 · hover 看逐行分子）</span></div>
       ${CG.deltaCurveHtml(series)}
@@ -422,7 +424,7 @@
         if (!card) { closeGaugeLive(); return; }
         const m = JSON.parse(e.data);
         if (m.session_id !== id) return;
-        if (lastSeedAt && m.started_at && m.started_at <= lastSeedAt) return;
+        if (!ZCg().shouldAcceptLiveRow(lastSeedAt, m)) return;
         liveRows.push(m);
         card.outerHTML = renderGaugeSection(seedRows, liveRows);
       } catch (err) { console.warn('[sessions] live model 帧解析失败', err); }

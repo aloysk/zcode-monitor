@@ -964,11 +964,12 @@ function agentsForest({ projectId = null } = {}) {
 //     只记终态（7d 窗 160,827 行 'none' + 1 行 'denied'）。
 // 性能契约（红线 2）：窗口查询全部 WHERE started_at >= @since 命中官方 started_at
 // 索引（model_usage_started_model_idx / tool_usage_started_tool_idx /
-// turn_usage_started_idx；GROUP BY 的 TEMP B-TREE 允许）；宽窗（>7d）改走 rowid
-// 尾界钳制（红线允许的另一条路径，见下）；会话内/页内寻址走
+// turn_usage_started_idx；GROUP BY 的 TEMP B-TREE 允许）；宽窗（≥8d，见下）改走
+// rowid 尾界钳制（红线允许的另一条路径）；会话内/页内寻址走
 // session 索引（sessionList db.js 两段模式先例）；行数上限经 LIMIT @probe=limit+1
-// 探针实现诚实截断（多 1 行即置 truncated 并丢弃，免额外 COUNT）。真实库
-// EXPLAIN/计时与 30d 档规模取舍照录 docs/acceptance/round2-batch1-explain-timing.md。
+// 探针（归因 session 层单趟化后为 JS 侧截断，同义）实现诚实截断——多 1 行/会话
+// 即置 truncated 并丢弃，免额外 COUNT。真实库 EXPLAIN/计时与 30d 档规模取舍
+// 照录 docs/acceptance/round2-batch1-explain-timing.md。
 
 // 行数防御：路由层 clampLimit 是第一道（负 LIMIT = 无上限 → SQLite 整表同步
 // 物化事故形态，见 http-hardening.js 头注）；db 层对直调（测试/未来调用方）
@@ -979,17 +980,24 @@ function attrLimit(limit) {
 
 // 宽窗候选集钳制（slowTools 先例的移植；启用依据＝2026-09-25 真实库只读实测，
 // 数字与取舍照录 docs/acceptance/round2-batch1-explain-timing.md）：
-//   - 窗宽 >7d（本族 30d 档）的 tool/attribution 聚合，30d 全窗逐行回表聚合实测
+//   - 窗宽 ≥8d（本族 30d 档）的 tool/attribution 聚合，30d 全窗逐行回表聚合实测
 //     热态 653-820ms（冷态至 4.5s）——超 500ms 触发线，启用 rowid 尾部候选集
 //     上界：`rowid > MAX(rowid) - cap AND started_at >= @since`（隐式 rowid 尾界
 //     寻址；NOT INDEXED 钉死计划——attr 页查询不钉时 planner 会为省 GROUP BY 的
 //     TEMP B-TREE 改走 session 索引全扫，cap 形同虚设）。
-//   - ≤7d 窗（24h/7d）保持 started_at 索引精确路径（7d 实测 ≤204ms 在线内）；
-//     cap=200k 下 24h/7d 结果与不钳逐字节相等（实测钉）。副作用如实申报是
-//     调用方义务（路由 meta 注明 scope，slow_tools_scope 先例）。
-//   - turn_usage 不钳：30d 全表仅 1.4 万行、实测 116ms，远在线内。
+//   - <8d 窗（本族值域 24h/7d）保持 started_at 索引精确路径（7d 实测 ≤204ms
+//     在线内）；cap=200k 下 24h/7d 结果与不钳逐字节相等（实测钉）。副作用如实
+//     申报是调用方义务（路由 meta 注明 scope，slow_tools_scope 先例）。
+//   - 阈值是 8d 而非 7d（评审修复）：宽窄判定在此处对 Date.now() 二次求值，
+//     而 sinceMs 由路由在更早时刻算出（T1≤T2 恒真）——阈值若取 7d，7d 请求的
+//     窗宽（7d+求值延迟）恒过线、被静默尾界收窄且路由无 scope 申报（路由按
+//     window 标签只对 30d 申报）。8d＝7d 档加 1 天余量，令 7d 恒走精确路径，
+//     与 meta 申报机制同源；DB 层直调更宽的自定义窗（如 9d/10d）仍过线钳制。
+//   - turn_usage 不钳：30d 全表仅 1.4 万行、实测 116ms 冷/12ms 热，远在线内；
+//     增长触发线——30d 行数 >5 万或单查询 >300ms 时重评钳制（与 slowTools/
+//     USAGE cap 的既有治理口径对齐，无谓复杂度不提前引入）。
 const USAGE_CANDIDATE_CAP_ROWS = 200_000;
-const USAGE_CAP_WINDOW_MS = 7 * 86400_000;
+const USAGE_CAP_WINDOW_MS = 8 * 86400_000;
 
 // C1 turn 健康度聚合 + error_type 分布 Top5（诚实截断）。
 function usageTurnsSummary(sinceMs) {
@@ -1115,77 +1123,74 @@ function usageToolBreakdown(sinceMs, { candidateCapRows = USAGE_CANDIDATE_CAP_RO
   });
 }
 
-// C5 归因 session 层：两段查询（sessionList 先例——先窗口内 GROUP BY session_id
-// 取 top N（LIMIT+1 探截断），再对页内 id 做索引寻址的 query_source 分解与
-// session 表标题补齐；分解查询带同窗 started_at 下界，保证 by_query_source
-// 份额与该行窗口总量可对账）。
+// C5 归因 session 层：单趟分组 + JS 归并（第二轮评审 I-SQL-4 的方案 (a)）。
+// 演进史：两段式（页查询 GROUP BY session_id LIMIT+1 探截断 → 页内 id 的
+// query_source 分解）在宽窗下双尾界扫描——真实库 30d 页 270-360ms + sources
+// 200-246ms ≈ 541-605ms，持续超 500ms 触发线；改为同趟 GROUP BY
+// session_id, query_source 一次扫描（真实库实测 30d 299.3ms 冷 / 7d 189.7ms 冷
+// 回线内，探针 zcmon-i-sql-4-merge-probe.js 留 os.tmpdir()），JS 侧归并出每会话
+// 总量/分解/排序截断（30d 5187 分组行 → 4978 会话，归并 3.2ms）。分解与总量
+// 出自同一查询（I-码-3「可对账」的彻底消解——两段式曾出现行内 cap 窗值 vs
+// 全窗分解的双口径）。会话行 ORDER BY tokens DESC 与截断移入 JS：分组行数
+// 上界=候选集行数（最坏每行一组），万级分组行的归并+排序不构成长阻塞面。
 function usageAttributionBySession(sinceMs, limit = 50, { candidateCapRows = USAGE_CANDIDATE_CAP_ROWS } = {}) {
   const lim = attrLimit(limit);
-  // 窄窗（≤7d）：INDEXED BY 强制 started_at 索引（overviewKpis 同款问题+同款解法，
-  // 见其头注）——缺省计划会全索引扫 session 索引求 GROUP BY session_id 的序
-  //（fixture EXPLAIN 实测 SCAN model_usage USING INDEX idx_model_usage_session，
-  // 真实库 40 万行同形态即 2.4s 级事件循环阻塞）；复用 overviewKpis 的连接级
-  // sqlite_master 探测记忆与「缺索引库回退不加 INDEXED BY」取舍。
-  // 宽窗（>7d，本族 30d 档）：NOT INDEXED + rowid 尾界 cap（见分节头注——不钉
+  // 窄窗（<8d，本族 24h/7d 档）：INDEXED BY 强制 started_at 索引（overviewKpis
+  // 同款问题+同款解法，见其头注）——缺省计划会全索引扫 session 索引求
+  // GROUP BY session_id 的序（fixture EXPLAIN 实测 SCAN model_usage USING INDEX
+  // idx_model_usage_session，真实库 40 万行同形态即 2.4s 级事件循环阻塞）；
+  // 复用 overviewKpis 的连接级 sqlite_master 探测记忆与「缺索引库回退不加
+  // INDEXED BY」取舍。
+  // 宽窗（≥8d，本族 30d 档）：NOT INDEXED + rowid 尾界 cap（见分节头注——不钉
   // NOT INDEXED 时 planner 同样改走 session 索引全扫，cap 失效）。
   const conn = db();
   const wide = sinceMs <= Date.now() - USAGE_CAP_WINDOW_MS;
-  let pageSql;
-  if (wide) {
-    pageSql = `
-      SELECT session_id,
-             SUM(computed_total_tokens) AS tokens,
-             SUM(duration_ms)           AS duration_ms_sum,
-             COUNT(*)                   AS calls
-      FROM model_usage NOT INDEXED
-      WHERE rowid > (SELECT MAX(rowid) FROM model_usage) - @cap AND started_at >= @since
-      GROUP BY session_id
-      ORDER BY tokens DESC
-      LIMIT @probe
-    `;
-  } else {
+  let idxGuard = '';
+  if (!wide) {
     if (conn._hasStartedModelIdx === undefined) {
       conn._hasStartedModelIdx = !!conn.prepare(
         `SELECT 1 FROM sqlite_master WHERE type='index' AND name='model_usage_started_model_idx'`
       ).get();
     }
-    pageSql = `
-      SELECT session_id,
-             SUM(computed_total_tokens) AS tokens,
-             SUM(duration_ms)           AS duration_ms_sum,
-             COUNT(*)                   AS calls
-      FROM model_usage ${conn._hasStartedModelIdx ? 'INDEXED BY model_usage_started_model_idx' : ''}
-      WHERE started_at >= @since
-      GROUP BY session_id
-      ORDER BY tokens DESC
-      LIMIT @probe
-    `;
+    idxGuard = conn._hasStartedModelIdx ? 'INDEXED BY model_usage_started_model_idx' : '';
   }
   // schema source: zai-org/ZCode MIG 0010_usage_observability + USAGE queryAppUsage
-  //（token=SUM(computed_total_tokens) 官方预计算权威口径）
-  const page = conn.prepare(pageSql).all(
-    wide ? { since: sinceMs, cap: candidateCapRows, probe: lim + 1 } : { since: sinceMs, probe: lim + 1 });
-  const truncated = page.length > lim;
-  if (truncated) page.length = lim;
-  if (!page.length) return { rows: [], truncated };
-
-  const ids = page.map(r => r.session_id);
-  const ph = ids.map(() => '?').join(',');
-  // schema source: zai-org/ZCode MIG 0010_usage_observability（query_source 列）
-  const srcRows = db().prepare(`
-    SELECT session_id, query_source, SUM(computed_total_tokens) AS tokens
-    FROM model_usage
-    WHERE started_at >= ? AND session_id IN (${ph})
+  //（token=SUM(computed_total_tokens) 官方预计算权威口径；query_source 列）
+  const grp = conn.prepare(`
+    SELECT session_id, query_source,
+           SUM(computed_total_tokens) AS tokens,
+           SUM(duration_ms)           AS duration_ms_sum,
+           COUNT(*)                   AS calls
+    FROM model_usage ${wide ? 'NOT INDEXED' : idxGuard}
+    WHERE ${wide ? 'rowid > (SELECT MAX(rowid) FROM model_usage) - @cap AND ' : ''}started_at >= @since
     GROUP BY session_id, query_source
-  `).all(sinceMs, ...ids);
-  const srcBySess = new Map();
-  for (const s of srcRows) {
-    if (!srcBySess.has(s.session_id)) srcBySess.set(s.session_id, {});
-    srcBySess.get(s.session_id)[s.query_source] = s.tokens || 0;
+  `).all(wide ? { since: sinceMs, cap: candidateCapRows } : { since: sinceMs });
+  // JS 归并：(session, source) 分组行 → 会话行（总量/耗时/调用数 + 分解字典；
+  // SUM 全 NULL → null，归并侧按 0 折算防 NaN 累加）。
+  const bySess = new Map();
+  for (const g of grp) {
+    let s = bySess.get(g.session_id);
+    if (!s) {
+      s = { session_id: g.session_id, tokens: 0, duration_ms_sum: 0, calls: 0, by_query_source: {} };
+      bySess.set(g.session_id, s);
+    }
+    s.tokens += g.tokens || 0;
+    s.duration_ms_sum += g.duration_ms_sum || 0;
+    s.calls += g.calls || 0;
+    s.by_query_source[g.query_source] = (s.by_query_source[g.query_source] || 0) + (g.tokens || 0);
   }
+  // token 降序 + 诚实截断（会话数 > limit 即 truncated——与旧 SQL LIMIT+1 探针
+  // 同义；排序移 JS 后并列 tokens 的次序由插入序稳定决定）。
+  const all = [...bySess.values()].sort((a, b) => b.tokens - a.tokens);
+  const truncated = all.length > lim;
+  if (!all.length) return { rows: [], truncated };
+  const page = truncated ? all.slice(0, lim) : all;
+
   // 标题补齐：session 表主键寻址；缺行会话（model 行先于 session 行落库的窗口
   // 形态）title=null 如实呈现。
   // schema source: zai-org/ZCode MIG 0010_usage_observability（session 表）
+  const ids = page.map(r => r.session_id);
+  const ph = ids.map(() => '?').join(',');
   const titles = new Map(db().prepare(
     `SELECT id, title FROM session WHERE id IN (${ph})`
   ).all(...ids).map(r => [r.id, r.title]));
@@ -1194,10 +1199,10 @@ function usageAttributionBySession(sinceMs, limit = 50, { candidateCapRows = USA
     rows: page.map(r => ({
       session_id: r.session_id,
       title: titles.has(r.session_id) ? titles.get(r.session_id) : null,
-      tokens: r.tokens || 0,
-      duration_ms_sum: r.duration_ms_sum || 0,
-      calls: r.calls || 0,
-      by_query_source: srcBySess.get(r.session_id) || {},
+      tokens: r.tokens,
+      duration_ms_sum: r.duration_ms_sum,
+      calls: r.calls,
+      by_query_source: r.by_query_source,
     })),
     truncated,
   };

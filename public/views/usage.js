@@ -166,7 +166,7 @@
     const sub = $('#usage-tools-sub');
     if (sub) {
       sub.textContent = groups.length
-        ? `${groups.length} 个工具 · 按调用数降序${tools.meta && tools.meta.scope ? ' · ' + tools.meta.scope + '（宽窗候选集钳制，读数上限=最新 20 万行）' : ''}`
+        ? `${groups.length} 个工具 · 按调用数降序${tools.meta && tools.meta.scope ? ' · ' + tools.meta.scope + '（宽窗候选集钳制，读数上限以 scope 为准）' : ''}`
         : '';
     }
     if (!groups.length) {

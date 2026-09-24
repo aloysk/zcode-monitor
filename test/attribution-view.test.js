@@ -52,6 +52,14 @@ test('C5-3 视图形态: registerView("attribution") + 空态经 ZC.emptyState +
   // 诚实截断：meta.truncated → 「仅前 N 项（被裁）」显式标注，不静默。
   assert.ok(src.includes('仅前') && src.includes('（被裁）'),
     'attribution.js 须含「仅前 N 项（被裁）」截断标注文案');
+  // 取数失败兜底锚（I-测-10 钉）：reload/drill 由按钮/容器点击触发、不经
+  // route() 的 try/catch——catch 须走 failCard（错误空态卡 + 撤明细区 spinner，
+  // 否则取数失败视图永久停在 loading）。emptyState 正则锚由 route() 内既有
+  // 调用满足、不判别本分支，故锚 catch→failCard 调用形态本身。
+  assert.ok(/function failCard\(/.test(src) && /catch[\s\S]{0,260}failCard\(/.test(src),
+    'reload/drill 的 catch 须走 failCard 兜底（防永久 spinner）');
+  assert.ok(/function failCard\([\s\S]{0,400}setHtml\('#attr-detail', ''\)/.test(src),
+    'failCard 须撤掉 #attr-detail 的 loading spinner（失败不留加载残态）');
 });
 
 test('C5-3 零图表库: attribution.js 不含 registerChart / new Chart 调用（火焰图=嵌套 div 宽度布局）', () => {

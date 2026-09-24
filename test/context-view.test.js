@@ -136,6 +136,70 @@ test('C2-3: currentLevel 取末行分子/最近已知窗口（会话内模型切
   assert.strictEqual(unknown.ratio, null);
 });
 
+// plans:370 点名的 live 边界钉（I-码-2 评审修复）：SSE model 行缺 cache 两列
+//（recentModelRowsAfterRowid 载荷形态——undefined 而非 0）→ 分子 null、绝不按
+// 0 计（JS 语义 null/N === 0，仅判 context_tokens 会把缺列行算成 0% 占用）；
+// delta 不产出、下一行相对最近已知分子；currentLevel 末行缺列 → 维持上一已知
+// 读数并标 unavailable。
+test('C2-3: live 缺列行（input=0 且 cache 两列 undefined）分子 null、不按 0 计', () => {
+  const series = CG.computeGaugeSeries([
+    base({ turn_id: 'v1', input_tokens: 300 }),
+    { // SSE live 行形态：无 cache 两列（键不存在），input=0（error/cancelled 全零行）
+      started_at: '2026-09-25T10:01:00Z', turn_id: 'v2', model_id: 'GLM-5.1',
+      query_source: 'main_turn', input_tokens: 0, context_tokens: WIN,
+    },
+    base({ turn_id: 'v3', input_tokens: 500 }),
+  ]);
+  assert.strictEqual(series[1].molecule, null, '缺列行分子 null（缺列即未知，不按 0 计）');
+  assert.strictEqual(series[1].ratio, null, '分子 null → ratio null（显式判空，不得 0/N===0）');
+  assert.strictEqual(series[1].delta, null, '缺列行不产出 delta（按 0 计会得 -300 大负值）');
+  assert.strictEqual(series[1].fallback, false, '缺列行不是回退估算行');
+  assert.strictEqual(series[2].delta, 200, '下一行相对最近已知分子（500-300），缺列行不进基准');
+  // currentLevel：末行缺列 → 不推进水位，回退最近已知分子并标 unavailable
+  const lvl = CG.currentLevel(series.slice(0, 2));
+  assert.strictEqual(lvl.unavailable, true, '末行分子不可得须如实标注');
+  assert.equal(lvl.molecule, 300, '水位维持上一已知读数');
+  assert.equal(lvl.ratio, +(300 / WIN).toFixed(4));
+  // 全序列无已知分子（首行即缺列）→ 分子 null 空读数（不伪造 0）
+  const allUnknown = CG.currentLevel(CG.computeGaugeSeries([
+    { started_at: '2026-09-25T10:00:00Z', turn_id: 'z1', model_id: 'GLM-5.1',
+      query_source: 'main_turn', input_tokens: 0, context_tokens: WIN },
+  ]));
+  assert.strictEqual(allUnknown.molecule, null);
+  assert.strictEqual(allUnknown.unavailable, true);
+  // compact 回落任一侧分子不可得 → dropTokens null（token 差无从算，不猜）
+  const mixed = CG.computeGaugeSeries([
+    base({ turn_id: 'c1', input_tokens: 5000, query_source: 'compact', compact_boundary: true }),
+    { started_at: '2026-09-25T10:02:00Z', turn_id: 'c2', model_id: 'GLM-5.1',
+      query_source: 'main_turn', input_tokens: 0, context_tokens: WIN },
+  ]);
+  assert.strictEqual(CG.compactDrops(mixed)[0].dropTokens, null, '后行分子不可得 → dropTokens null');
+  // 渲染面：缺列行 hover 载荷如实标注（曲线不显假 0、不误标首行——缺列行
+  // delta 同为 null 但非首行，I-码-7 三分支钉）
+  const curve = CG.deltaCurveHtml(series);
+  assert.ok(curve.includes('分子不可得'), '缺列行 hover 标注「分子不可得」');
+  const v2Col = curve.split('title="')[2]; // 第二列即缺列行 v2（构造序 v1,v2,v3）
+  assert.ok(v2Col.includes('增量 —（分子不可得）'), '缺列行增量文案为「分子不可得」三态分支');
+  assert.ok(!v2Col.includes('（首行）'), '中段缺列行不得误标「（首行）」');
+  assert.ok(curve.split('title="')[1].includes('增量 —（首行）'), '真首行仍标「（首行）」');
+});
+
+// SSE 防重叠闸（I-测-3 评审钉）：startGaugeLive 消费的纯函数直测——闸静默失效
+//（如 live 行 started_at 改本地格式/去毫秒）会双计污染增量曲线，此前无测试红。
+test('C2-3: shouldAcceptLiveRow 三态——重放行跳过/更晚接受/缺时间戳兜底', () => {
+  const seed = '2026-09-25T10:00:00.123Z';
+  assert.equal(CG.shouldAcceptLiveRow(seed, { started_at: seed }), false,
+    '等于末种子行 → 跳过（SSE 重放的种子行）');
+  assert.equal(CG.shouldAcceptLiveRow(seed, { started_at: '2026-09-25T09:59:59Z' }), false,
+    '早于末种子行 → 跳过（(连接, 查询] 间已种下的重放行）');
+  assert.equal(CG.shouldAcceptLiveRow(seed, { started_at: '2026-09-25T10:00:00.124Z' }), true,
+    '晚于末种子行 → 接受（真增量）');
+  assert.equal(CG.shouldAcceptLiveRow(seed, {}), true,
+    'live 行缺 started_at → 兜底接受（无法判序时不丢行）');
+  assert.equal(CG.shouldAcceptLiveRow('', { started_at: '2026-09-25T09:00:00Z' }), true,
+    '无种子（空会话首行）→ 接受');
+});
+
 test('C2-3: 档位阈值（呈现层分档，数据不因分档改变）：<60% ok / ≥60% warn / ≥85% err', () => {
   assert.equal(CG.severityClass(0.59), 'ok');
   assert.equal(CG.severityClass(0.6), 'warn');
@@ -186,6 +250,14 @@ test('C2-5: sessions.js renderContext 四要素——SSE 订阅 / 增量曲线 /
   // 幂等 close（overview.js:453 同步 close 先例——杜绝孤儿 EventSource）
   assert.ok(/closeGaugeLive\(\)/.test(src) && /gaugeEs\.close\(\)/.test(src),
     'live 订阅须有幂等 close 路径');
+  // SSE 防重叠闸经组件纯函数（I-测-3 钉：闸失效=双计污染增量曲线，消费面
+  // 必须走 shouldAcceptLiveRow——直测见 C2-3 纯函数用例）
+  assert.ok(src.includes('shouldAcceptLiveRow'),
+    'startGaugeLive 须消费组件导出的 shouldAcceptLiveRow 防重叠闸');
+  // 末行分子不可得的视图消费锚（I-测-10 钉）：unavailable 分支的 sub 文案
+  // 拼接——水位维持上一已知读数并如实标注（组件纯函数已直测，此处钉接线）。
+  assert.ok(src.includes('lvl.unavailable') && src.includes('分子不可得'),
+    '水位区 sub 文案须消费 lvl.unavailable 并标注「分子不可得」');
 });
 
 test('C2-5: context-gauge.js 无硬编码色值（#hex / rgb( / hsl( / 具名色 0 命中，色值走 var(--sev-*)）', () => {

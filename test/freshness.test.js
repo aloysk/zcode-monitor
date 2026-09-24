@@ -128,6 +128,36 @@ test('C9-1: db 落后 1min、jsonl 刚写 → 双源 ok', async () => {
   assert.equal(fr.jsonl.level, 'ok');
 });
 
+// I-测-6b 补例：db 探活 ok 但 model_usage 查询抛错（连接探活与行查询是两次
+// prepare——库文件可读而表损坏/列缺失的形态）→ freshness.db 走 catch 兜底
+// null/null（levelFor(null)=null，不伪造 0/ok；jsonl 源同用注入桩置不可测）。
+test('C9-1: db 探活 ok 但行查询抛错 → freshness.db 为 null/null（catch 兜底）', async () => {
+  const stubDbq = {
+    db: () => ({
+      prepare(sql) {
+        if (/SELECT 1/.test(sql)) return { get: () => 1 }; // 探活通路上正常应答
+        throw new Error('fixture: corrupted model_usage');  // 行查询通道损坏
+      },
+    }),
+    invalidateDb() { /* 探活未失败，不应被调用；空实现兜底签名 */ },
+  };
+  const app = express();
+  app.get('/api/health', makeHealthRoute({
+    dbq: stubDbq, runtime: RUNTIME, runtimeState: RUNTIME_STATE,
+    dbPath: 'x', logDir: 'y',
+    defaultTodayFile: () => { throw new Error('fixture: no log file'); },
+  }));
+  const server = await listen(app);
+  try {
+    const r = await getJson(server.address().port, '/api/health');
+    assert.equal(r.status, 200);
+    assert.equal(r.json.ok, true, '探活通道正常 → ok:true');
+    assert.deepEqual(r.json.freshness.db, { lag_ms: null, level: null },
+      '行查询抛错 → 双字段 null（诚实空态，不伪造 0/ok）');
+    assert.deepEqual(r.json.freshness.jsonl, { lag_ms: null, level: null });
+  } finally { server.close(); }
+});
+
 test('C9-1: 阈值注入（warn=100/err=200）生效 + 档位归属 >= 含等值钉', async () => {
   // Date.now 钉在固定值 T：lag = T − started_at 恰等于阈值，等值归属可确定性
   // 断言（不靠墙钟 ε 撞界——正值 ε 下 >= 与 > 同判，分不出语义）。
@@ -180,9 +210,11 @@ test('C9-2 契约: index.html 有 chip 元素；app.js 渲染「数据落后」+
   assert.ok(app.includes('var(--sev-warn)') && app.includes('var(--sev-err)'),
     'warn/err 档须用 severity 语义色（--sev-warn/--sev-err，双主题同源）');
   assert.ok(/renderFreshnessChip\(h\.freshness\)/.test(app), 'healthLoop 须接线 freshness 渲染');
-  // 分档判定不在前端：5min/30min 阈值的字面量与乘式变体一律禁入 app.js
-  //（60000/3600000 等 <60s/>1h 显示格式化阈值合法——判定与显示分离）。
-  const BAN = /300000|300_000|1800000|1_800_000|5\s*\*\s*60\s*\*\s*1000|30\s*\*\s*60\s*\*\s*1000/;
+  // 分档判定不在前端：5min/30min 阈值的字面量、乘式变体与科学计数等价写法
+  // 一律禁入 app.js（I-测-8 补科学计数旁路：300e3/3e5/1.8e6/18e5/180e4 与
+  // 60e3 乘式组合——穷举不追求完备，钉住常见等价形态；60000/3600000 等
+  // <60s/>1h 显示格式化阈值合法——判定与显示分离）。
+  const BAN = /300000|300_000|1800000|1_800_000|5\s*\*\s*60\s*\*\s*1000|30\s*\*\s*60\s*\*\s*1000|300e3|3e5|1\.8e6|18e5|180e4|1800e3|5\s*\*\s*60e3|30\s*\*\s*60e3|60\s*\*\s*5e3|60\s*\*\s*30e3/;
   const hits = app.split('\n').map((l, i) => [i + 1, l]).filter(([, l]) => BAN.test(l));
   assert.deepEqual(hits, [], `app.js 不得含分档阈值字面量（判定在服务端）: ${JSON.stringify(hits)}`);
 });

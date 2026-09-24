@@ -101,10 +101,13 @@ buildModelUsage(fx.conn, [
     input_tokens: 777, output_tokens: 10, reasoning_tokens: null,
     cache_read_input_tokens: 300, cache_creation_input_tokens: 30,
     tool_call_count: 0, computed_total_tokens: 787 },
-  // sBig：600 行（截断方向/钳界/缺省 limit 载荷；started_at 严格递增）
+  // sBig：600 行（截断方向/钳界/缺省 limit 载荷；started_at 严格递增）。锚点
+  // 刻意取 Y−1h（再 +i≤599ms）而非 Y 本身：Y=昨日此刻，若此刻近本地零点
+  //（00:10 前后），Y+i 的尾行会跨入今日、污染 C2-6 的 todayUsage 当日 SUM 断言
+  //（I-测-5 防御——概率 ~600ms/86400s，极低但一行锚点位移即可归零）。
   ...Array.from({ length: 600 }, (_, i) => ({
     id: 'big' + i, session_id: 'sBig', turn_id: 'tbig' + i, trace_id: 'trbig',
-    status: 'completed', started_at: Y + i, completed_at: Y + i + 500,
+    status: 'completed', started_at: Y - 3600_000 + i, completed_at: Y - 3600_000 + i + 500,
     duration_ms: 500, query_source: 'main_turn', model_id: KNOWN_A,
     provider_id: 'zai', input_tokens: 1000 + i, output_tokens: 1,
     reasoning_tokens: null, cache_read_input_tokens: 0,
@@ -206,6 +209,17 @@ test('C2-2: 截断方向——?limit=3 于 5 行 → 恰最新 3 行且行序仍
     for (let i = 1; i < rows.length; i++) {
       assert.ok(rows[i - 1].started_at < rows[i].started_at, '截断后行序仍须 ASC');
     }
+  } finally { server.close(); }
+});
+
+// 不存在会话（I-测-6a 补例：usage 族测过 no-such，本端点此前漏）→ 200 + 空
+// rows（诚实空态不抛错——会话寻址走 session 索引，无行即空序列）。
+test('C2-2: 不存在会话 → 200 + 空 rows（诚实空态，不 404 不抛错）', async () => {
+  const server = await listen(sessionsApp());
+  try {
+    const r = await get(server.address().port, '/api/sessions/no-such-session/context-gauge');
+    assert.equal(r.status, 200);
+    assert.deepEqual(JSON.parse(r.body).rows, []);
   } finally { server.close(); }
 });
 
