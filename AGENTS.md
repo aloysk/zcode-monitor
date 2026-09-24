@@ -42,6 +42,18 @@ npm test                   # node --test test/index.js（聚合入口）
 
 ## 当前状态（2026-09-24）
 
+- 重启链六视角终审轮（fix/restart-six-lens-final，zcode-pr-review-toolkit）：
+  注释/静默/简化三席 FIX-FIRST + 测试席 8/10 缺口 + 静默席 HIGH 两条，全部修毕
+  ——①10s/12s 文案漂移；②netstat 过滤注释「只锚本地列」为假（连入 7331 的
+  客户端行 remote 列同样含 `:7331 `，本/远甄别全靠 LISTENING token）；③
+  start-detached 头注「与 restart-route 完全一致」失实（restart-route 无
+  windowsHide；不设 ZCODE_WIDGET_CHILD 的长驻语义差异补记）；④强杀调用点
+  从裸存在性钉升级为分支钉；⑤start-detached 探活三态化（拒连才 spawn；
+  占口不应答→如实报因+指路，不产竞速者；200+body.ok 才算健康）；⑥壳恢复
+  失败/进行中改菜单文本可见反馈（重启中…/重启失败——详见 widget-run.log）；
+  ⑦netstat 绝对路径 System32+读管道 5s 硬超时（挂起曾可永久搁浅重启闩）；
+  ⑧旁路 null 落日志、already-gone 改 continue、START_TIMEOUT_MS NaN 兜底、
+  errFd 父侧即关。R-18/R-19 登记。测试 +5（契约钉/占口不 spawn/源码契约）。
 - 胶囊重启阻塞态修复轮（fix/widget-restart-blocked）：2026-09-24 19:40 实锤——
   面板事件循环卡死时壳右键「重启面板」对阻塞态裸退（仅记日志、零用户反馈），
   恰是最需要重启的场景。改为：有界观察 12s（墙钟预算——Blocked 探测自身耗满
@@ -55,10 +67,12 @@ npm test                   # node --test test/index.js（聚合入口）
   提示手动处理）——已接受边界。
 - start-detached 启动脚本轮（feat/start-detached-script）：7331 实例随会话/机器
   重启消失（2026-09-24 实况：detached 接替进程被外部终止，无崩溃日志）后一条
-  命令恢复——`npm run start:detached`（scripts/start-detached.js：detached+
-  windowsHide 接替形态同 restart-route、/api/health 幂等探活、stderr 续写
-  logs/restart-child.log、默认 OPEN_BROWSER=0，`--open` 显式开）。
-  E2E 回归 test/start-detached.test.js 1 例（7399：拉起→幂等→回收）。
+  命令恢复——`npm run start:detached`（scripts/start-detached.js：detached 接替
+  形态对齐 restart-route 并按红线另加 windowsHide；三态探活幂等——占口但非
+  健康不 spawn 竞速者；stderr 续写 logs/restart-child.log；有意不设
+  ZCODE_WIDGET_CHILD（实例长驻，换代走桌宠重启）；默认 OPEN_BROWSER=0，
+  `--open` 显式开）。回归 test/start-detached.test.js（7399：拉起→幂等→回收、
+  占口不 spawn、spawn 形态源码契约）。
 - main（2c39076）：生态采纳计划 + 四轮多视角加固审查 + 快照绊线（五视角对抗评审 +
   六视角 zcode-pr-review-toolkit 终审）+ 洁癖收尾轮 + workflow_child 计数轮及其
   六视角终审 + 桌宠重启菜单轮及其四席加固三轮（并发/失败模式/安全/测试质量 ×3：

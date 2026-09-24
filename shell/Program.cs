@@ -278,6 +278,12 @@ internal sealed class WidgetForm : Form
     private readonly ToolStripMenuItem _miniFormItem = new("迷你宠物") { CheckOnClick = true };
     private readonly ToolStripMenuItem _petFormItem = new("正常桌宠") { CheckOnClick = true };
     private readonly ToolStripMenuItem _nextPetItem = new("下一只宠物");
+    // 「重启面板」菜单项做字段：恢复期间改它的文本是失败路径唯一的用户可见
+    // 反馈通道（六视角终审 SF-1——否则用户点了没动静，只能自己去翻 widget-run.log）
+    private const string RestartItemLabel = "重启面板";
+    private readonly ToolStripMenuItem _restartItem = new(RestartItemLabel)
+        { ToolTipText = "重启 127.0.0.1:7331 面板服务（更新代码后用；服务卡死时观察约 12s 后强杀 node 重建；失败时可再点一次）" };
+    private System.Windows.Forms.Timer? _restartTextTimer; // 失败文案的限时还原（防菜单永久停在失败态）
     private readonly string _settingsPath = Path.Combine(AppContext.BaseDirectory, "widget-settings.json");
     private readonly System.Windows.Forms.Timer _watch = new() { Interval = 500 };
     // localhost probe client — MUST bypass any system proxy: with a proxy
@@ -367,10 +373,8 @@ internal sealed class WidgetForm : Form
         _menu.Items.Add(_topMostItem);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("打开完整面板", null, (s, e) => OpenUrl(DashboardUrl));
-        var restartItem = new ToolStripMenuItem("重启面板")
-            { ToolTipText = "重启 127.0.0.1:7331 面板服务（更新代码后用；服务卡死时观察 10s 后强杀 node 重建；失败时可再点一次）" };
-        restartItem.Click += (s, e) => _ = RestartServerAsync();
-        _menu.Items.Add(restartItem);
+        _restartItem.Click += (s, e) => _ = RestartServerAsync();
+        _menu.Items.Add(_restartItem);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("退出", null, (s, e) => Close());
         ContextMenuStrip = _menu;
@@ -601,12 +605,21 @@ internal sealed class WidgetForm : Form
     {
         if (_restartBusy) { Program.Log("restart: already in progress — ignoring"); return; }
         _restartBusy = true;
-        try { await RestartServerCoreAsync(); }
-        catch (Exception ex) { Program.Log("restart: unexpected: " + ex.Message); }
+        _restartItem.Text = "重启中…（最长约1分钟）";
+        bool ok;
+        try { ok = await RestartServerCoreAsync(); }
+        catch (Exception ex) { Program.Log("restart: unexpected: " + ex.Message); ok = false; }
         finally { _restartBusy = false; }
+        if (ok) { _restartItem.Text = RestartItemLabel; return; }
+        // 失败必须可见：这正是 19:40 事故的形态（点了、什么都没发生、零反馈）
+        _restartItem.Text = "重启失败——详见 widget-run.log";
+        _restartTextTimer?.Stop();
+        _restartTextTimer = new System.Windows.Forms.Timer { Interval = 10000 };
+        _restartTextTimer.Tick += (s, e) => { _restartTextTimer?.Stop(); _restartItem.Text = RestartItemLabel; };
+        _restartTextTimer.Start();
     }
 
-    private async Task RestartServerCoreAsync()
+    private async Task<bool> RestartServerCoreAsync()
     {
         Program.Log("menu: restart panel");
         var probe = await ProbeServerAsync();
@@ -620,11 +633,11 @@ internal sealed class WidgetForm : Form
             // force-kill ONLY a node.exe listener and fall through to the
             // plain bring-up path — a spawn racer against a port the blocked
             // server still holds stays impossible (round-2 finding 1).
-            Program.Log("restart: server alive but unresponsive (blocked event loop) — watching up to 10s before force-kill");
+            Program.Log("restart: server alive but unresponsive (blocked event loop) — watching up to 12s before force-kill");
             probe = await WatchBlockedAsync();
             if (probe == ServerProbe.Blocked)
             {
-                if (!await KillBlockedListenerAsync()) return; // logged inside
+                if (!await KillBlockedListenerAsync()) return false; // logged inside
                 probe = ServerProbe.Refused;
             }
         }
@@ -645,12 +658,12 @@ internal sealed class WidgetForm : Form
                 // 500 spawn_failed — old server stays up) must stop here, not burn
                 // 4s in the wait-down loop against a server that never goes down
                 // and then "recover" into a pointless page reload
-                if (!resp.IsSuccessStatusCode) return;
+                if (!resp.IsSuccessStatusCode) return false;
             }
             catch (Exception ex)
             {
                 Program.Log("restart: endpoint failed: " + ex.Message);
-                return;
+                return false;
             }
             // let the OLD process actually exit first: it stays reachable for
             // ~250ms after the response, and an immediate "wait for up" would
@@ -684,19 +697,20 @@ internal sealed class WidgetForm : Form
             if (await ServerUpAsync()) break;
             await Task.Delay(500);
         }
-        if (!await ServerUpAsync()) { Program.Log("restart: server did not come back"); return; }
+        if (!await ServerUpAsync()) { Program.Log("restart: server did not come back"); return false; }
         if (_webReady)
         {
             var url = _navUrl ?? UrlOf(_mode);
             _web.CoreWebView2.Navigate(url);
             Program.Log("restart: reloaded " + url);
         }
+        return true;
     }
 
     // Bounded watch over a blocked listener before any force-kill: a stuck
     // cold query can finish by itself, and a dying process may release the
-    // port mid-watch — both are strictly better outcomes than killing, and
-    // the dying case (exactly the 2026-09-24 incident) needs no kill at all.
+    // port mid-watch — both are strictly better outcomes than killing (the
+    // 2026-09-24 incident class: both no-kill outcomes beat killing).
     // WALL-CLOCK budget, not iteration count: a Blocked probe burns the full
     // 2s client timeout, so 10 counted rounds are really 30s (live catch on
     // the first real-machine run).
@@ -716,29 +730,51 @@ internal sealed class WidgetForm : Form
 
     // netstat lookup of the LISTENING owner pid(s) of 7331; null = netstat
     // itself failed (distinct from "no listener" for the wait loop).
+    // netstat runs hidden (CreateNoWindow): it is a console program, and this
+    // shell also runs in no-console forms (same windowsHide red line as the
+    // server's tasklist probe — see AGENTS.md). Absolute System32 path: the
+    // shell can be launched by hooks with a trimmed PATH. The read carries a
+    // hard 5s budget — a hung netstat (WFP filter / AV / pipe deadlock) would
+    // otherwise hold _restartBusy forever and dead-lock the restart menu.
     private static async Task<int[]?> ListenerPidsOn7331Async()
     {
         try
         {
             var psi = new System.Diagnostics.ProcessStartInfo
             {
-                FileName = "netstat",
+                FileName = Path.Combine(Environment.SystemDirectory, "netstat.exe"),
                 Arguments = "-ano -p tcp",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
             };
             using var ns = System.Diagnostics.Process.Start(psi)!;
-            var text = await ns.StandardOutput.ReadToEndAsync();
-            ns.WaitForExit(5000);
+            var read = ns.StandardOutput.ReadToEndAsync();
+            if (await Task.WhenAny(read, Task.Delay(5000)) != read)
+            {
+                try { ns.Kill(entireProcessTree: true); } catch { /* already dying */ }
+                Program.Log("restart: netstat hung >5s — killed, treating as failure");
+                return null;
+            }
+            var text = read.Result;
+            if (!ns.WaitForExit(2000))
+            {
+                try { ns.Kill(entireProcessTree: true); } catch { /* already dying */ }
+                Program.Log("restart: netstat did not exit after output — killed");
+            }
             return text.Split('\n')
                 .Select(l => l.Trim())
                 // "  TCP   127.0.0.1:7331   0.0.0.0:0   LISTENING   <pid>" — the
-                // ":7331 " (trailing space) anchors on the LOCAL address, never
-                // the remote; with -ano the line ENDS with the pid, so LISTENING
-                // must be a contains-token, not EndsWith (first live run: an
-                // EndsWith filter matched nothing and the kill path never ran).
-                // ESTABLISHED/TIME_WAIT rows into :7331 never carry LISTENING.
+                // ":7331 " (trailing space) pins the PORT token only (":73310"
+                // won't match). It does NOT discriminate local vs remote: rows
+                // CONNECTED INTO 7331 carry ":7331 " in their REMOTE column
+                // (this shell's own 2s probes and WebView2's hung requests
+                // mint those during a block) — the local/remote discrimination
+                // is carried entirely by the LISTENING token, which non-listener
+                // rows never carry. With -ano the line ENDS with the pid, so
+                // LISTENING must be a contains-token, not EndsWith (first live
+                // run: an EndsWith filter matched nothing and the kill path
+                // never ran).
                 .Where(l => l.Contains(":7331 ", StringComparison.Ordinal)
                             && l.Contains("LISTENING", StringComparison.Ordinal))
                 .Select(l => l.Split(' ', StringSplitOptions.RemoveEmptyEntries).Last())
@@ -752,9 +788,7 @@ internal sealed class WidgetForm : Form
 
     // Force-kill the stuck listener on 7331. Safety gate: the owner must be
     // node.exe — anything else squatting on the port is not ours to kill
-    // (logged, declined, user resolves manually). netstat runs hidden: it is
-    // a console program, and this shell also runs in no-console forms (same
-    // windowsHide red line as the server's tasklist probe — see AGENTS.md).
+    // (logged, declined, user resolves manually).
     private static async Task<bool> KillBlockedListenerAsync()
     {
         var pids = await ListenerPidsOn7331Async();
@@ -771,8 +805,11 @@ internal sealed class WidgetForm : Form
             try { proc = System.Diagnostics.Process.GetProcessById(pid); }
             catch
             {
-                Program.Log($"restart: listener pid {pid} already gone — bring-up path");
-                return true;
+                // already gone between netstat and now — other listeners in the
+                // same batch still need their turn (returning here used to skip
+                // them and misdiagnose as "port still not free")
+                Program.Log($"restart: listener pid {pid} already gone — continuing with the rest");
+                continue;
             }
             if (!string.Equals(proc.ProcessName, "node", StringComparison.OrdinalIgnoreCase))
             {
@@ -792,7 +829,8 @@ internal sealed class WidgetForm : Form
             if (i % 3 == 2)
             {
                 var now = await ListenerPidsOn7331Async();
-                if (now is { Length: 0 }) { Program.Log("restart: netstat shows no listener after kill — proceeding to bring-up"); return true; }
+                if (now is null) { Program.Log("restart: netstat failed during bypass — probe-only this round"); }
+                else if (now.Length == 0) { Program.Log("restart: netstat shows no listener after kill — proceeding to bring-up"); return true; }
             }
             await Task.Delay(500);
         }
