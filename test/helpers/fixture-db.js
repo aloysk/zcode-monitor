@@ -38,11 +38,17 @@ CREATE TABLE tool_usage (
   id TEXT PRIMARY KEY, session_id TEXT, turn_id TEXT, trace_id TEXT,
   tool_call_id TEXT, tool_name TEXT, status TEXT, started_at INTEGER,
   completed_at INTEGER, duration_ms INTEGER, side_effect_scope TEXT,
-  read_only INTEGER, approval_status TEXT, exit_code INTEGER,
+  read_only INTEGER, destructive INTEGER, time_to_first_output_ms INTEGER,
+  approval_status TEXT, exit_code INTEGER,
   output_bytes INTEGER, stderr_bytes INTEGER,
   error_type TEXT, error_code TEXT, error_message TEXT);
+-- destructive / time_to_first_output_ms 是官方 schema 列（zai-org/ZCode MIG
+-- 0010_usage_observability；usage-accounting.md §1），WP0 约定 fixture 随
+-- db.js 现行查询所假设列集扩列（C1 usageToolBreakdown 的 destructive 分布）。
 CREATE INDEX idx_tool_usage_started_at ON tool_usage(started_at);
 CREATE INDEX idx_tool_usage_session ON tool_usage(session_id);
+-- 主键 (session_id, turn_id) 镜像真实库（usage-accounting.md §1 实测记载；
+-- 真实库 sessionTurns 的 session 寻址即走其自动索引 sqlite_autoindex_）。
 CREATE TABLE turn_usage (
   turn_id TEXT, session_id TEXT, status TEXT, trace_id TEXT, user_message_id TEXT,
   started_at INTEGER, first_token_at INTEGER, completed_at INTEGER,
@@ -52,7 +58,11 @@ CREATE TABLE turn_usage (
   input_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER,
   cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER,
   computed_total_tokens INTEGER, context_exceeded INTEGER,
-  error_type TEXT, error_code TEXT);
+  error_type TEXT, error_code TEXT,
+  PRIMARY KEY (session_id, turn_id));
+-- 真实库同名索引 turn_usage_started_idx(started_at)（usage-accounting.md §1）；
+-- 本族窗口查询（usageTurnsSummary/Timeline）在真实库即命中它。
+CREATE INDEX turn_usage_started_idx ON turn_usage(started_at);
 CREATE TABLE message (
   id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER,
   time_updated INTEGER,
