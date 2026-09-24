@@ -24,18 +24,36 @@
     container.innerHTML = loading('加载事件流…');
     const data = await getJSON(`/api/transcript/${sessionId}?limit=4000`);
     if (!data.found) {
-      container.innerHTML = `
-        <div class="card">
-          <h3>该会话没有 transcript.jsonl</h3>
-          <p class="muted" style="font-size:12.5px;margin:0 0 8px">主交互会话（interactive）不产生 transcript 事件流——它的对话记录在 SQLite 的 <code>message</code>/<code>part</code> 表里，请切到 <b>Context</b> 标签查看完整对话（含推理思考）。</p>
-          <p class="muted" style="font-size:12.5px;margin:0">只有子 agent（subagent）才有 transcript.jsonl 实时事件流。</p>
-          <p style="margin-top:12px"><a href="#sessions/${encodeURIComponent(sessionId)}/context">→ 去看 Context（完整对话 + reasoning）</a></p>
-        </div>`;
+      await renderEmpty(sessionId, container);
       return;
     }
     allEvents = data.events;
     renderHeader(container, data);
     renderEvents(container);
+  }
+
+  // transcript 空态诚实化（C9 需求 4）：found:false 不再一律称「主会话本就无
+  // transcript」——该文案对本机实况（ZCode 已停写 transcript.jsonl，0/7162 会话）
+  // 的子代理会话失实。经 /api/sessions/:id 取 task_type 判型，两情形分开呈现：
+  //   (a) interactive：本就无 transcript 事件流（对话在 SQLite message/part 表），
+  //       既有「去 Context」语义保留，经 emptyState 渲染；
+  //   (b) 其余会话（含判型失败兜底）：明示 ZCode 已停写 transcript.jsonl——
+  //       数据源退化是实况，不静默空白也不沿用过时文案。
+  // 404（会话已不在 session 表）/取型失败同样落 (b)：对未知型别断言「本就无」
+  // 才是失实方向。
+  async function renderEmpty(sessionId, container) {
+    let taskType = null;
+    try {
+      const s = await getJSON('/api/sessions/' + encodeURIComponent(sessionId));
+      taskType = s && s.session ? s.session.task_type : null;
+    } catch { /* 取型失败 → 已停写兜底 */ }
+    const ctxLink =
+      `<p style="margin-top:12px"><a href="#sessions/${encodeURIComponent(sessionId)}/context">→ 去看 Context（完整对话 + reasoning）</a></p>`;
+    container.innerHTML = taskType === 'interactive'
+      ? window.ZC.emptyState('transcript.jsonl',
+          '主交互会话（interactive）不产生 transcript 事件流——对话记录在 SQLite 的 message/part 表里，切到 Context 标签可看完整对话（含推理思考）。') + ctxLink
+      : window.ZC.emptyState('transcript.jsonl',
+          'ZCode 已停写 transcript.jsonl（本机实测：数据源退化，事件流不再产生）。该会话的历史对话如有落库，可经 Context（SQLite message/part 表）查看。') + ctxLink;
   }
 
   function renderHeader(container, data) {

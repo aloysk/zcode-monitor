@@ -217,7 +217,42 @@ async function healthLoop() {
     parts.push(`WAL ${(h.wal_bytes/1024/1024).toFixed(1)}MB 待合并`);
   }
   meta.textContent = parts.join(' · ');
+  renderFreshnessChip(h.freshness);
   setTimeout(healthLoop, 5000);
+}
+
+// 数据新鲜度 chip（C9）：读数与档位（ok/warn/err）全部来自 /api/health 的
+// freshness 对象——分档判定在服务端（server/health-route.js，阈值注入可测），
+// 这里只做显示格式化与语义色。fmtFreshnessLag 的 60s/1h 是**显示格式化**阈值
+// （<60s 显秒、>60s 显分钟、>1h 显小时），与分档判定无关；分档阈值（5min/30min）
+// 的字面量严禁出现在本文件（源码契约禁令，防前后端两套阈值漂移）。
+function fmtFreshnessLag(ms) {
+  if (ms < 60000) return Math.max(0, Math.round(ms / 1000)) + 's';
+  if (ms < 3600000) return Math.floor(ms / 60000) + 'm';
+  return Math.floor(ms / 3600000) + 'h';
+}
+
+function renderFreshnessChip(fr) {
+  const chip = $('#freshness-chip');
+  if (!chip) return;
+  if (!fr || !fr.db || !fr.jsonl) { chip.hidden = true; return; } // 旧服务/形状不符：不显示，不猜
+  // 标题读数取双源中落后最久者，档位用该源的服务端判定值；hover 双源并读。
+  let lag = null, level = null;
+  for (const src of [fr.db, fr.jsonl]) {
+    if (src.lag_ms == null) continue;
+    if (lag == null || src.lag_ms > lag) { lag = src.lag_ms; level = src.level; }
+  }
+  chip.hidden = false;
+  chip.dataset.level = level == null ? 'unknown' : level; // 语义档位锚（评审/截图/后续样式挂钩）
+  // 语义色复用 severity（styles.css --sev-* 变量，双主题同源）；ok/未知不染色。
+  chip.style.color = level === 'warn' ? 'var(--sev-warn)'
+    : level === 'err' ? 'var(--sev-err)' : '';
+  chip.textContent = lag == null ? '数据落后 —' : '数据落后 ' + fmtFreshnessLag(lag);
+  const dbTxt = fr.db.lag_ms == null ? '—' : fmtFreshnessLag(fr.db.lag_ms);
+  const jlTxt = fr.jsonl.lag_ms == null ? '—' : fmtFreshnessLag(fr.jsonl.lag_ms);
+  chip.title = `DB 落后 ${dbTxt} · JSONL 落后 ${jlTxt}`
+    + '\n口径：数据行在请求完成时落库——生成中的长请求完成前不落库，读数偏大属正常'
+    + `；与 ZCode ${fr.zcode_running === true ? '运行中' : '已退出'} 并读`;
 }
 
 // 快照绊线告警（语义见 server/snapshot-watch.js）：顶栏红标只在 /api/snapshot
