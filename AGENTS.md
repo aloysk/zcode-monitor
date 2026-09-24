@@ -89,7 +89,7 @@ npm test                   # node --test test/index.js（聚合入口）
   ZCODE_WIDGET_CHILD（实例长驻，换代走桌宠重启）；默认 OPEN_BROWSER=0，
   `--open` 显式开）。回归 test/start-detached.test.js（7399：拉起→幂等→回收、
   占口不 spawn、spawn 形态源码契约）。
-- main（c2672fc）：生态采纳计划 + 四轮多视角加固审查 + 快照绊线（五视角对抗评审 +
+- main（1bb73c0）：生态采纳计划 + 四轮多视角加固审查 + 快照绊线（五视角对抗评审 +
   六视角 zcode-pr-review-toolkit 终审）+ 洁癖收尾轮 + workflow_child 计数轮及其
   六视角终审 + 桌宠重启菜单轮及其四席加固三轮（并发/失败模式/安全/测试质量 ×3：
   CRITICAL 退出定时器撤销 / 早夭 exit 守卫 / SEC-002·004·006 泄露面闭合 /
