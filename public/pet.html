@@ -30,7 +30,8 @@
      Upstream rule kept verbatim: switch animations only at the END of a full
      row cycle, so the cat never pops mid-motion.
      Data: poll GET /api/widget/recent every 5 s → rolling tps over the
-     returned 5-minute population (Σ(output+reasoning) ÷ Σduration_ms/1000).
+     returned 5-minute population (Σ(output+reasoning) ÷ Σgen_ms/1000 —
+     generation time, duration − TTFT; same caliber as dashboard/widget).
      All endpoints are optional: with everything dead this page is an idle
      cat, which IS the product's default face.
      Shell: frameless WebView2 rounded card (transparency impossible); the
@@ -484,8 +485,10 @@ function render() {
 
 // ── data: poll /api/widget/recent every 5 s ────────────────────────────────
 // The endpoint returns the exact rolling-window population (completed in the
-// last 5 min), so the number is just Σtokens ÷ Σduration over the response.
-// Rows are keyed by completion time (time + duration_ms) for the idle clock.
+// last 5 min), so the number is Σtokens ÷ Σ GENERATION ms (duration − TTFT —
+// the same caliber as the dashboard KPI and the pill widget; rows without
+// ttft fall back to full duration). Rows are keyed by completion time
+// (time + duration_ms) for the idle clock — bookkeeping stays on duration.
 async function poll() {
   try {
     const r = await fetch('/api/widget/recent', { cache: 'no-store' });
@@ -498,7 +501,7 @@ async function poll() {
         if (end > lastEnd) lastEnd = end; // NaN rows drop out via comparison
         if (q.duration_ms > 0) {
           tok += (q.output || 0) + (q.reasoning || 0);
-          ms += q.duration_ms;
+          ms += q.gen_ms || q.duration_ms; // 生成时长（db.js completedSince 口径）
         }
       }
       st.lastActive = Math.max(st.lastActive, lastEnd); // 完成的流量推进统一活动时钟

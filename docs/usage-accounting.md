@@ -289,6 +289,15 @@ footer 仅统计该表可见的最近 ≤50 行，非全窗口——速度卡三
 保持纯口径、可分列复原）。widget ×N（在飞会话数）与窗口内行为计数的口径差异见 How 页
 「widget 的 ×N」条目。
 
+2026-09-24 增补（速度生成时长轮）：`overviewSpeed.weighted_tps`、`recentSpeed.tps`、
+`completedSince` 行的 `gen_ms`、widget/桌宠/overview feed 的全部速度读数，分母自本日起为
+**生成时长** Σ(duration − time_to_first_token_ms, 下限 1ms)，ttft 为 NULL 的行（实测
+22.1%）回退全时长；此前口径（Σduration 含首等）在 GLM-5.3 上读数偏低约四成（首等平均
+6.7s、占总时长 29-39%，24h 实测 51.5 → 72.6 t/s）。分子口径不变（Σ(output+reasoning)，
+不含输入）。社区对照：JuDaXia/claude-speed METRIC v1.2 的 duration ≈ TTFT + out/TPS
+分解；权威实现注见 `server/db.js` Token speed 区头注。`overviewSpeed` 并列返回
+`gen_seconds`（生成秒）与 `avg_ttft_ms`（平均首等，仅 ttft 非 NULL 行参与）。
+
 ## 9. db.js 注释出处约定（A2-5）
 
 `server/db.js` Overview 段头注释定义缩写，逐查询以

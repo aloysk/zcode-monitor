@@ -94,11 +94,30 @@ test('冒烟: 23 个查询函数在 fixture 上全部跑通且抽查结构正确
   // 字符串，断言按字符串比较。
   assert.ok(out.completedSince.some(r => r.id === '4'),
     '「开始于窗前、完成于窗内」的载荷行必须计入（2h pad 预过滤等价性）');
-  // overviewSpeed 数值口径：started_at >= since 过滤下 id4 不参与（90min 前开始），
-  // 分子 = 200 + (100+50) = 350，分母 = (10000+8000)/1000 = 18s → 350/18 = 19.4
-  assert.equal(out.overviewSpeed.weighted_tps, 19.4);
+  // overviewSpeed 数值口径（2026-09-24 起分母为生成时长）：started_at >= since
+  // 过滤下 id4 不参与（90min 前开始），分子 = 200 + (100+50) = 350；
+  // 生成分母 = id1 (10000−2000) + id2 ttft NULL 回退全时长 8000 = 16000ms = 16s
+  // → 350/16 = 21.9（含等待口径 350/18 = 19.4 已废——两口径在本钉可区分）。
+  assert.equal(out.overviewSpeed.weighted_tps, 21.9);
   assert.equal(out.overviewSpeed.total_tokens, 350);
+  assert.equal(out.overviewSpeed.gen_seconds, 16);
+  assert.equal(out.overviewSpeed.total_seconds, 18);
+  assert.equal(out.overviewSpeed.avg_ttft_ms, 2000); // 仅 id1 有首等
   assert.equal(out.overviewSpeed.request_count, 2);
+  // completedSince 行携带 gen_ms（widget 滚动均速分母）；完成时刻判定仍用
+  // duration_ms（id4 的窗口归属语义不随速度口径变化）
+  const byId = Object.fromEntries(out.completedSince.map(r => [r.id, r]));
+  assert.equal(byId['1'].gen_ms, 8000);
+  assert.equal(byId['2'].gen_ms, 8000, 'ttft NULL → 回退全时长');
+  assert.equal(byId['4'].gen_ms, 2340000);
+  // recentSpeed 行级口径：newest first；id2 ttft NULL 回退、id1 剔除 2s 首等
+  assert.equal(out.recentSpeed.length, 2);
+  assert.equal(out.recentSpeed[0].tps, 18.8);   // 150 tok / 8s gen（NULL 回退）
+  assert.equal(out.recentSpeed[0].gen_ms, 8000);
+  assert.equal(out.recentSpeed[0].ttft_ms, null);
+  assert.equal(out.recentSpeed[1].tps, 25.0);   // 200 tok / 8s gen（10s−2s 首等）
+  assert.equal(out.recentSpeed[1].gen_ms, 8000);
+  assert.equal(out.recentSpeed[1].ttft_ms, 2000);
   assert.equal(out.agentsForest.roots.length, 1); // s1 为根
   assert.equal(out.agentsForest.total, 2); // s1 + s2
 });

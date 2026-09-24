@@ -23,6 +23,7 @@ CREATE TABLE session (
 CREATE TABLE model_usage (
   id TEXT PRIMARY KEY, session_id TEXT, turn_id TEXT, trace_id TEXT,
   status TEXT, started_at INTEGER, completed_at INTEGER, duration_ms INTEGER,
+  first_token_at INTEGER, time_to_first_token_ms INTEGER,
   query_source TEXT, model_id TEXT, provider_id TEXT, variant TEXT, mode TEXT,
   agent TEXT, input_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER,
   cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER,
@@ -104,8 +105,12 @@ function createFixtureDb() {
           parent_id: 's1', project_id: 'p1', time_created: now - 1800e3, time_updated: now - 120e3 },
       ]);
       buildModelUsage(conn, [
+        // time_to_first_token_ms 三态种子：id1 有值（gen=duration−ttft）、
+        // id2 留 NULL（速度分母回退全时长——真实库约 23% 行无首等数据）、
+        // id4 有值（2h pad 载荷行的 gen 口径）。
         { id: '1', session_id: 's1', turn_id: 't1', trace_id: 'tr1', status: 'completed',
           started_at: now - 300e3, completed_at: now - 290e3, duration_ms: 10000,
+          first_token_at: now - 298e3, time_to_first_token_ms: 2000,
           query_source: 'main_turn', model_id: 'glm-5', provider_id: 'zai',
           mode: 'code', agent: 'main',
           input_tokens: 1000, output_tokens: 200, reasoning_tokens: null,
@@ -128,6 +133,7 @@ function createFixtureDb() {
           // 窗内 50min（duration 40min）——pad 被收紧为 0 时该行会被漏掉
           id: '4', session_id: 's1', turn_id: 't4', trace_id: 'tr4', status: 'completed',
           started_at: now - 5400e3, completed_at: now - 3000e3, duration_ms: 2400e3,
+          time_to_first_token_ms: 60000,
           query_source: 'main_turn', model_id: 'glm-5', provider_id: 'zai',
           input_tokens: 800, output_tokens: 300, reasoning_tokens: 20,
           cache_read_input_tokens: 0, cache_creation_input_tokens: 0,

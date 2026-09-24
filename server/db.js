@@ -319,26 +319,45 @@ function breakdownByTool(sinceMs) {
 
 // ───────────────────────── Token speed ─────────────────────────
 // Token generation speed (tokens/sec) for completed model requests.
-// Mirrors the token-speed-monitor project's metric, computed from the
-// same model_usage table. We aggregate raw sums and do the division in
-// JS to avoid floating-point drift inside SQLite, and to keep the
-// weighted average (= Σtokens / Σseconds) instead of mean(per-request tps).
+// Computed from the model_usage table; we aggregate raw sums and do the
+// division in JS to avoid floating-point drift inside SQLite, and to keep
+// the weighted average (= Σtokens / Σseconds) instead of mean(per-request
+// tps).
 //
-// Caliber decisions (see design.md D1–D3):
+// Caliber decisions (revised 2026-09-24 — the generation-time split):
 //   - numerator: output_tokens + reasoning_tokens (reasoning counts as
-//     generated throughput, same caliber as token-speed-monitor).
-//   - denominator: duration_ms total (incl. TTFT). Per-request TTFT is
-//     only available at turn_usage granularity, not per model call.
-//   - weighted average = Σtokens / Σseconds (token-weighted), NOT
-//     mean(tok/s) — long requests dominate, reflecting real throughput.
+//     generated throughput; matches claude-speed METRIC "reasoning is part
+//     of generation". In this db reasoning_tokens is always 0 so far —
+//     provider raw_usage_json carries no reasoning field at all).
+//   - denominator: GENERATION time = duration_ms − time_to_first_token_ms,
+//     NOT the full duration. GLM-5.3's thinking phase averages 8.7s TTFT
+//     = 39% of total duration (2026-09-24 measurement over 4756 rows),
+//     so the old incl-TTFT caliber read ~40% low vs. felt output speed.
+//     Community cross-check: JuDaXia/claude-speed METRIC v1.2 models
+//     duration ≈ TTFT + out/TPS and headlines the TTFT-stripped TPS
+//     (it must even Theil-Sen-fit it from record timestamps); the
+//     token-speed-monitor project this module originally mirrored includes
+//     TTFT only because its rollout-JSONL source has no TTFT field — a
+//     data limitation, not a caliber preference. model_usage has had
+//     time_to_first_token_ms per row all along (~77% coverage; NULL rows
+//     fall back to full duration), so the earlier note "per-request TTFT
+//     is only available at turn_usage granularity" was wrong.
+//   - per-row generation time is floored at 1ms (SQLite scalar MAX) so a
+//     dirty row with ttft ≥ duration can never zero/negate the sum.
+//   - weighted average = Σtokens / Σgeneration-seconds (token-weighted),
+//     NOT mean(tok/s) — long requests dominate, reflecting real throughput.
 
 function overviewSpeed(sinceMs) {
   // schema source: zai-org/ZCode MIG 0010_usage_observability。速度分子
   // （output+reasoning）是速度专用口径（本地估算合成），与 computed_total_tokens
   // 的总量口径不同——徽章与 docs/usage-accounting.md §徽章映射一致。
+  // 分母生成时长（duration−ttft，NULL 回退全时长，1ms 下限）见区头注。
   const m = db().prepare(`
     SELECT SUM(output_tokens + COALESCE(reasoning_tokens, 0)) AS total_tokens,
            SUM(duration_ms)                                    AS total_ms,
+           SUM(MAX(duration_ms - COALESCE(time_to_first_token_ms, 0), 1)) AS gen_ms,
+           SUM(time_to_first_token_ms)                          AS ttft_ms,
+           SUM(CASE WHEN time_to_first_token_ms IS NOT NULL THEN 1 END) AS ttft_count,
            COUNT(*)                                            AS request_count,
            SUM(CASE WHEN query_source='main_turn'      THEN 1 END) AS main_count,
            SUM(CASE WHEN query_source='subagent'       THEN 1 END) AS subagent_count,
@@ -351,10 +370,14 @@ function overviewSpeed(sinceMs) {
 
   const totalTokens = m.total_tokens || 0;
   const totalSeconds = m.total_ms ? m.total_ms / 1000 : 0;
+  const genSeconds = m.gen_ms ? m.gen_ms / 1000 : 0;
   return {
-    weighted_tps: totalSeconds > 0 ? +(totalTokens / totalSeconds).toFixed(1) : null,
+    weighted_tps: genSeconds > 0 ? +(totalTokens / genSeconds).toFixed(1) : null,
     total_tokens: totalTokens,
     total_seconds: +totalSeconds.toFixed(1),
+    // 生成秒数（速度分母）与平均首等：KPI 副行展示口径用（0 请求时均首等为 null）
+    gen_seconds: +genSeconds.toFixed(1),
+    avg_ttft_ms: m.ttft_count ? Math.round(m.ttft_ms / m.ttft_count) : null,
     request_count: m.request_count || 0,
     main_count: m.main_count || 0,
     subagent_count: m.subagent_count || 0,
@@ -370,6 +393,8 @@ function overviewSpeed(sinceMs) {
 // Per-request speed detail for the recent-speed table + scatter/line chart.
 // id is exposed so the widget can dedup its SSE stream against seed re-fetches.
 // Returns newest first. tps is null when duration_ms <= 0 (not shown).
+// gen_ms = generation time (duration−ttft, NULL→full duration, 1ms floor)
+// — the tps denominator; ttft_ms is exposed for the table's TTFT column.
 function recentSpeed(sinceMs, limit = 50) {
   // schema source: zai-org/ZCode MIG 0010_usage_observability（tps 分子同速度口径）
   const rows = db().prepare(`
@@ -379,6 +404,7 @@ function recentSpeed(sinceMs, limit = 50) {
            output_tokens,
            COALESCE(reasoning_tokens, 0) AS reasoning_tokens,
            duration_ms,
+           time_to_first_token_ms,
            query_source
     FROM model_usage
     WHERE status = 'completed'
@@ -388,8 +414,9 @@ function recentSpeed(sinceMs, limit = 50) {
     LIMIT @limit
   `).all({ since: sinceMs, limit });
   return rows.map(r => {
+    const genMs = Math.max(r.duration_ms - (r.time_to_first_token_ms || 0), 1);
     const tps = r.duration_ms > 0
-      ? +((r.output_tokens + r.reasoning_tokens) / (r.duration_ms / 1000)).toFixed(1)
+      ? +((r.output_tokens + r.reasoning_tokens) / (genMs / 1000)).toFixed(1)
       : null;
     return {
       id: r.id,
@@ -398,6 +425,8 @@ function recentSpeed(sinceMs, limit = 50) {
       output: r.output_tokens || 0,
       reasoning: r.reasoning_tokens || 0,
       duration_ms: r.duration_ms,
+      ttft_ms: r.time_to_first_token_ms,
+      gen_ms: genMs,
       tps,
       query_source: r.query_source,
     };
@@ -408,7 +437,9 @@ function recentSpeed(sinceMs, limit = 50) {
 // whose COMPLETION time (started_at + duration_ms) falls inside the window.
 // No LIMIT cap — recentSpeed's 50-row cap under-seeds busy windows (65+
 // completions per 5 min observed under parallel subagents), which skews the
-// widget's weighted aggregate. Payload stays tiny (window-sized).
+// widget's weighted aggregate. Payload stays tiny (window-sized). Rows carry
+// gen_ms (generation time, the speed denominator — see Token speed header)
+// alongside duration_ms (completion-time bookkeeping).
 function completedSince(sinceMs) {
   // started_at + duration_ms can't use the started_at index (expression),
   // and a bare expression scan cost ~430ms on the 14.6GB db — the pet page
@@ -423,6 +454,7 @@ function completedSince(sinceMs) {
     SELECT id,
            started_at,
            duration_ms,
+           time_to_first_token_ms,
            output_tokens,
            COALESCE(reasoning_tokens, 0) AS reasoning_tokens
     FROM model_usage
@@ -437,6 +469,9 @@ function completedSince(sinceMs) {
     output: r.output_tokens || 0,
     reasoning: r.reasoning_tokens || 0,
     duration_ms: r.duration_ms,
+    // 生成时长（widget 滚动均速/sparkline 的分母）；完成时刻判定仍用
+    // duration_ms（上两行），勿混。ttft NULL → 全时长；脏行 1ms 下限。
+    gen_ms: Math.max(r.duration_ms - (r.time_to_first_token_ms || 0), 1),
   }));
 }
 
@@ -773,6 +808,7 @@ function slowTools({ sinceMs = null, limit = 50,
 function recentModelRowsAfterRowid(afterRowid, limit = 50) {
   return db().prepare(`
     SELECT rowid AS rid, id, session_id, turn_id, trace_id, status, started_at, duration_ms,
+           time_to_first_token_ms,
            query_source, model_id, variant, mode, agent,
            input_tokens, output_tokens, reasoning_tokens, tool_call_count,
            error_type

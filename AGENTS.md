@@ -42,6 +42,22 @@ npm test                   # node --test test/index.js（聚合入口）
 
 ## 当前状态（2026-09-24）
 
+- 速度生成口径轮（fix/speed-ttft-caliber）：用户感知速度读数偏低实锤——旧口径分母
+  含 TTFT（GLM-5.3 首等均值 6.7-8.7s、占总时长 29-39%），24h 窗读数低四成
+  （51.5 → 72.6 t/s）。分母改 ΣMAX(duration−ttft, 1ms)，ttft NULL（实测 22.1%
+  行）回退全时长。社区对照定谳：JuDaXia/claude-speed METRIC v1.2（duration ≈
+  TTFT + out/TPS，headline 剔 TTFT；其仅有记录时间戳须 Theil-Sen 拟合，本库
+  model_usage 逐行自带 time_to_first_token_ms）；被镜像的 token-speed-monitor
+  含 TTFT 属其 rollout JSONL 无首等字段的数据面限制，非口径偏好。db.js 头注
+  「TTFT 只在 turn 粒度可用」前提失效，已修正。消费面全改：overviewSpeed
+  （+gen_seconds/avg_ttft_ms）/recentSpeed（+ttft_ms/gen_ms，速度表加 TTFT 列
+  与均首等副行）/completedSince（+gen_ms，完成时刻判定仍用 duration）/
+  SSE model 行（+ttft 列）/widget·pet·feed（代码席评审抓出 H-1：pet 气泡
+  漏改，同端点两 UI 漂移四成）。分档 30/80 有意不变（纯生成下 30 仍=真慢）。
+  三席评审（代码/SQL/测试质量）+ 复核 PASS（契约钉经变异测试逐点实证）；SQL
+  席 EXPLAIN 四路全走索引、24h 同锚点背靠背五字段逐位一致。新增
+  test/speed-caliber.test.js 5 例（空集稳健/NULL 回退等价/脏行 1ms 下限/
+  SSE 行形状/前端契约），全套 211 例绿。usage-accounting.md §8 增补口径段。
 - 重启链六视角终审轮（fix/restart-six-lens-final，zcode-pr-review-toolkit）：
   注释/静默/简化三席 FIX-FIRST + 测试席 8/10 缺口 + 静默席 HIGH 两条，全部修毕
   ——①10s/12s 文案漂移；②netstat 过滤注释「只锚本地列」为假（连入 7331 的

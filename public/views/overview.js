@@ -242,7 +242,8 @@
   }
 
   // ── token speed ──
-  // Tier: red <30 / yellow 30–80 / green >80 t/s (design.md D4).
+  // Tier: red <30 / yellow 30–80 / green >80 t/s (see server/db.js Token speed
+  // header — thresholds kept under the 2026-09 generation-time caliber).
   // Null/undefined/non-finite → no tier (empty string).
   function speedClass(tps) {
     if (tps == null || !isFinite(tps)) return '';
@@ -260,11 +261,12 @@
     const host = $('#kpi-speed');
     if (!host) return;
     const cls = speedClass(s && s.weighted_tps);
+    const ttft = s && s.avg_ttft_ms != null ? fmtMs(s.avg_ttft_ms) : null;
     host.innerHTML = `
       <div class="kpi">
-        <div class="label">平均 Token 速度 (${lastWindow})</div>
+        <div class="label" title="纯生成口径：总 token ÷ 总生成秒（各请求 duration − 首 token 等待，无首等数据的行回退全时长）。GLM-5.3 首等平均约占总时长四成，含等待口径会显著偏低">平均 Token 速度 (${lastWindow})</div>
         <div class="value ${cls}">${s && s.weighted_tps != null ? s.weighted_tps + ' <span class="faint" style="font-size:13px;font-weight:400">t/s</span>' : '—'}</div>
-        <div class="delta">加权:总 token ÷ 总秒数 · 主 ${fmtInt(s && s.main_count)} · 子agent(含工作流) ${fmtInt((s && s.subagent_count || 0) + (s && s.workflow_child_count || 0))} · 其中工作流 ${fmtInt(s && s.workflow_child_count)}</div>
+        <div class="delta">加权:总 token ÷ 生成秒(剔首等)${ttft ? ' · 均首等 ' + ttft : ''} · 主 ${fmtInt(s && s.main_count)} · 子agent(含工作流) ${fmtInt((s && s.subagent_count || 0) + (s && s.workflow_child_count || 0))} · 其中工作流 ${fmtInt(s && s.workflow_child_count)}</div>
       </div>`;
   }
 
@@ -388,7 +390,7 @@
       <table id="tbl-speed">
         <thead><tr>
           <th>Time</th><th>Model</th><th class="num">Output</th><th class="num">Reason</th>
-          <th class="num">Duration</th><th class="num">Speed</th><th>Source</th>
+          <th class="num">Duration</th><th class="num">TTFT</th><th class="num">Speed</th><th>Source</th>
         </tr></thead>
         <tbody>${
           recent.map(r => {
@@ -399,6 +401,7 @@
               <td class="num">${fmtInt(r.output)}</td>
               <td class="num">${r.reasoning ? fmtInt(r.reasoning) : '<span class="faint">0</span>'}</td>
               <td class="num">${fmtMs(r.duration_ms)}</td>
+              <td class="num" title="首 token 等待；Speed = (Output+Reason) ÷ (Duration−TTFT)，无首等数据回退全时长">${r.ttft_ms != null ? fmtMs(r.ttft_ms) : '<span class="faint">—</span>'}</td>
               <td class="num">${r.tps != null ? `<span class="spd-chip ${cls}">${r.tps} t/s</span>` : '<span class="faint">—</span>'}</td>
               <td><span class="badge ${SRC_COLOR[r.query_source] || 'dim'}">${escapeHtml(r.query_source||'')}</span></td>
             </tr>`;
@@ -407,18 +410,20 @@
       </table>`;
 
     // footer summary: window weighted avg + totals, recomputed from the same
-    // caliber (Σtokens / Σseconds). recent_speed is capped at 50 rows, but the
-    // footer should reflect those visible rows (consistent with the table).
+    // caliber (Σtokens / ΣGENERATION seconds — per-row duration−ttft, so the
+    // footer matches the per-row Speed column). recent_speed is capped at 50
+    // rows, but the footer should reflect those visible rows (consistent with
+    // the table).
     if (foot) {
       const totTok = recent.reduce((a, r) => a + (r.output + r.reasoning), 0);
-      const totSec = recent.reduce((a, r) => a + (r.duration_ms || 0), 0) / 1000;
+      const totSec = recent.reduce((a, r) => a + (r.gen_ms || r.duration_ms || 0), 0) / 1000;
       const wTps = totSec > 0 ? (totTok / totSec).toFixed(1) : null;
       const subs = recent.filter(r => r.query_source === 'subagent').length;
       const wfs = recent.filter(r => r.query_source === 'workflow_child').length;
       foot.hidden = false;
       foot.innerHTML = `
         <span><span class="lbl">均速</span> <b class="${speedClass(wTps != null ? +wTps : null)}">${wTps != null ? wTps + ' t/s' : '—'}</b></span>
-        <span><span class="lbl">总 token</span> <b>${fmtInt(totTok)}</b><span class="caliber" title="本地估算：速度专用口径 Σ(输出+推理)，不含输入，与官方 computed_total_tokens（input+output）口径不同，见 docs/usage-accounting.md">本地估算</span></span>
+        <span><span class="lbl">总 token</span> <b>${fmtInt(totTok)}</b><span class="caliber" title="本地估算：速度专用口径 Σ(输出+推理)，不含输入，与官方 computed_total_tokens（input+output）口径不同；速度分母为生成时长（duration−首等，无首等回退全时长），见 docs/usage-accounting.md">本地估算</span></span>
         <span><span class="lbl">请求</span> <b>${fmtInt(recent.length)}</b></span>
         <span><span class="lbl">subagent</span> <b>${fmtInt(subs)}</b></span>
         <span><span class="lbl">工作流</span> <b>${fmtInt(wfs)}</b></span>`;
@@ -480,10 +485,13 @@
       cat = 'llm'; label = 'llm→';
       summary = `${r.query_source} · ${r.model_id||'?'} ${r.variant||''} · in ${fmtNum(r.input_tokens)} / out ${fmtNum(r.output_tokens)}`;
       if (r.reasoning_tokens) summary += ` / think ${fmtNum(r.reasoning_tokens)}`;
-      // token speed — only for completed calls with a real duration
+      // token speed — only for completed calls with a real duration.
+      // Generation-time denominator (duration−ttft, server caliber — SSE rows
+      // carry time_to_first_token_ms; null/undefined → full duration).
       if (r.status === 'completed' && r.duration_ms > 0) {
         const out = (r.output_tokens || 0) + (r.reasoning_tokens || 0);
-        spd = +(out / (r.duration_ms / 1000)).toFixed(1);
+        const genMs = Math.max(r.duration_ms - (r.time_to_first_token_ms || 0), 1);
+        spd = +(out / (genMs / 1000)).toFixed(1);
       }
     } else {
       cat = 'tool'; label = 'tool.call';
