@@ -96,6 +96,11 @@
      先加载会被覆盖掉挂载）、views/*.js 之前（视图运行期取 window.ZC.emptyState）；
      挂载责任单点：本文件 browser 分支自挂，app.js 不含挂载赋值（C9-3 契约）。 -->
 <script src="/empty-state.js"></script>
+<!-- context-gauge.js 与 empty-state.js 同层同款引入约定：app.js 之后（末行整体
+     重建 window.ZC，先加载会被覆盖）、views/*.js 之前（sessions.js 运行期取
+     window.ZC.ContextGauge）；挂载责任单点：本文件 browser 分支自挂，
+     app.js 不含挂载赋值（C2-5 契约，C9-3 对 emptyState 的同款钉法）。 -->
+<script src="/context-gauge.js"></script>
 <script src="/views/overview.js"></script>
 <script src="/views/sessions.js"></script>
 <script src="/views/timeline.js"></script>

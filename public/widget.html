@@ -395,7 +395,12 @@ async function showTip() {
       if (!r.ok) throw new Error('http ' + r.status);
       const d = await r.json();
       if (!Number.isFinite(d.tokens) || !Number.isFinite(d.requests)) throw new Error('shape');
-      text = '今日 ' + fmtWan(d.tokens) + ' tok · ' + d.requests + ' 次';
+      // C2 缓存命中副行（纯渲染）：比率在响应侧算好（cache_hit_rate =
+      // cache_read/input，input 官方语义已含 cache_read；当日全零行日分母为 0 →
+      // 服务端返回 null）——null/undefined 一律显示「—」（共享 formatter null
+      // 语义），本处不计算比率，禁 NaN/Infinity 上屏。
+      const hit = d.cache_hit_rate == null ? '—' : Math.round(d.cache_hit_rate * 100) + '%';
+      text = '今日 ' + fmtWan(d.tokens) + ' tok · ' + d.requests + ' 次 · 缓存命中 ' + hit;
       tipCache = { text, at: Date.now() };
     } catch {} // silent by contract: no data yet → no tooltip
     tipBusy = false;
