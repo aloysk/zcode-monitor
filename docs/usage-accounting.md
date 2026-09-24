@@ -332,3 +332,32 @@ sessionActivity(:574)/sessionReasoning(:621) 实无——本行按逐条回溯�
   以徽章 DOM 片段与样式留痕）。
 - 计划的 `tests/` 目录名按仓库实际为 `test/`（T1 既有布局），测试文件
   `test/db-caliber.test.js`。
+
+## 11. queryTaskUsage 增量口径（C1 增补）
+
+> 任务来源：docs/specs/ecosystem-round2-batch1.md §2.1 需求 5（验收 C1-8）。
+> 本节是 §3 中「官方确有增量基线逻辑」一句的官方升级锚点——WP2 对账时该语义
+> 仅作为否决分支的旁证提及，C1 轮按规格要求补全为独立小节。
+
+【结论】官方 `queryTaskUsage()` 维护的是**会话内 input 增量基线**口径：按
+`query_source`（main_turn/subagent/workflow_child）分别维护已计入的 input
+基线，每个 task 的 input 用量按相对基线的**增量**呈现；上下文压缩（compact）
+后基线**不回扣**——压缩把历史压短，已计入的 input 不因压缩折返而扣减，后续
+请求相对新基线重新起算。设计用途是官方桌面 task 用量面板防止 compact 后
+context 重复折算（同一段历史不被计两次）。
+
+【官方源码出处】`apps/zcode-cli/packages/adapters/src/storage/session-store/
+repositories/usage.ts` `queryTaskUsage()`（官方开源基准 commit `872ad96`，
+见本文档头注；与 §2/§3 的 `recordModelUsage`/`queryAppUsage` 同文件）。
+
+【边界声明】该口径是**会话内增量**口径，**非本仓窗口聚合口径**。本仓
+dashboard 与窗口级视图（overview /「回合与工具」/ token 归因）的 token 总量
+仍以 `SUM(computed_total_tokens)` 官方预计算值为准（§2 分支 A——不自造公式、
+不引入增量基线折算）。两口径回答不同问题：`queryTaskUsage` 回答「该 task 从
+开始至今新消耗了多少 input」，本仓窗口聚合回答「窗口内全部行的官方预计算
+权威值合计多少」；二者不可互相换算、不可混用（§3 的无重复计入结论不变——
+全量行求和本来就没有 compact 重复折算问题，无需增量基线）。
+
+【对 db.js 的影响】无。纯口径文档增补，零查询改动；本仓不实现增量基线，
+既有对账/速度/归因口径均不受影响。
+

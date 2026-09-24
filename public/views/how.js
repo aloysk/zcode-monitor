@@ -30,6 +30,12 @@
 
       <h2>一次 turn 的完整流程 <span class="sub">turn → model_request → tools → model_complete</span></h2>
       <div class="er-diagram">${TURN_FLOW}</div>
+
+      <h2>数据保留窗口 <span class="sub">为什么看不到更早的数据</span></h2>
+      <div class="card">
+        <p style="font-size:13px;margin:0 0 10px;color:var(--fg-1)">ZCode 官方对用量三表（model_usage / turn_usage / tool_usage）执行 <b>30 天保留策略</b>（<code>USAGE_RETENTION_DAYS=30</code>——每次写入后删除早于 30 天的行，见 docs/usage-accounting.md §1）。本机实测（2026-09-25）：三表最早行均 ≈2026-08-25，prune 已生效；现有 model_usage 404,782 行（约 40.5 万）、turn_usage 13,776 行（约 1.4 万）、tool_usage 547,227 行（约 54.7 万）。本面板所有窗口级读数（含「回合与工具」页的 30d 档）上限即这 30 天保留窗——更早的年尺度数据无来源。</p>
+        <p style="font-size:12.5px;margin:0;color:var(--fg-2)">口径提示：官方 <code>queryTaskUsage()</code> 的 input 是<b>会话内增量</b>口径（压缩 baseline 不回扣，详见 docs/usage-accounting.md「queryTaskUsage 增量口径（C1 增补）」小节）；本面板的窗口聚合仍以 <code>SUM(computed_total_tokens)</code> 官方预计算值为准，两者是不同口径、不可混用。</p>
+      </div>
     </div>`;
     loadConcepts();
     loadReasonExample();

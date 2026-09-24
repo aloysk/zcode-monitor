@@ -54,6 +54,11 @@ test('makeRetryingStatement: SQLITE_NOTADB → invalidateDb 生效（连接缓�
 
   const raw2 = dbq.db()._raw;
   assert.notEqual(raw2, raw1, 'invalidateDb 已丢弃旧连接缓存（下次 db() 重开）');
+  // 显式关闭被 invalidateDb 丢弃的旧连接（越界修复经授权，2026-09-25）：Windows
+  // 下句柄释放不依赖 GC 时序，否则 after 钩子 rmSync 报 EPERM——已实证（30 循环
+  // 3 复现）；根因是 db.js invalidateDb 置 null 前不 close，本轮以测试侧显式
+  // 关闭绕行、未改运行时行为。
+  try { raw1.close(); } catch { /* 已随 GC 释放则无妨 */ }
 
   // isBusyErr/isConnBroken 分类缝（导出面直测）
   assert.equal(dbq.isBusyErr(mkErr('x', 'SQLITE_BUSY')), true);
