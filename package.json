@@ -8,6 +8,7 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
+    "start:detached": "node scripts/start-detached.js",
     "test": "node --test test/index.js"
   },
   "engines": {
