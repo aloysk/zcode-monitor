@@ -368,7 +368,7 @@ internal sealed class WidgetForm : Form
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("打开完整面板", null, (s, e) => OpenUrl(DashboardUrl));
         var restartItem = new ToolStripMenuItem("重启面板")
-            { ToolTipText = "重启 127.0.0.1:7331 面板服务（更新代码后用；失败时可再点一次）" };
+            { ToolTipText = "重启 127.0.0.1:7331 面板服务（更新代码后用；服务卡死时观察 10s 后强杀 node 重建；失败时可再点一次）" };
         restartItem.Click += (s, e) => _ = RestartServerAsync();
         _menu.Items.Add(restartItem);
         _menu.Items.Add(new ToolStripSeparator());
@@ -612,12 +612,21 @@ internal sealed class WidgetForm : Form
         var probe = await ProbeServerAsync();
         if (probe == ServerProbe.Blocked)
         {
-            // alive but unresponsive (cold query holding the single-threaded
-            // loop): a restart POST would hang too, and the down-branch would
-            // spawn a doomed racer against a port the blocked server holds —
-            // bail and say why (round-2 concurrency finding 1)
-            Program.Log("restart: server alive but unresponsive (blocked event loop) — not restarting now, retry later");
-            return;
+            // Blocked is the one state this menu item MUST recover (2026-09-24
+            // 19:40 incident: the old bail-with-a-log left the user staring at
+            // a dead page, no retry, zero feedback): a hung single-threaded
+            // server never answers the POST and holds the port forever. Watch
+            // briefly (cold queries do finish, dying processes let go), then
+            // force-kill ONLY a node.exe listener and fall through to the
+            // plain bring-up path — a spawn racer against a port the blocked
+            // server still holds stays impossible (round-2 finding 1).
+            Program.Log("restart: server alive but unresponsive (blocked event loop) — watching up to 10s before force-kill");
+            probe = await WatchBlockedAsync();
+            if (probe == ServerProbe.Blocked)
+            {
+                if (!await KillBlockedListenerAsync()) return; // logged inside
+                probe = ServerProbe.Refused;
+            }
         }
         var wasUp = probe == ServerProbe.Up;
         if (wasUp)
@@ -682,6 +691,113 @@ internal sealed class WidgetForm : Form
             _web.CoreWebView2.Navigate(url);
             Program.Log("restart: reloaded " + url);
         }
+    }
+
+    // Bounded watch over a blocked listener before any force-kill: a stuck
+    // cold query can finish by itself, and a dying process may release the
+    // port mid-watch — both are strictly better outcomes than killing, and
+    // the dying case (exactly the 2026-09-24 incident) needs no kill at all.
+    // WALL-CLOCK budget, not iteration count: a Blocked probe burns the full
+    // 2s client timeout, so 10 counted rounds are really 30s (live catch on
+    // the first real-machine run).
+    private static async Task<ServerProbe> WatchBlockedAsync()
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < 12000)
+        {
+            await Task.Delay(750);
+            var p = await ProbeServerAsync();
+            if (p == ServerProbe.Up) { Program.Log($"restart: block cleared by itself after ~{sw.ElapsedMilliseconds / 1000}s (cold query finished) — normal handoff"); return p; }
+            if (p == ServerProbe.Refused) { Program.Log($"restart: blocked listener released the port after ~{sw.ElapsedMilliseconds / 1000}s (process died) — bring-up path"); return p; }
+        }
+        Program.Log("restart: still blocked after 12s — force-killing the stuck node listener");
+        return ServerProbe.Blocked;
+    }
+
+    // netstat lookup of the LISTENING owner pid(s) of 7331; null = netstat
+    // itself failed (distinct from "no listener" for the wait loop).
+    private static async Task<int[]?> ListenerPidsOn7331Async()
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "netstat",
+                Arguments = "-ano -p tcp",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+            };
+            using var ns = System.Diagnostics.Process.Start(psi)!;
+            var text = await ns.StandardOutput.ReadToEndAsync();
+            ns.WaitForExit(5000);
+            return text.Split('\n')
+                .Select(l => l.Trim())
+                // "  TCP   127.0.0.1:7331   0.0.0.0:0   LISTENING   <pid>" — the
+                // ":7331 " (trailing space) anchors on the LOCAL address, never
+                // the remote; with -ano the line ENDS with the pid, so LISTENING
+                // must be a contains-token, not EndsWith (first live run: an
+                // EndsWith filter matched nothing and the kill path never ran).
+                // ESTABLISHED/TIME_WAIT rows into :7331 never carry LISTENING.
+                .Where(l => l.Contains(":7331 ", StringComparison.Ordinal)
+                            && l.Contains("LISTENING", StringComparison.Ordinal))
+                .Select(l => l.Split(' ', StringSplitOptions.RemoveEmptyEntries).Last())
+                .Select(t => int.TryParse(t, out var v) ? v : 0)
+                .Where(v => v > 0)
+                .Distinct()
+                .ToArray();
+        }
+        catch { return null; }
+    }
+
+    // Force-kill the stuck listener on 7331. Safety gate: the owner must be
+    // node.exe — anything else squatting on the port is not ours to kill
+    // (logged, declined, user resolves manually). netstat runs hidden: it is
+    // a console program, and this shell also runs in no-console forms (same
+    // windowsHide red line as the server's tasklist probe — see AGENTS.md).
+    private static async Task<bool> KillBlockedListenerAsync()
+    {
+        var pids = await ListenerPidsOn7331Async();
+        if (pids is null) { Program.Log("restart: netstat failed — cannot locate the stuck listener"); return false; }
+        if (pids.Length == 0)
+        {
+            // race: nothing holds the port anymore — nothing to kill
+            Program.Log("restart: no listener pid on 7331 (released during the watch) — bring-up path");
+            return true;
+        }
+        foreach (var pid in pids)
+        {
+            System.Diagnostics.Process proc;
+            try { proc = System.Diagnostics.Process.GetProcessById(pid); }
+            catch
+            {
+                Program.Log($"restart: listener pid {pid} already gone — bring-up path");
+                return true;
+            }
+            if (!string.Equals(proc.ProcessName, "node", StringComparison.OrdinalIgnoreCase))
+            {
+                Program.Log($"restart: listener pid {pid} is '{proc.ProcessName}', not node — refusing to kill, resolve manually");
+                return false;
+            }
+            try { proc.Kill(entireProcessTree: true); Program.Log($"restart: force-killed stuck node pid {pid}"); }
+            catch (Exception ex) { Program.Log($"restart: kill pid {pid} failed: {ex.Message} — bring-up path if the port frees"); }
+        }
+        for (int i = 0; i < 10; i++)
+        {
+            if (await ProbeServerAsync() == ServerProbe.Refused) { Program.Log("restart: port freed after kill"); return true; }
+            // A hung connect can outlive its dead listener: observed 25s of
+            // 2s-timeout probes against a port netstat showed free (second
+            // live run). Every third round, trust the kernel's listener table
+            // instead — a fresh bind succeeds even if ghost connects linger.
+            if (i % 3 == 2)
+            {
+                var now = await ListenerPidsOn7331Async();
+                if (now is { Length: 0 }) { Program.Log("restart: netstat shows no listener after kill — proceeding to bring-up"); return true; }
+            }
+            await Task.Delay(500);
+        }
+        Program.Log("restart: port still not free after kill — aborting (click the menu again)");
+        return false;
     }
 
     private static string? FindNodeExe()
