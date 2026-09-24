@@ -6,6 +6,10 @@
      Number = rolling weighted tps over requests COMPLETED in the last 5
      minutes: seeded from /api/widget/recent (the exact window population),
      then live completed requests via SSE /api/live/events 'model'.
+     Caliber: Σ(output+reasoning) ÷ Σ GENERATION ms (duration − TTFT, the
+     time before the first token — GLM-5.3's thinking wait averages 8.7s
+     = 39% of duration, incl-TTFT would read ~40% low; TTFT-less rows fall
+     back to full duration, matching server db.js Token speed header).
      Idle → "—". One decimal always shown (56.0, not 56).
      States: ok (number, tier color) · idle (—, dim) · error (—, red brand).
      Texture, not new elements: a 30×10s micro-sparkline of the same rolling
@@ -76,7 +80,11 @@ body {
   line-height: 1;
   color: var(--text-disabled); /* idle baseline; tiers below override */
 }
-/* speed tiers mirror the dashboard KPI (design.md D4): <30 red / 30-80 notice / >80 green */
+/* speed tiers mirror the dashboard KPI (design.md D4): <30 red / 30-80 notice / >80 green.
+   Thresholds unchanged by the 2026-09 TTFT-stripped caliber: generation-time
+   <30 t/s is still genuinely slow and >80 still fast (measured mean 94 /
+   weighted 78 on GLM-5.3); token-speed-monitor's <40-green ladder is an
+   incl-TTFT caliber and not comparable. */
 .spd-red    { color: var(--negative); }
 .spd-yellow { color: var(--notice); }
 .spd-green  { color: var(--positive); }
@@ -197,19 +205,21 @@ function speedClass(tps) {
 // rows land in db.sqlite only when a request finishes, so started_at-keying
 // evicted a request longer than the window before it ever arrived, and a long
 // request whose start predates the window legitimately belongs in "recent".
-// Entries: {end: epoch ms, tok, durMs, id}. `seen` dedups the seed (60s re-fetch
-// of the same rows) against already-buffered SSE events; ids leave with their
-// entry so the set stays window-sized.
+// Entries: {end: epoch ms, tok, genMs, id} — genMs is GENERATION time
+// (duration − TTFT), the speed denominator; `end` still uses full duration
+// because it is completion-time bookkeeping, not a speed input. `seen` dedups
+// the seed (60s re-fetch of the same rows) against already-buffered SSE
+// events; ids leave with their entry so the set stays window-sized.
 const buf = [];
 const seen = new Set();
-function pushReq(id, endMs, tok, durMs) {
-  if (!(endMs > 0) || !(tok >= 0) || !(durMs > 0)) return;
+function pushReq(id, endMs, tok, genMs) {
+  if (!(endMs > 0) || !(tok >= 0) || !(genMs > 0)) return;
   if (endMs <= Date.now() - ROLL_MS) return; // completed before the window opened
   if (id != null) {
     if (seen.has(id)) return;
     seen.add(id);
   }
-  buf.push({ end: endMs, tok, durMs, id });
+  buf.push({ end: endMs, tok, genMs, id });
 }
 
 // Micro-sparkline: rebuilt from buf on every render (each 2s tick, every seed,
@@ -231,7 +241,7 @@ function drawSpark(tier) {
     if (i < 0 || i >= SLOTS) continue; // rows straddling the window edge: render() evicts, guard anyway
     const s = (agg[i] ??= { tok: 0, ms: 0 });
     s.tok += r.tok;
-    s.ms += r.durMs;
+    s.ms += r.genMs;
   }
   const v = new Array(SLOTS).fill(null);
   let max = 0, last = -1, n = 0;
@@ -283,9 +293,9 @@ function render() {
     return;
   }
   let tok = 0, ms = 0;
-  for (const r of buf) { tok += r.tok; ms += r.durMs; }
+  for (const r of buf) { tok += r.tok; ms += r.genMs; }
   // weighted aggregate over the window — same caliber as the dashboard KPI:
-  // Σ(output+reasoning) ÷ Σduration (completed only, TTFT included)
+  // Σ(output+reasoning) ÷ Σ GENERATION ms (completed only, TTFT stripped)
   const text = ms > 0 ? (tok / (ms / 1000)).toFixed(1) : null;
   const tier = speedClass(text != null ? parseFloat(text) : null);
   $('tps').textContent = text != null ? text : '—';
@@ -305,7 +315,7 @@ async function seed() {
       pushReq(q.id,
               new Date(q.time).getTime() + q.duration_ms,
               (q.output || 0) + (q.reasoning || 0),
-              q.duration_ms);
+              q.gen_ms || q.duration_ms); // gen_ms: duration−ttft (db.js caliber)
     render();
   } catch (e) {
     if (buf.length) return; // keep the last good number; the 15s retry owns recovery
@@ -324,10 +334,11 @@ try {
     // completed only — error/cancelled rows carry duration but no real output
     // and would drag the weighted aggregate down (matches server recentSpeed)
     if (m.status !== 'completed' || !(m.duration_ms > 0)) return;
+    // gen = duration − TTFT (null → full duration); 1ms floor matches server
     pushReq(m.id,
             new Date(m.started_at).getTime() + m.duration_ms,
             (m.output_tokens || 0) + (m.reasoning_tokens || 0),
-            m.duration_ms);
+            Math.max(m.duration_ms - (m.time_to_first_token_ms || 0), 1));
     clearTimeout(bump);
     bump = setTimeout(render, 200); // coalesce bursts
   });
