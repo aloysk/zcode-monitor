@@ -41,7 +41,7 @@ npm test                   # node --test test/index.js（聚合入口）
   六视角 zcode-pr-review-toolkit 终审）+ 洁癖收尾轮 + workflow_child 计数轮及其
   六视角终审 + 桌宠重启菜单轮及其四席加固三轮（并发/失败模式/安全/测试质量 ×3：
   CRITICAL 退出定时器撤销 / 早夭 exit 守卫 / SEC-002·004·006 泄露面闭合 /
-  EADDRINUSE 65s 自愈 / 壳三态探测）全部合并并推送 fork。
+  EADDRINUSE 65s 自愈 / 壳三态探测）+ tasklist 探测闪窗快修轮全部合并并推送 fork。
 - workflow_child 计数轮（fix/workflow-child-accounting）：动态工作流（dwf）actor
   此前在全面板被漏计（24h 窗口 ≈17% 请求）；本轮分列纳入——速度卡/速度表徽标/
   会话徽标与筛选/raw 页 dwf 运行册表/How 文档，顺带修复 overview 切页后 SSE
@@ -58,6 +58,15 @@ npm test                   # node --test test/index.js（聚合入口）
   down）。接替进程 stderr 落盘 `logs/restart-child.log`（gitignored）。
   测试 test/restart-route.test.js 11 例；7399 真重启循环实机验证过（含
   EADDRINUSE 重试自愈、SEC-006 Range 泄露闭合复验）。R-17 登记。
+- tasklist 探测闪窗快修轮（fix/tasklist-window-flash）：无控制台形态（重启接替
+  进程 detached / 壳隐藏拉起）下 `execFile('tasklist')` 缺 `windowsHide:true`，
+  Win11 为控制台程序另开 Windows Terminal——每探测周期（30s 节流）闪一个
+  tasklist.exe 窗（2026-09-24 实锤：7331 接替进程 65268；前台终端形态因共享父
+  控制台历轮未暴露）。zcode-runtime.js 单点修复（checkpoint 路由复用同函数一并
+  覆盖；ZCode 自身的 tasklist 探测本就句柄 0，非弹窗源）。回归测试
+  test/probe-windows-hide.test.js 1 例；7399 真机 A/B：旧码两见句柄
+  2625612/4261058（有标题窗）vs 新码生命周期句柄恒 0。全套 204 用例全绿
+  （node --test 直列计数口径）。
 - 快照绊线（server/snapshot-watch.js）：只读监视 `~/.zcode/v2/checkpoints/`，
   机制复活即告警；语义（零点/闩锁/unreadable 态/watch 降级）见模块头注，
   已知边界登记 residuals R-14。
