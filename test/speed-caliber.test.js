@@ -65,9 +65,9 @@ test('速度口径: 生成时长分母——空集稳健 / NULL 回退 / 脏行�
     // gen = 10000 + 8000 + (4000−1000) + MAX(5000−6000,1) = 21001ms
     assert.equal(s.gen_seconds, 21.0);
     assert.ok(Number.isFinite(s.weighted_tps), '脏行下 weighted_tps 必须有限');
-    assert.equal(s.weighted_tps, +(750 / 21.001).toFixed(1));
+    assert.equal(s.weighted_tps, 35.7); // 750 tok / 21.001s
     // avg_ttft_ms 照实聚合（脏行也是数据），不因防御路径失真
-    assert.equal(s.avg_ttft_ms, Math.round((1000 + 6000) / 2));
+    assert.equal(s.avg_ttft_ms, 3500); // (1000+6000)/2
     const rows = dbq.recentSpeed(now - 3600e3);
     const dirty = rows.find(r => r.id === 'dirty');
     assert.equal(dirty.gen_ms, 1, '脏行 gen_ms 下限 1ms');
@@ -105,7 +105,7 @@ test('契约: widget.html 三个消费点走生成时长口径', () => {
   assert.ok(/Math\.max\(m\.duration_ms - \(m\.time_to_first_token_ms \|\| 0\), 1\)/.test(src),
     'SSE 分支须计算 gen = duration − ttft（1ms 下限）');
   // 滚动聚合与 sparkline 槽分母均 Σ genMs（不得残留 durMs 消费）
-  assert.ok(/for \(const r of buf\) \{ tok \+= r\.tok; ms \+= r\.genMs; \}/.test(src),
+  assert.ok(/for \(const r of buf\)[\s\S]{0,80}ms \+= r\.genMs/.test(src),
     'render 聚合分母须为 Σ genMs');
   assert.ok(/s\.ms \+= r\.genMs;/.test(src), 'sparkline 槽分母须为 genMs');
   assert.ok(!/durMs/.test(src), 'durMs 字段应已全量更名 genMs（防旧口径残留）');
@@ -120,7 +120,21 @@ test('契约: overview.js feed spd 与速度表 footer 走生成时长口径', (
   // 速度表 footer 均速分母：Σ gen_ms（回退 duration_ms——旧 payload 兼容）
   assert.ok(/a \+ \(r\.gen_ms \|\| r\.duration_ms \|\| 0\)/.test(src),
     'footer 均速分母须为 Σ gen_ms');
-  // TTFT 列接线（表头 + 行渲染），口径提示随列
+  // TTFT 列接线（表头 + 行渲染含 null 分支），口径提示随列
   assert.ok(/<th class="num">TTFT<\/th>/.test(src), '速度表须有 TTFT 列');
-  assert.ok(/r\.ttft_ms != null \? fmtMs\(r\.ttft_ms\)/.test(src), 'TTFT 列渲染 null → —');
+  assert.ok(/r\.ttft_ms != null \? fmtMs\(r\.ttft_ms\) : '<span class="faint">—<\/span>'/.test(src),
+    'TTFT 列渲染 null → —（两分支都在钉内）');
+  // KPI 副行「均首等」接线（本轮新增的用户可见字段，服务端值已在 db-smoke 钉）
+  assert.ok(/s && s\.avg_ttft_ms != null \? fmtMs\(s\.avg_ttft_ms\)/.test(src),
+    'KPI 副行须展示 avg_ttft_ms（null 省略）');
+});
+
+test('契约: pet.html 速度气泡走生成时长口径（与胶囊/面板同源不漂移）', () => {
+  const src = readPublic('pet.html');
+  // poll 分母取 gen_ms（completedSince 行自带；旧 payload 回退全时长）
+  assert.ok(/ms \+= q\.gen_ms \|\| q\.duration_ms/.test(src),
+    'pet 速度气泡分母须为 Σ gen_ms（旧口径残留即与胶囊读数漂移四成）');
+  // 完成时刻簿记仍在 duration_ms 上（idle 时钟语义不随速度口径变）
+  assert.ok(/q\.time\)\.getTime\(\) \+ \(q\.duration_ms \|\| 0\)/.test(src),
+    'lastEnd 完成时刻判定须仍用 duration_ms');
 });

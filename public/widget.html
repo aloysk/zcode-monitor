@@ -80,7 +80,8 @@ body {
   line-height: 1;
   color: var(--text-disabled); /* idle baseline; tiers below override */
 }
-/* speed tiers mirror the dashboard KPI (design.md D4): <30 red / 30-80 notice / >80 green.
+/* speed tiers mirror the dashboard KPI convention: <30 red / 30-80 notice / >80 green
+   (authoritative note: server/db.js Token speed header).
    Thresholds unchanged by the 2026-09 TTFT-stripped caliber: generation-time
    <30 t/s is still genuinely slow and >80 still fast (measured mean 94 /
    weighted 78 on GLM-5.3); token-speed-monitor's <40-green ladder is an

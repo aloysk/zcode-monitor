@@ -242,7 +242,8 @@
   }
 
   // ── token speed ──
-  // Tier: red <30 / yellow 30–80 / green >80 t/s (design.md D4).
+  // Tier: red <30 / yellow 30–80 / green >80 t/s (see server/db.js Token speed
+  // header — thresholds kept under the 2026-09 generation-time caliber).
   // Null/undefined/non-finite → no tier (empty string).
   function speedClass(tps) {
     if (tps == null || !isFinite(tps)) return '';

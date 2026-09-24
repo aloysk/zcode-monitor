@@ -324,7 +324,7 @@ function breakdownByTool(sinceMs) {
 // the weighted average (= Σtokens / Σseconds) instead of mean(per-request
 // tps).
 //
-// Caliber decisions (D1–D3, revised 2026-09-24 — the generation-time split):
+// Caliber decisions (revised 2026-09-24 — the generation-time split):
 //   - numerator: output_tokens + reasoning_tokens (reasoning counts as
 //     generated throughput; matches claude-speed METRIC "reasoning is part
 //     of generation". In this db reasoning_tokens is always 0 so far —
