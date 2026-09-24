@@ -32,12 +32,16 @@ npm test                   # node --test test/index.js（聚合入口）
 
 - 技术栈：Express + better-sqlite3（仅两个运行时依赖）+ 原生前端（无框架、无构建步骤）。
 - 行为变更必须带回归测试；加固轮模式：多视角子代理评审 → 修复 → 门禁全绿才合并 main。
+- 子进程调用系统控制台程序（tasklist/netstat 等）必须带 `windowsHide: true`：
+  服务存在无控制台形态（重启接替进程 detached、壳隐藏拉起），缺省会另开
+  Windows Terminal 弹窗；前台终端跑冒烟共享父控制台，暴露不了这类缺陷
+  （2026-09-24 tasklist 探测每 30s 闪窗事故，实证见 zcode-runtime.js 头注）。
 - 遗留项唯一登记处：`docs/acceptance/residuals.md`（新遗留入册、解决销账、不删条目）。
 - 推送目标：`origin` = fork（aloysk/zcode-monitor）；`upstream` = yiyanwannian 原仓库（只读参考）。
 
 ## 当前状态（2026-09-24）
 
-- main（476fbf2）：生态采纳计划 + 四轮多视角加固审查 + 快照绊线（五视角对抗评审 +
+- main（086b36e）：生态采纳计划 + 四轮多视角加固审查 + 快照绊线（五视角对抗评审 +
   六视角 zcode-pr-review-toolkit 终审）+ 洁癖收尾轮 + workflow_child 计数轮及其
   六视角终审 + 桌宠重启菜单轮及其四席加固三轮（并发/失败模式/安全/测试质量 ×3：
   CRITICAL 退出定时器撤销 / 早夭 exit 守卫 / SEC-002·004·006 泄露面闭合 /
