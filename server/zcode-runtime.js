@@ -61,8 +61,12 @@ function probeZCodeRunning(cb) {
   if (process.platform === 'win32') {
     // Git Bash 的 ps 是 MSYS 迷你实现，不支持 -o（实测 `ps: unknown option -- x`
     // 失败退出）。win32 用 tasklist 按镜像名精确匹配桌面端进程。
+    // windowsHide 必须为 true：服务常以无控制台形态存活（重启接替进程 detached、
+    // 壳隐藏拉起），无控制台父进程起控制台程序时系统会另开新控制台——Win11 宿主
+    // 是 Windows Terminal，表现为每探测周期闪一个 tasklist.exe 窗（2026-09-24
+    // 实锤：65268 接替进程每 30s 弹窗，CREATE_NO_WINDOW 修复后 MainWindowHandle=0）。
     execFile('tasklist', ['/FI', 'IMAGENAME eq ZCode.exe', '/NH'],
-      { encoding: 'utf8', maxBuffer: 1 << 20 }, onOut);
+      { encoding: 'utf8', maxBuffer: 1 << 20, windowsHide: true }, onOut);
   } else {
     execFile('ps', ['-axo', 'comm'],
       { encoding: 'utf8', maxBuffer: 1 << 20 }, onOut);
