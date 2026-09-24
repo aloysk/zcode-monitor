@@ -8,6 +8,7 @@
 ```bash
 npm install && npm start   # 生产启动（自动开浏览器）
 npm run dev                # node --watch 开发模式
+npm run start:detached     # 服务中断后一条命令拉起（detached 接替形态；幂等：已在跑就不动）
 npm test                   # node --test test/index.js（聚合入口）
 ```
 
@@ -41,6 +42,23 @@ npm test                   # node --test test/index.js（聚合入口）
 
 ## 当前状态（2026-09-24）
 
+- 胶囊重启阻塞态修复轮（fix/widget-restart-blocked）：2026-09-24 19:40 实锤——
+  面板事件循环卡死时壳右键「重启面板」对阻塞态裸退（仅记日志、零用户反馈），
+  恰是最需要重启的场景。改为：有界观察 12s（墙钟预算——Blocked 探测自身耗满
+  2s 客户端超时，按次计数的「10s」实跑 30s）→ 仍阻塞则 netstat 定位 7331
+  监听者（隐藏拉起；-ano 行尾是 pid，LISTENING 须作包含 token 匹配）→ 仅
+  node.exe 放行强杀（整树）→ netstat 监听表旁路等端口释放（吊死连接可比
+  死监听者活得久：实机 25s 探测全超时而监听表已空）→ 落正常拉起重载。
+  真机三轮验证：阻塞态（强杀桩→拉起→重载）+ 健康态（endpoint 200→接替→
+  重载）全链路；两处实机抓出的实现缺陷（迭代计数超时/EndsWith 恒空）已随
+  契约钉入 restart-route.test.js。非 node 进程占住 7331 时拒绝强杀（日志
+  提示手动处理）——已接受边界。
+- start-detached 启动脚本轮（feat/start-detached-script）：7331 实例随会话/机器
+  重启消失（2026-09-24 实况：detached 接替进程被外部终止，无崩溃日志）后一条
+  命令恢复——`npm run start:detached`（scripts/start-detached.js：detached+
+  windowsHide 接替形态同 restart-route、/api/health 幂等探活、stderr 续写
+  logs/restart-child.log、默认 OPEN_BROWSER=0，`--open` 显式开）。
+  E2E 回归 test/start-detached.test.js 1 例（7399：拉起→幂等→回收）。
 - main（086b36e）：生态采纳计划 + 四轮多视角加固审查 + 快照绊线（五视角对抗评审 +
   六视角 zcode-pr-review-toolkit 终审）+ 洁癖收尾轮 + workflow_child 计数轮及其
   六视角终审 + 桌宠重启菜单轮及其四席加固三轮（并发/失败模式/安全/测试质量 ×3：

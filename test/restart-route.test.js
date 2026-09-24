@@ -264,5 +264,23 @@ test('restart: 壳侧接线源码契约（Program.cs）——首部名与值/双
   assert.ok(/ServerProbe\.Blocked/.test(src) && /ProbeServerAsync/.test(src),
     '重启流程须区分 refused 与 blocked（阻塞服务不得触发 ensure 双拉起）');
   assert.ok(/if \(probe == ServerProbe\.Blocked\)/.test(src),
-    'Blocked 分支的早退不得删（存在性钉在枚举与方法都在时不会红）');
+    'Blocked 分支不得删（钉分支条件本身而非仅存在性——删分支留枚举时存在性钉照绿）');
+  // 2026-09-24 19:40 实锤后的形态：Blocked 不再裸退（旧文案连同早退一并
+  // 消失——用户在面板卡死时点击菜单，得到的是零反馈搁浅），改为
+  // 「有界观察 → 仍阻塞则只杀 node 监听者 → 落到正常拉起」
+  assert.ok(!src.includes('not restarting now'), 'Blocked 不得再裸退（19:40 事故形态：点了没用、日志之外零反馈）');
+  assert.ok(/probe = await WatchBlockedAsync\(\);/.test(src), 'Blocked 分支须先有界观察（冷查询会自己结束、垂死进程会自己放端口——两者都优于杀）');
+  assert.ok(/KillBlockedListenerAsync/.test(src), '观察耗尽后须走强杀恢复路径（卡死服务永不答 POST 且永占端口）');
+  assert.ok(/string\.Equals\(proc\.ProcessName, "node"/.test(src), '强杀守卫：端口占用者非 node 时拒绝杀（外来进程不是我们的）');
+  assert.ok(/FileName = "netstat"[\s\S]{0,220}?CreateNoWindow = true/.test(src),
+    'netstat 是控制台程序而壳也可能无控制台——必须隐藏拉起（AGENTS windowsHide 红线同款）');
+  assert.ok(/Kill\(entireProcessTree: true\)/.test(src), '强杀须整树（node 可能带子进程）');
+  assert.ok(/ProbeServerAsync\(\) == ServerProbe\.Refused/.test(src), '强杀后须等端口真正释放再拉起（否则对残端双拉起竞速）');
+  // 首轮实机验证抓出的两个实现级缺陷的钉（2026-09-24）：
+  assert.ok(/Stopwatch\.StartNew\(\)/.test(src) && /still blocked after 12s/.test(src),
+    '观察须按墙钟预算：Blocked 探测自身耗满 2s 客户端超时，按次数计数的「10s」实跑 30s');
+  assert.ok(/Contains\("LISTENING"/.test(src) && !/EndsWith\("LISTENING"/.test(src),
+    'netstat -ano 行尾是 pid 而非 LISTENING：状态只能作包含 token 匹配（EndsWith 恒空集，强杀路径从未执行）');
+  assert.ok(/netstat shows no listener after kill/.test(src),
+    '等端口释放须有 netstat 旁路：吊死的连接可比死监听者活得更久（实机 25s 探测全超时而监听表已空），内核监听表才是端口可绑的事实源');
 });
