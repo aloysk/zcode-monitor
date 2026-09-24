@@ -59,7 +59,7 @@ npm test                   # node --test test/index.js（聚合入口）
   windowsHide 接替形态同 restart-route、/api/health 幂等探活、stderr 续写
   logs/restart-child.log、默认 OPEN_BROWSER=0，`--open` 显式开）。
   E2E 回归 test/start-detached.test.js 1 例（7399：拉起→幂等→回收）。
-- main（086b36e）：生态采纳计划 + 四轮多视角加固审查 + 快照绊线（五视角对抗评审 +
+- main（2c39076）：生态采纳计划 + 四轮多视角加固审查 + 快照绊线（五视角对抗评审 +
   六视角 zcode-pr-review-toolkit 终审）+ 洁癖收尾轮 + workflow_child 计数轮及其
   六视角终审 + 桌宠重启菜单轮及其四席加固三轮（并发/失败模式/安全/测试质量 ×3：
   CRITICAL 退出定时器撤销 / 早夭 exit 守卫 / SEC-002·004·006 泄露面闭合 /
