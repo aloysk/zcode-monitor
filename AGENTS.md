@@ -55,6 +55,34 @@ npm test                   # node --test test/index.js（聚合入口）
   60893ms exit 0；直列 39 文件 384/384）；GX-2 恰两依赖。7399 真库补拍 12
   帧（c8-*/c6-*/batch2-v3-*，waiting 帧真实会话直拍；AI 目检 429/400 两形态
   故障如实记录，留人工）；gates 照录 round2-batch2-gates.md。
+- 生态采纳 batch2（feature/ecosystem-round2-batch2，T1-T8 八任务 + 实现评审
+  第 1 轮 + UI 视觉验证 + 六席终审第 1 轮）：C6 会话状态信号——signals.js
+  纯分类器（四态判定序 working>broken>waiting>idle、置信高/低、waiting 时间
+  启发式限 interactive；在飞=rowid 尾界 livegen 同源判据，近窗=INDEXED BY
+  强制+ORDER BY DESC 截断，SIGNALS_MAX_ROWS=2000）；消费面 sessions 三态
+  徽标（waiting 虚线低置信+置信标注、broken 叠加）、顶栏 waiting chip（30s
+  轮询，hover 最长等待）、/api/signals/summary 固定四字段、pet waiting 行
+  接线。C8 本地提醒——notify.js 四规则+冷却（默认仅 error_burst 开）+30s
+  unref'd tick+共享 bus，live.js notify 帧转发零新通道；前端三页：index
+  toast+三开关（声音开/通知关/TTS 关）+WebAudio 合成音+TTS、widget 数字行
+  副行（防多页同开重复发声）、pet 气泡 8s hold 接管。C7 回顾视图——db.js
+  Recap dates 五查询族（better-sqlite3 把 JS number 绑定为 REAL，分桶除法须
+  CAST(@tz AS INTEGER) 恢复整除——代码注释钉死）+ /api/recap period 三档
+  （buildRecapPayload 模块级导出）；「回顾」视图五 KPI+本期要点（year 档降级
+  两要点）+日桶 sparkline+Top focus+周环比（仅 week 档）+覆盖披露（三元
+  max）。C12 导出夹带——/api/export/:dataset json|csv、schema_version=1
+  包络、CSV RFC 4180+OWASP 公式注入防护、同源钉零新 SQL（resolveWindow/
+  wideWindowScope 提取 usage-window.js，usage-routes 既有测试零改动通过=
+  重构回归证据）。R-8 守护确认（基线 6d979ae 已含销账轮，零行为变更）。
+  关键降级：C6-8 真库回放 576 样本误报 39.8%>20% 线、收窗 8min 重测反升
+  47.8%——needs-attention 置顶摘除、C8 waiting_timeout 落默认关（R-28 ③款
+  终审落锤维持默认关，判定语义照 spec 原文保留可回翻）。评审链：规格与计划
+  各经三席两轮对抗审查通过后定稿（09ec130/27b052f）；实现评审第 1 轮三席
+  合并修复（de91255）；UI 视觉验证 0 修 2 未决（de38c9f，终审轮补拍 12 帧
+  收窄）；六席终审第 1 轮 27 条闭环（33bcbb1）。测试 297→384 全绿（两种
+  计数口径，39 文件；GX-2 恰两依赖）。已知边界登记 R-28～R-39（误报降级/
+  导出裁剪/notify 无回放/per-rule 配置面/缺索引回退/C3 待后续/间歇红未根因/
+  recap 串行 SQL/SSE 6 连接/路由无卸载钩子/单 tick 上限/三项人工评审）。
 - R-8 决策轮（fix/r8-system-fonts，经 PR 合并）：用户拍板「系统字体为最终
   形态」——pet.html 删唯一活体 Google Fonts @import（widget.html 的 @import
   排在 :root 后本就被浏览器忽略，同删属清死码）；CSP style-src/font-src 撤销

@@ -25,7 +25,7 @@
 ## 特性
 
 -  **实时监控** —— 模型调用数、token（输入/输出/推理/缓存）、工具调用、错误率、活跃会话；按小时趋势图；按模型 / 请求来源 / 工具的算力分布；SSE 实时推送。
--  **会话深挖** —— 左栏会话列表（搜索 / 筛选 / 排序，列表项带上下文水位 mini 条），右栏 7 个标签：Timeline / Context / Turns / Agents / Tasks / Usage / State。
+-  **会话深挖** —— 左栏会话列表（搜索 / 筛选 / 排序，列表项带上下文水位 mini 条与会话状态徽标——waiting 虚线低置信、broken 红），右栏 7 个标签：Timeline / Context / Turns / Agents / Tasks / Usage / State。
 -  **上下文水位** —— 会话详情 Context 标签顶部水位区：占用比水位条、逐轮增量曲线（上=增长/下=回落）、compaction 边界与回落摘要，复用既有 SSE 通道随已落库请求实时推进；窗口值来自静态整理表（UI 恒标「非官方权威」，未收录模型不显百分比）。
 -  **回合与工具** —— 窗口级（24h/7d/30d，上限 30 天保留窗）回合健康度：完成/错误/取消分布、error_type Top5、逐回合时间线（TTFT/重试/context 超限）；工具分档表（成功率/成功行耗时/最大耗时/输出字节/read_only/destructive/审批终态分布）。
 -  **Token 归因** —— 「token 和时间都去哪了」：按会话聚合的火焰图（帧宽=token 份额），点击下钻回合层，帧内子条按 query_source 分解；截断与宽窗钳制如实标注（「仅前 N 项（被裁）」/scope 申报）。
@@ -34,7 +34,10 @@
 -  **推理可视化** —— 思考型模型的推理链单独呈现，与最终回答分开，点击展开。
 - ️ **原始数据查看器** —— 直接查任意 SQLite 表（`where` / `order` / 降序，JSON 列可展开）。
 -  **数据新鲜度恒显** —— `/api/health` freshness 双源（数据落后毫秒数 + ZCode 运行态）：顶栏「数据落后 X」chip 常驻（ok/warn/err 分色），widget（胶囊页）hover 卡含当日缓存命中率副行（桌宠页气泡走速度轮询口径，无此副行）。
--  **数据导出** —— `GET /api/export/{overview|usage|recap}?format=json|csv`：统一机读出口，JSON 带 `schema_version=1` 包络（`data`＝源端点载荷原形，`meta` 含 retention_days/scope 等口径标注）、CSV 为 RFC 4180 转义（公式注入防护：`= + - @` 开头字段前置 `'`）；与源端点同一查询族（零第二套聚合），未知 dataset/format 一律 400（机器可读面从严，不静默回退）。
+-  **会话状态信号（waiting 一等公民）** —— 顶栏「N 等待中」chip 常驻轮询（hover 显最长等待时长，点击跳会话页）；会话列表三态徽标：working（在飞）/ waiting（时间启发式，虚线描边+低置信标注，仅 interactive 会话）/ broken（近窗错误，可叠加在 working 上）；数据面 `GET /api/signals/summary` 固定四字段（waiting/broken 计数 + 最长等待毫秒），与 `/api/sessions` 行内 signal 字段同一分类器基座（`server/signals.js` 纯函数）。
+- 🔔 **本地提醒（默认防噪）** —— 服务端规则引擎（`server/notify.js`，30s tick）：错误爆发（默认开）/ 等待超时（默认关——真库回放误报超线降级）/ Token 阈值 / 不活跃四规则 + 冷却防重发；SSE `notify` 帧复用既有数据流通道转发（零新连接）。消费面：面板底部 toast + 可选系统通知 / 提示音（WebAudio 合成，零音频资源）/ TTS，胶囊页数字行下方 severity 色副行，桌宠气泡 8s hold 接管；出厂默认＝声音开、系统通知关、TTS 关。
+-  **回顾（Recap）** —— 周/月/年三档叙事回顾：活跃时长（5 分钟桶跨会话去重——并行会话同桶只计一次；年档为会话区间并集上界口径）、峰值并行 / token / 模型请求 / 活跃天数五 KPI、本期要点、日桶 sparkline、Top focus（按目录聚合）与周环比；覆盖起点＝期首/30 天保留/cap 治理三元 max 如实披露（`GET /api/recap?period=week|month|year`）。
+-  **数据导出** —— `GET /api/export/{overview|usage|recap}?format=json|csv`：统一机读出口，JSON 带 `schema_version=1` 包络（`data`＝源端点载荷原形，`meta` 含 retention_days/scope 等口径标注）、CSV 为 RFC 4180 转义（公式注入防护：`= + - @` 与 TAB/CR/LF 开头字段前置 `'`）；与源端点同一查询族（零第二套聚合），未知 dataset/format 一律 400（机器可读面从严，不静默回退）。
 -  **双主题** —— Dark（默认）/ Light，三种切换方式。
 - 🐾 **宠物一键导入** —— Codex 格式宠物包（`pet.json + spritesheet.webp`）一键导入，导入时校验 sheet 尺寸 / 行数 / JSON 健全性并生成 NOTICE，且**按白名单复制**（只带走 pet.json / 精灵图 / NOTICE / README·LICENSE 文本，`.html`/`.svg` 等一律跳过并告警）；许可证缺失、或自报值不在已知 SPDX/惯用写法白名单的包**缺省拒绝导入**，需显式确认（CLI `--ack-unlicensed`、图鉴页确认弹窗、API `ackUnknownLicense: true`；确认后照 NOTICE 记录自报值并放行）；CLI（`node tools/import-pet.js <包目录>`）、API（`POST /api/pets/import`）与图鉴页（`pets-preview.html`）三个入口共用同一校验模块。
 - ⚡ **fs.watch 实时增强** —— 日志目录 `fs.watch` 监听 + 字节偏移增量解析，JSONL 追加即触发、大幅降低日志尾部发现延迟；watch 失败自动降级短轮询，周期偏移对账兜底，事件不丢不重。
@@ -132,6 +135,10 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
 
 「token 和时间都去哪了」：会话层火焰图（嵌套 div 宽度布局，零图表库）——帧宽 = 该会话 token 占窗口合计的份额，帧内子条按 `query_source`（main_turn / subagent / workflow_child / compact / session_title）分解；点击帧下钻该会话的回合层，帧下 ↗ / 明细表「打开 →」直达会话详情。明细表为帧过窄时的兜底读数面；双主题经 CSS 变量重绘。
 
+### 9. 回顾 (Recap)
+
+周 / 月 / 年三档回顾页：五张 KPI 卡（活跃时长 / 峰值并行 / token / 模型请求 / 活跃天数——年档 token 类为 `—`，30 天保留窗外无数据源）、「本期要点」叙事（年档降级为两要点）、日桶走势 sparkline（随主题经 CSS 变量重绘）、Top focus（按目录聚合的 token / 调用 / 去重活跃分钟）、周环比（仅周档）与常驻覆盖披露卡（覆盖起点＝期首 / 30 天保留 / cap 治理三元 max，如实申报）。活跃时长为 5 分钟桶跨会话去重口径（并行会话同桶只计一次），年档改用会话区间并集上界（含挂机时间，`activity.caliber` 披露档别）。
+
 ## 数据源
 
 全部只读：
@@ -221,7 +228,7 @@ ZCode 用 SQLite 内嵌库（WAL 模式）并持续写入，读时会和它的�
 
 - **后端**：Node 18 + Express + better-sqlite3（只读连接，`readonly: true`）
 - **前端**：原生 HTML/CSS/JS（无框架、无构建步骤）+ Chart.js（已本地化到 `public/assets/`）；零外联——脚本与字体均不请求外部域（字体走系统栈，R-8 已销账）
-- **实时**：Server-Sent Events（SSE）推送新 `model_usage`/`tool_usage` 行
+- **实时**：Server-Sent Events（SSE）推送新 `model_usage`/`tool_usage` 行与本地提醒（`notify`）帧——提醒复用既有数据流通道，不加第三条 SSE 连接
 - 全程只读，只监听 `127.0.0.1`，不修改 / 删除任何 ZCode 数据
 
 ## 项目结构
