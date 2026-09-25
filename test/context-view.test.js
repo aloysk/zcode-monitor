@@ -184,19 +184,21 @@ test('C2-3: live 缺列行（input=0 且 cache 两列 undefined）分子 null、
   assert.ok(curve.split('title="')[1].includes('增量 —（首行）'), '真首行仍标「（首行）」');
 });
 
-// SSE 防重叠闸（I-测-3 评审钉）：startGaugeLive 消费的纯函数直测——闸静默失效
-//（如 live 行 started_at 改本地格式/去毫秒）会双计污染增量曲线，此前无测试红。
-test('C2-3: shouldAcceptLiveRow 三态——重放行跳过/更晚接受/缺时间戳兜底', () => {
-  const seed = '2026-09-25T10:00:00.123Z';
-  assert.equal(CG.shouldAcceptLiveRow(seed, { started_at: seed }), false,
-    '等于末种子行 → 跳过（SSE 重放的种子行）');
-  assert.equal(CG.shouldAcceptLiveRow(seed, { started_at: '2026-09-25T09:59:59Z' }), false,
-    '早于末种子行 → 跳过（(连接, 查询] 间已种下的重放行）');
-  assert.equal(CG.shouldAcceptLiveRow(seed, { started_at: '2026-09-25T10:00:00.124Z' }), true,
-    '晚于末种子行 → 接受（真增量）');
-  assert.equal(CG.shouldAcceptLiveRow(seed, {}), true,
-    'live 行缺 started_at → 兜底接受（无法判序时不丢行）');
-  assert.equal(CG.shouldAcceptLiveRow('', { started_at: '2026-09-25T09:00:00Z' }), true,
+// SSE 防重叠闸（I-测-3 评审钉；F-码-3/F-败-3 六席终审改行序基准）：闸静默失效
+// 会双计污染增量曲线。行序（rowid）三态：live.js 每连接水位是连接时刻的
+// MAX(rowid)（不回放），闸以末种子行 rid 判重——rid 更大才是真增量；started_at
+// 时间闸的两个误伤（同毫秒 rowid 更新的真新行 / started_at 早于种子但晚落库的
+// 长请求行——从未进种子）在行序基准下均正确接受。
+test('C2-3: shouldAcceptLiveRow 行序三态——rid≤末种子行跳过/更大接受/缺 rid 兜底', () => {
+  assert.equal(CG.shouldAcceptLiveRow(500, { rid: 500 }), false,
+    '等于末种子行 rid → 跳过（种子已含的行再从流里到达，双计）');
+  assert.equal(CG.shouldAcceptLiveRow(500, { rid: 499 }), false,
+    '小于末种子行 rid → 跳过（同上）');
+  assert.equal(CG.shouldAcceptLiveRow(500, { rid: 501 }), true,
+    'rid 更大 → 接受（真增量——含同毫秒行与晚落库的长请求行）');
+  assert.equal(CG.shouldAcceptLiveRow(500, {}), true,
+    'live 行缺 rid → 兜底接受（无法判序时不丢行）');
+  assert.equal(CG.shouldAcceptLiveRow(0, { rid: 1 }), true,
     '无种子（空会话首行）→ 接受');
 });
 
@@ -258,6 +260,56 @@ test('C2-5: sessions.js renderContext 四要素——SSE 订阅 / 增量曲线 /
   // 拼接——水位维持上一已知读数并如实标注（组件纯函数已直测，此处钉接线）。
   assert.ok(src.includes('lvl.unavailable') && src.includes('分子不可得'),
     '水位区 sub 文案须消费 lvl.unavailable 并标注「分子不可得」');
+});
+
+// 六席终审修复轮（F-码-3/4、F-败-2/3/4）的 sessions.js 源码契约——接线点无
+// DOM 行为面（无 jsdom），源码形态锁住不回归（本文件既有形态）。
+// F-码-8（六席终审第 2 轮）：曲线列数截断——长开标签下种子 100 + live 有界
+// 累积可达数百行，亚像素列宽不可读；maxCols 超限时只渲最近 N 列、左端「+k」
+// 占位如实标示，hover 序号用全局序号（截断后仍可对账行位）。缺省不截断
+//（既有消费面零变化）。
+test('F-码-8: deltaCurveHtml maxCols——截断占位/全局序号/缺省不截断', () => {
+  const series = CG.computeGaugeSeries(Array.from({ length: 6 }, (_, i) =>
+    base({ turn_id: 't' + i, input_tokens: 100 + i * 10 })));
+  const cut = CG.deltaCurveHtml(series, { maxCols: 4 });
+  assert.ok(cut.includes('+2'), '被截 2 行须有「+2」占位列');
+  assert.ok(cut.includes('更早 2 行'), '占位列 hover 须如实说明被截段');
+  assert.ok(cut.includes('#5'), '截断后首列 hover 序号为全局 #5');
+  assert.ok(!cut.includes('#1'), '被截行不得渲染（无 #1）');
+  // 缺省（不传 maxCols）：无截断占位，全列渲染（既有行为零变化）
+  const full = CG.deltaCurveHtml(series);
+  assert.ok(!/更早 \d+ 行/.test(full), '未传 maxCols 不得截断');
+  assert.ok(full.includes('#1') && full.includes('#6'), '全列渲染序号连续');
+  // 恰等于上限：不截断（> 才截）
+  const exact = CG.deltaCurveHtml(series, { maxCols: 6 });
+  assert.ok(!/更早 \d+ 行/.test(exact), '恰等于上限不截断');
+});
+
+test('终审钉: rowid 防重叠闸接线 + 代际 token 防孤儿 EventSource + 种子失败/空区分 + tool 帧自愈', () => {
+  const src = readPublic('views/sessions.js');
+  // F-码-3/F-败-3：闸按行序——末种子行 rid（非 started_at），SSE 行载荷 rid 比对。
+  assert.ok(src.includes('lastSeedRid'),
+    '防重叠闸须以末种子行 rid 为闸（rowid 行序，非 started_at 时间闸）');
+  assert.ok(!src.includes('lastSeedAt'),
+    '不得保留 started_at 时间闸旧形态（同毫秒误丢/晚落库长请求误弃）');
+  // F-码-4：代际 token——renderContext 入口自增，在途取数完成后比对自弃，
+  // 防跨会话竞态覆写 gaugeEs 单槽成孤儿连接。
+  assert.ok(/\+\+gaugeGen/.test(src) && /gen !== gaugeGen/.test(src),
+    'renderContext 须有代际 token 与迟到自弃守卫（防孤儿 EventSource）');
+  // F-败-2：种子取数失败渲染错误卡（emptyState），与「该会话没有模型调用行」
+  // 空态文案区分——静默折叠成空=失败与空不可辨。
+  assert.ok(src.includes('failed: true') && src.includes('取数失败'),
+    '种子取数失败须置 failed 标记并渲染错误卡（区分失败与空）');
+  // F-败-4：tool 帧自愈守卫——model 帧守卫之外的第二触发面（纯工具活动时段）。
+  assert.ok(/addEventListener\('tool'/.test(src) && /addEventListener\('model'/.test(src),
+    '水位 live 订阅须 model+tool 双帧自愈守卫');
+  // F-码-8：live 行有界累积——超软上限丢最旧（种子 100 行设计对齐），防长开
+  // 标签序列数千行、每条新行 O(n) 全量重渲；曲线呈现列数上限接线。
+  assert.ok(src.includes('GAUGE_LIVE_ROWS_CAP')
+    && /liveRows\.splice\(0, liveRows\.length - GAUGE_LIVE_ROWS_CAP\)/.test(src),
+    'liveRows 须有界累积（超 2× 种子上限丢最旧 live 行）');
+  assert.ok(/deltaCurveHtml\(series, \{ maxCols: GAUGE_CURVE_MAX_COLS \}\)/.test(src),
+    '增量曲线须经 maxCols 列数上限渲染（最近 N 列 + 「+k」占位）');
 });
 
 test('C2-5: context-gauge.js 无硬编码色值（#hex / rgb( / hsl( / 具名色 0 命中，色值走 var(--sev-*)）', () => {

@@ -56,6 +56,45 @@ test('C1-5 色值禁令: usage.js 无硬编码色值（#hex / rgb( / hsl( / 具�
     'usage.js 不得含 CSS 具名色单词（red/green/…/gold 名单）');
 });
 
+test('F-测-1 数据流契约: usage.js 消费 /api/usage/turns 与 /api/usage/tools 两端点', () => {
+  const src = readPublic('views/usage.js');
+  // 与 attribution-view.test.js C5-3 的 '/api/usage/attribution' 契约同款形态：
+  // fetch URL 拼错/漂移时「回合与工具」页永久 loading 而全套仍绿——钉住两端点。
+  assert.ok(src.includes('/api/usage/turns'),
+    'usage.js 须消费 /api/usage/turns 端点（totals+error_type+时间线）');
+  assert.ok(src.includes('/api/usage/tools'),
+    'usage.js 须消费 /api/usage/tools 端点（工具分档）');
+});
+
+test('F-败-1 失败兜底契约: load() 包 try/catch 走 failCard，发请求前先置 loading', () => {
+  const src = readPublic('views/usage.js');
+  // load 由刷新按钮/窗口选择器触发、不经 route() 的 try/catch——catch 须走
+  // failCard（attribution.js I-测-10 同款钉法），否则取数失败成未处理 rejection、
+  // 旧窗口数据静默挂新窗标签。
+  assert.ok(/function failCard\(/.test(src) && /catch[\s\S]{0,300}failCard\(/.test(src),
+    'load 的 catch 须走 failCard 兜底（错误卡 + 清空区块/副行）');
+  assert.ok(/function failCard\([\s\S]{0,420}setHtml\('#usage-totals', window\.ZC\.emptyState\(/.test(src),
+    'failCard 须向 #usage-totals 写 emptyState 错误卡（失败不留 spinner/旧数据）');
+  // 先置 loading 再发请求：杜绝「取数在途时旧数据挂新窗标签」的静默错配。
+  assert.ok(src.includes("for (const id of ['#usage-totals', '#usage-errors', '#usage-timeline', '#usage-tools'])"),
+    'load() 发请求前须先对四个区块置 loading');
+  // F-测-5（六席终审第 2 轮）：截断标注读 canonical 形态 turns.meta.truncated
+  //（F-码-5 收敛 meta.*）——回退读顶层旧字段 by_error_type_truncated 须红：
+  // 旧字段是「待下轮清理」的过渡兼容字段（清理时此钉防前端未随迁）。
+  assert.ok(src.includes('turns.meta && turns.meta.truncated'),
+    'renderErrorTypes 须读 turns.meta && turns.meta.truncated（canonical 形态）');
+  assert.ok(!src.includes('turns.by_error_type_truncated'),
+    '前端不得回退读顶层过渡字段 by_error_type_truncated');
+});
+
+test('F-安-1 转义纪律: 时间线副行 shortId 经 escapeHtml（与 attribution.js 同批对齐）', () => {
+  const src = readPublic('views/usage.js');
+  assert.ok(src.includes('${escapeHtml(shortId(t.session_id, 8))}/${escapeHtml(shortId(t.turn_id, 12))}'),
+    'session/turn 短 id 拼 innerHTML 须经 escapeHtml（转义纪律）');
+  assert.ok(!src.includes('${shortId(t.session_id, 8)}/${shortId(t.turn_id, 12)}'),
+    '不得保留未转义的 shortId 裸拼形态');
+});
+
 test('C1-8 文档口径: usage-accounting.md 含「queryTaskUsage 增量口径（C1 增补）」小节；how.js 含 queryTaskUsage 指引', () => {
   const doc = readDocs('usage-accounting.md');
   assert.ok(doc.includes('queryTaskUsage 增量口径（C1 增补）'),

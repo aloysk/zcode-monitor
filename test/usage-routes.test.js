@@ -84,6 +84,8 @@ test('C1-9 空库: turns/tools 200、totals 全零/数组空、meta 完整不抛
     });
     assert.deepEqual(t.body.by_error_type, []);
     assert.equal(t.body.by_error_type_truncated, false);
+    // F-码-5：截断标注收敛 meta.*——顶层旧字段保留过渡期，两处须同值。
+    assert.equal(t.body.meta.truncated, false, 'meta.truncated 与顶层过渡字段同值');
     assert.deepEqual(t.body.timeline, []);
     assert.equal(t.body.window, '24h');
     assert.ok(isIso(t.body.since), 'since 须为 ISO 时间');
@@ -192,7 +194,10 @@ test('C5-1 两级数值: session 层聚合/降序/分解/标题 + turn 层逐项
     ]);
     assert.equal(t.body.meta.truncated, false);
     assert.equal(t.body.meta.retention_days, 30);
-    assert.ok(isIso(t.body.since));
+    // F-码-5：turn 层无窗口语义——不带 window/since（响应头对下钻层是误导
+    // 字段；meta.retention_days 仍适用，保留期是库级事实）。
+    assert.equal('window' in t.body, false, 'turn 层不得携带 window（无窗口语义）');
+    assert.equal('since' in t.body, false, 'turn 层不得携带 since');
 
     // 400：level=turn 缺 session_id（计划拍板：下钻必须有锚）
     const bad = await getJson(port, '/api/usage/attribution?window=24h&level=turn');
@@ -241,6 +246,7 @@ test('C1-2 turns 数值钉: totals 逐项/by_error_type 与构造值相等；met
       { type: 'api_error', count: 1 },
     ]);
     assert.equal(j.body.by_error_type_truncated, false);
+    assert.equal(j.body.meta.truncated, false, 'F-码-5：turns 截断标注经 meta.truncated 统一取法');
     assert.equal(j.body.meta.retention_days, 30);
     assert.ok(isIso(j.body.since), 'since 须为 ISO 时间');
   });
@@ -334,4 +340,29 @@ test('C1-5 路由侧契约: resolveWindow 全文件恰一处定义；index.js �
   const indexSrc = readServer('index.js');
   assert.ok(indexSrc.includes("app.use('/api/usage'"),
     "index.js 须含 app.use('/api/usage' 装配");
+});
+
+// ── 阶段 8：F-测-5（六席终审第 2 轮）——turns 端点 meta.truncated=true 的
+// HTTP 层映射。此前只断言 false 态（空库例+数值钉例）；db 层阶段 4 钉的是
+// db 字段 by_error_type_truncated，路由把它映射进 meta.truncated（F-码-5
+// 收敛 meta.*）的 true 态无 HTTP 层守护。载荷 6 种 error_type 计数递减
+//（复用 db 层阶段 4 的构造法，时间轴放 H(2)/H(1) 独占段——本例前的全部
+// 数值钉已跑完，晚插行不再影响它们）。
+test('F-测-5: ≥6 种 error_type → meta.truncated===true 且与顶层过渡字段同值（HTTP 面）', async () => {
+  const counts = { xe1: 6, xe2: 5, xe3: 4, xe4: 3, xe5: 2, xe6: 1 };
+  const rows = [];
+  for (const [type, n] of Object.entries(counts)) {
+    for (let i = 0; i < n; i++) {
+      rows.push({ turn_id: `${type}-${i}`, session_id: 'xtrunc', status: 'error',
+        error_type: type, started_at: H(2), duration_ms: 100 });
+    }
+  }
+  buildTurnUsage(fx.conn, rows);
+  await withUsageServer(async (port) => {
+    const j = await getJson(port, '/api/usage/turns?window=24h');
+    assert.equal(j.status, 200);
+    assert.equal(j.body.meta.truncated, true, '截断须映射进 meta.truncated=true（canonical 形态）');
+    assert.equal(j.body.by_error_type_truncated, true, '顶层过渡字段与 meta 同值（收敛期一致性）');
+    assert.equal(j.body.by_error_type.length, 5, 'Top5 截断不静默');
+  });
 });

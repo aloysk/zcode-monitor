@@ -1,5 +1,5 @@
 'use strict';
-// models-meta.js — C2 上下水位的静态模型元数据（纯数据模块：无 IO、无依赖，
+// models-meta.js — C2 上下文水位的静态模型元数据（纯数据模块：无 IO、无依赖，
 // node:test 直接 require）。
 //
 // 纪律声明（docs/specs/ecosystem-round2-batch1.md §2.2 需求 1）：

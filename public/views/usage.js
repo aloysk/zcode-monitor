@@ -73,14 +73,43 @@
 
   async function load() {
     const w = $('#usage-window') ? $('#usage-window').value : '24h';
-    const [turns, tools] = await Promise.all([
-      getJSON(`/api/usage/turns?window=${w}`),
-      getJSON(`/api/usage/tools?window=${w}`),
-    ]);
+    // 先置 loading 再发请求（F-败-1 评审钉）：旧实现取数在途时旧窗口数据挂在新
+    // 窗口标签下——取数失败即 24h 数据被当作 7d/30d 呈现（不实内容）。
+    for (const id of ['#usage-totals', '#usage-errors', '#usage-timeline', '#usage-tools']) {
+      setHtml(id, loading());
+    }
+    let turns, tools;
+    try {
+      [turns, tools] = await Promise.all([
+        getJSON(`/api/usage/turns?window=${w}`),
+        getJSON(`/api/usage/tools?window=${w}`),
+      ]);
+    } catch (e) {
+      // 失败兜底（attribution.js failCard 同款形态，F-败-1/F-码-2）：load 由
+      // 刷新按钮/窗口选择器触发、不经 route() 的 try/catch——不兜底即未处理
+      // rejection（public/ 无全局 unhandledrejection 处理器）+ 旧数据静默错配。
+      console.warn('[usage] 取数失败', e);
+      failCard('取数失败——稍后点「↻ 刷新」重试；详情见控制台。');
+      return;
+    }
     renderTotals(turns.totals, w);
     renderErrorTypes(turns);
     renderTimeline(turns);
     renderTools(tools);
+  }
+
+  // 取数失败卡（attribution.js failCard 同款出口形态）：totals 区写共享空态
+  // 组件错误卡，其余区块/副行清空——不留 loading spinner 残态，杜绝「失败但
+  // 显示旧数据」的静默错配。
+  function failCard(msg) {
+    setHtml('#usage-totals', window.ZC.emptyState('turn_usage', msg));
+    setHtml('#usage-errors', '');
+    setHtml('#usage-timeline', '');
+    setHtml('#usage-tools', '');
+    for (const sel of ['#usage-errors-sub', '#usage-timeline-sub', '#usage-tools-sub']) {
+      const el = $(sel);
+      if (el) el.textContent = '';
+    }
   }
 
   // totals 卡：九值全覆盖（turns 总数 + completed/errors/cancelled 分布作为
@@ -102,13 +131,16 @@
   }
 
   // error_type Top5（含 '(none)'——无 error_type 的行，completed/cancelled 常态）。
-  // 截断如实标注：服务端 by_error_type_truncated=true 时标题显「前 5（被裁）」。
+  // 截断如实标注：服务端 meta.truncated=true 时标题显「前 5（被裁）」——族内
+  // 统一取法（F-码-5：attribution 先例 meta.truncated；顶层 by_error_type_truncated
+  // 为服务端保留的过渡期兼容字段，本视图读 canonical 形态）。
   function renderErrorTypes(turns) {
     const dist = turns.by_error_type || [];
     const total = turns.totals.turns || 0;
+    const truncated = !!(turns.meta && turns.meta.truncated);
     const sub = $('#usage-errors-sub');
     if (sub) sub.textContent = dist.length
-      ? (turns.by_error_type_truncated ? '前 5（被裁）· 按计数降序' : '按计数降序')
+      ? (truncated ? '前 5（被裁）· 按计数降序' : '按计数降序')
       : '';
     if (!total) {
       setHtml('#usage-errors', window.ZC.emptyState('turn_usage',
@@ -150,8 +182,8 @@
       return `<div class="turn" data-turn="${escapeHtml(t.turn_id || '')}">
         <span class="dur">${dur}</span>
         <div><div class="bar"><span class="fill" style="width:${w}%;background:${fill}"></span></div>
-          <div class="faint mono" style="font-size:10.5px;margin-top:3px">${fmtTime(t.started_at)} · ${shortId(t.session_id, 8)}/${shortId(t.turn_id, 12)} ${t.context_exceeded ? '· ⚠ context_exceeded' : ''} ${t.error_type ? '· ' + escapeHtml(t.error_type) : ''}</div></div>
-        <span class="stats">ttft ${fmtMs(t.time_to_first_token_ms)} · 重试 ${fmtInt(t.model_retry_count)} · 工具错 ${fmtInt(t.tool_error_count)} · ${fmtNum(t.computed_total_tokens)} tok</span>
+          <div class="faint mono" style="font-size:10.5px;margin-top:3px">${fmtTime(t.started_at)} · ${escapeHtml(shortId(t.session_id, 8))}/${escapeHtml(shortId(t.turn_id, 12))} ${t.context_exceeded ? '· ⚠ context_exceeded' : ''} ${t.error_type ? '· ' + escapeHtml(t.error_type) : ''}</div></div>
+        <span class="stats">ttft ${fmtMs(t.time_to_first_token_ms)} · 重试 ${fmtInt(t.model_retry_count)} · 工具错误 ${fmtInt(t.tool_error_count)} · ${fmtNum(t.computed_total_tokens)} tok</span>
       </div>`;
     }).join('')}</div>`);
   }

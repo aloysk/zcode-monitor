@@ -41,7 +41,9 @@
 
   // escapeHtml 为 app.js:51 同款实现，组件内自带等价副本（empty-state.js 先例：
   // 加载序不可依赖 app.js，转义义务钉在共享组件自身——title/hover 载荷拼库内
-  // 字符串，未转义即 XSS 入口）。
+  // 字符串，未转义即 XSS 入口）。成对改动注记（F-码-6）：本副本与
+  // empty-state.js 的副本是同款等价实现（app.js 壳层为第三份）——扩充转义
+  // 字符集等变更须三处同步，勿单点改。
   function escapeHtml(s) {
     return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]);
   }
@@ -171,14 +173,18 @@
              unavailable: last.molecule == null };
   }
 
-  // SSE live 行防重叠闸（sessions.js startGaugeLive 消费）：SSE 连接建立晚于
-  // 种子查询，(连接, 查询] 间落库的行会经流重放——以末种子行 started_at 为闸，
-  // 早于等于它的重复行跳过（双计污染增量曲线）。比较是 ISO 字符串字典序
-  // （种子与 SSE 行同经 db.js ts() ISO 化，同格式字典序=时序）；任一侧时间戳
-  // 缺失 → 兜底接受（无法判序时不丢行）。
-  function shouldAcceptLiveRow(lastSeedAt, row) {
-    if (!lastSeedAt || !row || !row.started_at) return true;
-    return row.started_at > lastSeedAt;
+  // SSE live 行防重叠闸（sessions.js startGaugeLive 消费）：按行序（rowid）判重
+  // ——以末种子行 rid 为闸，rid 更大的行才是真增量。理据（F-码-3/F-败-3 评审
+  // 勘误）：live.js 每连接水位是连接时刻的 MAX(rowid)（头注 "only traffic after
+  // THIS connect streams"），(种子查询, 连接] 间落库的行不入流也不在种子——是
+  // 缺口而非重放，旧注释「经流重放」与服务端行为相反；曾用的 started_at 时间
+  // 闸防线防错了对象：同毫秒、rowid 更新的真新行会被误丢，「started_at 早于
+  // 种子末行但晚落库的长请求」（从未进种子）也会被当重复丢弃。缺口本身登记
+  // residuals（已知边界），本闸只防「种子已含的行再从流里到达」的双计（会
+  // 污染增量曲线）。任一侧 rid 缺失 → 兜底接受（无法判序时不丢行）。
+  function shouldAcceptLiveRow(lastSeedRid, row) {
+    if (!lastSeedRid || !row || !row.rid) return true;
+    return row.rid > lastSeedRid;
   }
 
   // 水位条（Context 标签大条）。ratio=null → unknown 态：空轨道 + 「—」，
@@ -228,8 +234,15 @@
     let maxAbs = 1;
     for (const p of series) if (p.delta != null) maxAbs = Math.max(maxAbs, Math.abs(p.delta));
     const H = opts.heightPx || 56;
-    const cols = series.map((p, i) => {
-      const bits = [`#${i + 1}`, fmtClock(p.started_at)];
+    // 列数截断（F-码-8）：种子 100 + live 有界累积下，长开标签序列可达数百行
+    // ——亚像素列宽不可读。opts.maxCols 存在且超限时只渲最右（最近）N 列，
+    // 左端以「+k」占位列如实标示被截段；截断只影响呈现（水位/增量/回落计算
+    // 仍用调用方传入的全序列），hover 序号用全局序号（截断后仍可对账行位）。
+    const maxCols = opts.maxCols || 0;
+    const hidden = maxCols > 0 && series.length > maxCols ? series.length - maxCols : 0;
+    const shown = hidden ? series.slice(-maxCols) : series;
+    const cols = shown.map((p, i) => {
+      const bits = [`#${hidden + i + 1}`, fmtClock(p.started_at)];
       if (p.model_id) bits.push(String(p.model_id));
       bits.push(`分子 ${fmtTok(p.molecule)} tok`);
       // 增量三态：分子不可得（缺列行，与首行同为 delta=null 但语义不同）→
@@ -251,9 +264,12 @@
         : '';
       return `<div title="${escapeHtml(bits.join(' · '))}" style="flex:1 1 0;min-width:0;position:relative;height:100%">${bar}${vline}</div>`;
     }).join('');
+    const headCol = hidden
+      ? `<div title="${escapeHtml(`更早 ${hidden} 行未在曲线显示（列数上限 ${maxCols}；水位条/增量计算/回落摘要仍含全序列），重进标签取最新种子`)}" style="flex:0 0 30px;min-width:0;position:relative;height:100%;display:flex;align-items:center;justify-content:center;overflow:hidden"><span class="faint mono" style="font-size:10px">+${hidden}</span></div>`
+      : '';
     return `<div style="position:relative;display:flex;align-items:stretch;height:${H}px;border:1px solid var(--border-soft);border-radius:4px;overflow:hidden">
       <div style="position:absolute;left:0;right:0;top:50%;height:1px;background:var(--border)"></div>
-      ${cols}
+      ${headCol}${cols}
     </div>`;
   }
 

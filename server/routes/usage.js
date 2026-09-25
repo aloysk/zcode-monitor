@@ -52,6 +52,10 @@ function makeUsageRouter({ retentionDays = 30 } = {}) {
     const s = dbq.usageTurnsSummary(sinceMs);
     res.json({
       ...head,
+      // 截断标注收敛 meta.*（F-码-5）：族内统一取法（attribution 先例
+      // meta.truncated，消费面两套取法分裂）；顶层 by_error_type_truncated 为
+      // 保留一个过渡期的兼容字段（前端已改读 meta.truncated，旧字段待下轮清理）。
+      meta: { ...head.meta, truncated: s.by_error_type_truncated },
       totals: s.totals,
       by_error_type: s.by_error_type,
       by_error_type_truncated: s.by_error_type_truncated,
@@ -91,6 +95,12 @@ function makeUsageRouter({ retentionDays = 30 } = {}) {
     } else {
       scope = wideWindowScope(window);
       ({ rows, truncated } = dbq.usageAttributionBySession(sinceMs, limit));
+    }
+    // turn 层不带 window/since（F-码-5）：下钻层是会话内全量分解、无窗口语义
+    // ——响应头携带窗口字段对下钻层是误导（窗口选择器只治理会话层，见
+    // attribution.js 口径钉）；meta.retention_days 仍适用（保留期是库级事实）。
+    if (level === 'turn') {
+      return res.json({ meta: { ...head.meta, truncated }, level, rows });
     }
     res.json({
       ...head,

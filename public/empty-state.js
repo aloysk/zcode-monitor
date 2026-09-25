@@ -9,7 +9,9 @@
 // 转义——首例 timeline 传静态串无风险，但组件是共享基建（本批新增空态一律经
 // 此渲染），后续批次传动态值（会话标题/模型名等库内字符串）时未转义即 XSS
 // 入口。escapeHtml 为 app.js:51 同款实现，组件内自带等价副本：加载序不可依赖
-// app.js（sanitize.js 先例同思路——安全默认收在共享模块内）。
+// app.js（sanitize.js 先例同思路——安全默认收在共享模块内）。成对改动注记
+//（F-码-6）：本副本与 context-gauge.js 的副本是同款等价实现（app.js 壳层为
+// 第三份）——扩充转义字符集等变更须三处同步，勿单点改。
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
   else { root.ZC = root.ZC || {}; root.ZC.emptyState = factory(); }

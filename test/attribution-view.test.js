@@ -115,6 +115,19 @@ test('C5-4 下钻链接: session 层帧 → #sessions/<id>，turn 层帧 → #se
     'turn 层须含 #sessions/${encodeURIComponent(<id>)}/turns 直链形态');
 });
 
+test('F-码-1 回归: 空窗明细区隐藏而非删除——有行时恢复（空窗→切窗→明细表复现）', () => {
+  const src = readPublic('views/attribution.js');
+  // 旧形态（setHtml('#attr-detail-sec', '')）把明细区整段删除，而 reload()/
+  // render() 从不重建——「空→非空」后明细表永久消失。钉死删除形态不得回归。
+  assert.ok(!src.includes("setHtml('#attr-detail-sec', ''"),
+    '空窗不得删除明细区整段（reload/render 不重建，删后明细表永久消失）');
+  // 隐藏/恢复对偶：renderFlame 空窗 hidden=true，renderTable 有行 hidden=false。
+  assert.ok(/\$\('#attr-detail-sec'\)[\s\S]{0,120}hidden = true/.test(src),
+    'renderFlame 空窗须以 hidden 属性隐藏明细区（保留 DOM 可恢复）');
+  assert.ok(/\$\('#attr-detail-sec'\)[\s\S]{0,120}hidden = false/.test(src),
+    'renderTable 有行时须取消隐藏（空窗→切窗→明细表复现的恢复点）');
+});
+
 test('C5-3 主题重绘: zc-theme-changed 事件监听（色带渲染期 cssVar 读值，翻转后纯重渲）', () => {
   const src = readPublic('views/attribution.js');
   assert.ok(src.includes("addEventListener('zc-theme-changed'"),

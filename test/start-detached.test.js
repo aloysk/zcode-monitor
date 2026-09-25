@@ -90,8 +90,21 @@ test('start-detached：占口但无响应（卡死形态）不得 spawn 竞速�
   assert.ok(await portFree(PORT), `前置失败：${PORT} 被占用（残留进程？），先排查再跑`);
   // 测试内起占口桩：accept 后永不响应——事件循环卡死的探测签名。resume()
   // 必须有：不消费流的连接在客户端 FIN 后永远不终结，server.close() 的
-  // 回调就永不触发（本轮实机实锤——单文件跑挂 3 分钟+的最小复现形态）
-  const stub = net.createServer((s) => { s.resume(); s.on('error', () => {}); });
+  // 回调就永不触发（本轮实机实锤——单文件跑挂 3 分钟+的最小复现形态）。
+  // stubDead 后到即毁（R-21 第二形态）：close() 后内核 backlog 仍可能放行
+  // 一条 chrome 的 SSE 重连——放行即钉住测试进程事件循环（本机复现：3 例
+  // 全绿后进程 2 分钟+ 不退出）；teardown 置位后 handler 见到后到连接直接
+  // destroy，不放行。跟踪集供 teardown 显式摧毁（closeAllConnections 的
+  // 窗口补集，旧运行时无该 API 时的回退路径）。
+  const stubSocks = new Set();
+  let stubDead = false;
+  const stub = net.createServer((s) => {
+    if (stubDead) { s.destroy(); return; }
+    stubSocks.add(s);
+    s.on('close', () => stubSocks.delete(s));
+    s.resume();
+    s.on('error', () => {});
+  });
   await new Promise((resolve) => stub.listen(PORT, '127.0.0.1', resolve));
   try {
     const r = await runScript();
@@ -100,7 +113,23 @@ test('start-detached：占口但无响应（卡死形态）不得 spawn 竞速�
     assert.doesNotMatch(r.stdout, /已拉起 pid=/, '占口时绝不能 spawn 竞速者（对被占端口的 racer 必败）');
     assert.ok(stub.listening, '桩不应被脚本杀死（脚本无强杀逻辑，占口者原样保留——此刻桩自身仍在监听）');
   } finally {
-    await new Promise((resolve) => stub.close(() => resolve()));
+    // R-21 亚重形态修复（六席终审第 2 轮 F-安-3）：外部滞留客户端（chrome 对
+    // 7399 的 SSE 自动重连）会被本桩 accept，server.close() 的回调等这些连接
+    // 关闭而永不触发——全套门禁曾从 60-90s 挂败升级为 15min+ 无限挂死（node
+    // --test 无单文件超时）。顺序钉（实机验证的教训）：先 close() 停止收新
+    // 连接并置 stubDead（backlog 后到即毁），再摧毁已接受连接（跟踪集显式
+    // destroy + closeAllConnections()（Node≥18.2）双路）——反序的「先摧毁后
+    // 关监听」窗口内 chrome 会立即重连、令 close 回调重新进入等待（本机复现：
+    // 反序实现仍挂死 45s+）。3s 竞态兜底后再清一轮。
+    stubDead = true;
+    const closed = new Promise((resolve) => stub.close(() => resolve()));
+    const destroyAll = () => {
+      for (const s of stubSocks) { try { s.destroy(); } catch { /* already dead */ } }
+      if (typeof stub.closeAllConnections === 'function') stub.closeAllConnections();
+    };
+    destroyAll();
+    await Promise.race([closed, sleep(3000)]);
+    destroyAll();
   }
 });
 

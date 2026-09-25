@@ -257,6 +257,11 @@ test('EXPLAIN 形态: 本族每条 SQL 无基表 SCAN（TEMP B-TREE 允许）；
     return seen;
   };
   const since = H(10), wideSince = now - 10 * DAY, since7d = now - 7 * DAY;
+  // F-测-2 补两路：本批新增的两条 session 寻址 SQL 纳入 EXPLAIN 机检——
+  // contextGaugeRows（C2 水位种子）与 sessionList 的 latestModel 第三聚合
+  //（C2 mini 条数据面；直调 sessionList 捕获同款 4 条 SQL：页 + model/tool/
+  // latestModel 三条页内 IN 聚合，与 GET /api/sessions 的服务端路径零漂移——
+  // captureSql 经 db() 代理捕获真实执行 SQL）。
   const sqls = [
     ...captureSql(() => dbq.usageTurnsSummary(since)),            // 2 条（totals + 分布）
     ...captureSql(() => dbq.usageTurnTimeline(since, 5)),         // 1 条
@@ -267,13 +272,24 @@ test('EXPLAIN 形态: 本族每条 SQL 无基表 SCAN（TEMP B-TREE 允许）；
     ...captureSql(() => dbq.usageAttributionBySession(wideSince, 5)), // 2 条（宽窗单趟分组 + 标题）
     ...captureSql(() => dbq.usageToolBreakdown(since7d)),         // 2 条（7d 窄窗形态钉）
     ...captureSql(() => dbq.usageAttributionBySession(since7d, 5)), // 2 条（7d 窄窗形态钉）
+    ...captureSql(() => dbq.contextGaugeRows('sA', 5)),           // 1 条（C2 水位种子，session 索引寻址）
+    ...captureSql(() => dbq.sessionList({ limit: 5 })),           // 4 条（含 latestModel 第三聚合）
   ];
-  assert.equal(sqls.length, 16, '查询计数钉：窄窗 8 + 宽窗 4 + 7d 窄窗 4（归因单趟化后每档 2 条）');
+  assert.equal(sqls.length, 21, '查询计数钉：窄窗 8 + 宽窗 4 + 7d 窄窗 4 + contextGauge 1 + sessionList 4');
+  // F-SQL-4（六席终审第 2 轮）：显式排除集——session 页查询（「FROM session s」
+  // 识别）是既有两段式 LIMIT 页扫描形态（sessionList 分节头注性能声明），有意
+  // 不判；EQP 对别名形态打的是别名（实测「SCAN s」），全名正则本就抓不到——
+  // 旧实现的「不在本族判据面」只是注释里的隐式豁免，未来本族语句用别名（如
+  // FROM model_usage m）时真基表 SCAN 会静默逸出。改为显式滤出并留排除钉：
+  // 除白名单页查询外，捕获到的每条 SQL（含别名形态）一律过基表 SCAN 判据。
+  const checked = sqls.filter(s => !/\bFROM session s\b/.test(s));
+  assert.equal(checked.length, 20, '排除钉：21 条捕获 − session 页查询 1 条 = 20 条受检');
   assert.equal(sqls.filter(s => /NOT INDEXED/.test(s)).length, 3,
     '宽窗形态必须钉 NOT INDEXED（tools×2 + attr 单趟分组×1）');
   // 7d 窄窗形态钉（I-码-1）：无 NOT INDEXED/无 rowid 尾界；归因分组查询钉
-  // INDEXED BY started_at 索引。
-  const d7 = sqls.slice(12);
+  // INDEXED BY started_at 索引。（slice(12,16) 显式取 7d 四条——其后追加了
+  // contextGauge/sessionList 捕获条目。）
+  const d7 = sqls.slice(12, 16);
   assert.equal(d7.filter(s => /NOT INDEXED|rowid >/.test(s)).length, 0,
     '7d 档不得走宽窗 rowid 钳制路径（阈值 8d 语义）');
   assert.ok(d7.some(s => /INDEXED BY model_usage_started_model_idx/.test(s)),
@@ -287,7 +303,7 @@ test('EXPLAIN 形态: 本族每条 SQL 无基表 SCAN（TEMP B-TREE 允许）；
       : stmt.all(...Array.from({ length: anon }, () => 's1'));
     return rows.map(r => r.detail);
   };
-  for (const sql of sqls) {
+  for (const sql of checked) {
     const plan = explain(sql);
     assert.ok(plan.length > 0);
     for (const line of plan) {
@@ -316,4 +332,19 @@ test('缺索引回退: 无 model_usage_started_model_idx 时窄窗归因不加 I
     fx.conn.exec('CREATE INDEX IF NOT EXISTS model_usage_started_model_idx ON model_usage(started_at, provider_id, model_id)');
     conn._hasStartedModelIdx = cached !== undefined ? cached : true;
   }
+});
+
+// ── 阶段 11：attrLimit 非有限数兜底（F-SQL-3）──
+// +limit=Infinity 直调（测试/未来调用方形态）：Math.floor(+Infinity)=Infinity
+// 穿透旧防线、better-sqlite3 对非有限数绑定抛错——修复后回落 1（与
+// http-hardening.js clampAtLeast 的 NaN/±Infinity 语义对齐）。NaN 走既有
+// `Math.floor(NaN)||1` → 1 路径，一并钉住。
+test('attrLimit 兜底: limit=Infinity / -Infinity / NaN → 钳 1 不抛错（sA 两 turn 载荷下恰 1 行）', () => {
+  const inf = dbq.usageAttributionByTurn('sA', Infinity);
+  assert.equal(inf.rows.length, 1, 'Infinity 须回落 1（旧实现在此抛绑定错）');
+  assert.equal(inf.rows[0].turn_id, 'ta', '钳 1 后恰 token 降序首行');
+  assert.equal(inf.truncated, true, 'sA 两 turn → truncated 如实');
+  assert.equal(dbq.usageAttributionByTurn('sA', -Infinity).rows.length, 1);
+  assert.equal(dbq.usageAttributionByTurn('sA', NaN).rows.length, 1);
+  assert.equal(dbq.contextGaugeRows('sA', Infinity).length, 1, 'contextGaugeRows 同款兜底');
 });

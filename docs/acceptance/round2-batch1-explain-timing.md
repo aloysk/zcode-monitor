@@ -97,6 +97,11 @@ NOT INDEXED/无 rowid 尾界、归因页查询钉 INDEXED BY started_at 索引�
 5. **增长边界**：若单日用量涨至 7d 档行数超 200k，7d 档将被尾界收窄（今日
    24%/57% 余量）——与 slowTools「时间跨度会随使用时长无限增长，规模必须有独立
    上界」同一取舍：上界即 cap、语义收窄经 meta 如实申报；触及线时重测再定。
+   **重测触发线（六席终审轮补充，2026-09-25，F-SQL-1）**：tool/attribution 族
+   任一 7d 函数级 warm 计时 >450ms，或 7d 档窗内行数 >180k（tools）/>150k
+   （model_usage）——满足其一即重评 cap 上调/加列覆盖面并重基线本表数字
+   （与 turn_usage 既有的「>5 万行/>300ms」触发口径对齐；终审复测余量见
+   §1.3 末段）。
 6. **turn_usage 不钳**：30d 全表 13,886 行、首测 116ms（热态 8-12ms），无超线面
    ——不引入无谓复杂度。
 
@@ -123,6 +128,14 @@ readonly、探针 `zcmon-i-sql-2-cold-probe.js` 留 os.tmpdir()）：
 依赖（热态 177-193ms），与 §1.2 取舍共存；/api/usage 30d 请求还会叠加 titles
 （~0.2ms）与 turns 查询（12ms 冷）。7d 档（恒走窄窗精确路径）冷态 184-251ms
 在线内。
+
+**六席终审轮复测（2026-09-25，F-SQL-1 留痕；readonly 通道、函数本体直调）**：
+tool_usage 行数 550,310→554,178（评审时点）——usageToolBreakdown/7d 443ms
+cold / 410ms warm、/30d（cap 后）471.8ms cold / 448ms warm、
+usageAttributionBySession/30d 404.5ms cold / 379.6ms warm，均在线内但余量
+收窄至 6-20%（首测/修复轮记录为 184-251ms / 299-313ms 量级）；行数增长方向
+与余量收窄一致。7d warm 计时已贴近线（410/450 触发线），触及 §1.2 条目 5
+的触发线即重评 cap/加列覆盖面并重基线本表。
 
 ---
 

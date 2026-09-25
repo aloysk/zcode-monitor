@@ -973,9 +973,12 @@ function agentsForest({ projectId = null } = {}) {
 
 // 行数防御：路由层 clampLimit 是第一道（负 LIMIT = 无上限 → SQLite 整表同步
 // 物化事故形态，见 http-hardening.js 头注）；db 层对直调（测试/未来调用方）
-// 再兜底一次负值/NaN → 1，语义不变。
+// 再兜底一次负值/NaN → 1，语义不变。±Infinity → 1（F-SQL-3：better-sqlite3
+// 对非有限数绑定抛错，Math.floor(+Infinity)=Infinity 会穿透既有 max/floor
+// 防线；与 http-hardening.js clampAtLeast 的 NaN/±Infinity 语义对齐）。
 function attrLimit(limit) {
-  return Math.max(1, Math.floor(+limit) || 1);
+  const n = +limit;
+  return Number.isFinite(n) ? Math.max(1, Math.floor(n) || 1) : 1;
 }
 
 // 宽窗候选集钳制（slowTools 先例的移植；启用依据＝2026-09-25 真实库只读实测，
@@ -1141,8 +1144,15 @@ function usageAttributionBySession(sinceMs, limit = 50, { candidateCapRows = USA
   // idx_model_usage_session，真实库 40 万行同形态即 2.4s 级事件循环阻塞）；
   // 复用 overviewKpis 的连接级 sqlite_master 探测记忆与「缺索引库回退不加
   // INDEXED BY」取舍。
-  // 宽窗（≥8d，本族 30d 档）：NOT INDEXED + rowid 尾界 cap（见分节头注——不钉
-  // NOT INDEXED 时 planner 同样改走 session 索引全扫，cap 失效）。
+  // 宽窗（≥8d，本族 30d 档）：NOT INDEXED + rowid 尾界 cap（见分节头注）。钉子
+  // 论据改述（F-SQL-2 勘误）：现行单趟双键 GROUP BY (session_id, query_source)
+  // 形态下，去掉 NOT INDEXED 的宽窗语句 EQP 实走 SEARCH … INTEGER PRIMARY KEY
+  // (rowid>?)——「不钉即 planner 改走 session 索引全扫」是历史两段式单键
+  // GROUP BY 形态的实测（彼时 session 索引序可省 GROUP BY 的 TEMP B-TREE，
+  // SCAN model_usage USING INDEX model_usage_session_turn_idx、30d 热态 783ms），
+  // 在现行形态不复现；但窄窗同族问题（上行 INDEXED BY 的论据）是真实现行风险
+  // （unpinned 窄窗 EQP 实为 SCAN），宽窗钉死属防御性契约——防 GROUP BY 键形
+  // 态回退时 planner 再选 session 索引序、cap 失效，非对现行计划的描述。
   const conn = db();
   const wide = sinceMs <= Date.now() - USAGE_CAP_WINDOW_MS;
   let idxGuard = '';
@@ -1235,7 +1245,7 @@ function usageAttributionByTurn(sessionId, limit = 50) {
 }
 
 // ───────────────────────── Context gauge ─────────────────────────
-// C2 上下水位查询族（ecosystem-round2-batch1 §2.2）：会话内 token 序列。
+// C2 上下文水位查询族（ecosystem-round2-batch1 §2.2）：会话内 token 序列。
 // 口径钉（§2.0 勘误的执行义务——db 层返回原始三列，不预判回退）：
 //   - 水位分子 = 逐行 input_tokens（官方语义 input 已含 cache_read——Overview
 //     区头注；照抄上游「input+cache_read+cache_creation 累计」会 ≈2 倍虚高）；
@@ -1255,11 +1265,15 @@ function contextGaugeRows(sessionId, limit = 100) {
   // 取最新端 → JS 反转为 ASC 返回。ASC+LIMIT 直取会错取会话最旧端——长会话
   // 超 100 行常态（真实库 model_usage 40 万行），截错端则 live 水位种子停在
   // 远古、SSE 只推 connect 后新行、中间段永久缺失。limit 由路由层 clampLimit
-  // 钳界后传入；此处 attrLimit 兜底直调（负/NaN → 1，Usage attribution 区的
-  // 同款防线）。
+  // 钳界后传入；此处 attrLimit 兜底直调（负/NaN/±Infinity → 1，Usage
+  // attribution 区的同款防线）。
+  // rowid AS rid：水位 live 防重叠闸按行序判重的种子侧锚（F-码-3/F-败-3）——
+  // SSE model 行载荷自带 rid（live.js recentModelRowsAfterRowid 同名字段），
+  // 末种子行 rid 与流内 rid 比较，消除 started_at 时间闸的同毫秒误丢/晚落库
+  // 长请求误弃。additive 列：既有消费面按字段名取值不受影响。
   // schema source: zai-org/ZCode MIG 0010_usage_observability（model_usage 逐行）
   const rows = db().prepare(`
-    SELECT started_at, turn_id, model_id, query_source,
+    SELECT rowid AS rid, started_at, turn_id, model_id, query_source,
            input_tokens, cache_read_input_tokens, cache_creation_input_tokens
     FROM model_usage
     WHERE session_id = ?

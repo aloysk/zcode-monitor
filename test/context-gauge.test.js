@@ -1,7 +1,8 @@
 'use strict';
 // test/context-gauge.test.js — C2 服务端面（T6）：
-//   C2-2：GET /api/sessions/:id/context-gauge —— 行序 ASC、行形状八字段逐项核对、
-//         compact 边界标记、context_tokens 通路（已知 id 非 null / 未知 id null）、
+//   C2-2：GET /api/sessions/:id/context-gauge —— 行序 ASC、行形状九字段
+//         （八字段 + rid，F-测-4）逐项核对、compact 边界标记、context_tokens
+//         通路（已知 id 非 null / 未知 id null）、
 //         limit 钳界（?limit=-1 钳 1、?limit=99999 钳 500、缺省 100）、
 //         截断方向（?limit=3 于 5 行 → 恰最新 3 行且仍 ASC）；
 //   C2-4：GET /api/sessions —— 每会话 latest_model 三字段（「更晚但 input 更小」
@@ -170,11 +171,17 @@ test('C2-2: s1 序列默认 5 行、行序 ASC、行形状八字段逐项核对�
       assert.ok(rows[i - 1].started_at < rows[i].started_at, `行 ${i - 1}→${i} 须 ASC`);
     }
     // 行形状：规格 C2-2 字面八字段（API 响应缺列被本用例直接抓到）+ 边界标记字段
-    const FIELDS = ['started_at', 'turn_id', 'model_id', 'query_source', 'input_tokens',
+    // + rid（F-测-4 六席终审第 2 轮：水位 live 防重叠闸 rowid 行序基准的种子侧
+    // 数据依赖——SQL 的 rowid AS rid 若被移除，sessions.js lastSeedRid=0 →
+    // shouldAcceptLiveRow(0,…) 恒放行，防双计闸静默失效而全套无红）。
+    const FIELDS = ['rid', 'started_at', 'turn_id', 'model_id', 'query_source', 'input_tokens',
       'cache_read_input_tokens', 'cache_creation_input_tokens', 'context_tokens'];
     for (const row of rows) {
       for (const k of FIELDS) assert.ok(k in row, `行缺字段 ${k}`);
       assert.ok('compact_boundary' in row, '行缺 compact_boundary');
+      // rid 须为正整数（隐式 rowid；恒 0/undefined 穿透即闸失效形态）
+      assert.ok(Number.isInteger(row.rid) && row.rid > 0,
+        `rid 须为正整数（实测 ${JSON.stringify(row.rid)}）`);
     }
     // started_at ISO 形态
     assert.match(rows[0].started_at, /^\d{4}-\d{2}-\d{2}T/, 'started_at 须为 ISO');

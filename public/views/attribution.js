@@ -184,7 +184,12 @@
       setHtml('#attr-flame-card', st.level === 'turn'
         ? window.ZC.emptyState('model_usage', '该会话在保留窗内没有模型调用行——会话可能早于保留窗，或仅含尚未落库的进行中请求。')
         : window.ZC.emptyState('model_usage', '窗口内无模型调用记录——换更宽的窗口，或等 ZCode 产生新请求后刷新。'));
-      setHtml('#attr-detail-sec', ''); // 空窗口只留一张空态卡，不出空表头
+      // 空窗口只留一张空态卡、不出空表头——改隐藏而非删除（F-码-1 评审钉：
+      // 删除后 reload()/render() 均不重建该段，「空→非空」切窗/空 turn 层返回
+      // 后明细表永久消失，主题重绘（themeHandler→render）同样救不回）；
+      // renderTable 有行时取消隐藏（对偶恢复点）。
+      const sec = $('#attr-detail-sec');
+      if (sec) sec.hidden = true;
       return;
     }
 
@@ -241,7 +246,10 @@
   // 与帧内 ↗ 同款 hash 形态。占比列与帧宽同源（已显示行合计为分母）。
   function renderTable() {
     const rows = (st.data && st.data.rows) || [];
-    if (!rows.length) return; // 空窗已在 renderFlame 收口为单张空态卡
+    if (!rows.length) return; // 空窗已在 renderFlame 收口为单张空态卡（明细区隐藏）
+    // 空窗→非空的恢复点：renderFlame 空窗隐藏了 #attr-detail-sec，有行即恢复。
+    const sec = $('#attr-detail-sec');
+    if (sec && sec.hidden) sec.hidden = false;
     const total = rows.reduce((a, r) => a + (r.tokens || 0), 0);
     const tsub = $('#attr-table-sub');
     if (tsub) tsub.textContent = '按 token 降序 · 占比与帧宽同源（已显示项合计为分母）';
