@@ -38,6 +38,7 @@ const raw = require('../server/routes/raw');
 const traceRoutes = require('../server/routes/trace');
 const sessionsRoutes = require('../server/routes/sessions');
 const transcriptRoutes = require('../server/routes/transcript');
+const agentsRoutes = require('../server/routes/agents');
 
 test.after(() => {
   try { require('../server/db').db().close(); } catch { /* already closed */ }
@@ -515,6 +516,46 @@ test('limit/max 负值横向钳界：?limit=-1 / ?max=-1 在全部同类端点�
     assert.equal(JSON.parse(okSess.body).sessions.length, 1);
     const okConv = await get(port, '/api/sessions/s1/conversation?max=1');
     assert.equal(JSON.parse(okConv.body).messages.length, 1);
+  } finally { server.close(); }
+});
+
+// 四席全量审查第 2 轮（2026-09-25，SEC-R2）：重复/bracket/对象 query 形态不再
+// 500——firstParam 归一族。usage/sessions 族在各自文件已钉（usage-routes
+// SEC-安-1 / context-gauge C2-4 附），本例收口存量三路由（agents/transcript/
+// trace，第 2 轮代码席/安全席实测 500 实锤）与 window 首值语义。
+test('重复/bracket query 形态: agents/transcript/trace 不再 500（数组取首值、深层形态同缺参）', async () => {
+  const app = express();
+  app.use('/api', loopbackHostGate);
+  app.use('/api/agents', agentsRoutes);
+  app.use('/api/trace', traceRoutes);
+  app.use('/api/transcript', transcriptRoutes);
+  const server = await listen(app);
+  try {
+    const port = server.address().port;
+    const cases = [
+      // agents project_id：重复数组取首值；bracket 对象同缺参（null → 全树）
+      '/api/agents/tree?project_id=p1&project_id=p2',
+      '/api/agents/tree?project_id[foo]=bar',
+      // transcript types：重复数组取首值（无此会话 → found:false 200；此前
+      // 数组无 .split 抛 TypeError 500）；对象形态同缺参
+      '/api/transcript/sess_x?types=a&types=b',
+      '/api/transcript/sess_x?types[foo]=bar',
+      // trace window/kind：重复取首值；对象回退缺省档
+      '/api/trace/errors?window=7d&window=all',
+      '/api/trace/errors?kind=model&kind=tool',
+      '/api/trace/errors?window[foo]=bar&kind[foo]=baz',
+      '/api/trace/slow-tools?window=7d&window=all',
+    ];
+    for (const p of cases) {
+      const r = await get(port, p);
+      assert.equal(r.status, 200, `${p} 不得 500`);
+      const j = JSON.parse(r.body);
+      assert.ok(j.error === undefined, `${p} 不得是错误体`);
+    }
+    // 首值语义钉：trace window 回显首值（次值不参与——此前数组形态静默落
+    // 'all' 全窗最重路径）
+    const w = JSON.parse((await get(port, '/api/trace/errors?window=7d&window=all')).body);
+    assert.equal(w.window, '7d', '数组取首值');
   } finally { server.close(); }
 });
 

@@ -542,8 +542,8 @@ function sessionList({ limit = 100, offset = 0, q = '', taskType = '', status = 
   // 两段查询（R3 修-medium）：原单查询的 3 个相关聚合按「排序前的全行」逐行计算
   //（真实库 17,733 会话实测热态 949ms，冷态 4.3s——同步阻塞事件循环）；改为先取
   // 页内 ≤limit 行（排序只搬 8 个基础列，16-29ms），再对页内 id 做两条索引寻址的
-  // GROUP BY 聚合（idx model_usage_session_turn/ tool_usage_session_tool 最左
-  // session_id，合计 <15ms），口径与空值语义不变（COUNT 缺行=0、SUM 缺行=null）。
+  // GROUP BY 聚合（model_usage_session_turn_idx / tool_usage_session_turn_idx
+  // 最左 session_id，合计 <15ms），口径与空值语义不变（COUNT 缺行=0、SUM 缺行=null）。
   const page = db().prepare(`
     SELECT s.id, s.title, s.task_type, s.directory,
            s.parent_id,
@@ -1282,7 +1282,7 @@ function usageAttributionByTurn(sessionId, limit = 50) {
 //   - 窗口值（context_tokens）不经本层——路由层经 server/models-meta.js resolve
 //     附带（未知模型 null），前端不持有模型窗口表（窗口值唯一通路）。
 // 性能（红线 2）：WHERE session_id = ? 走 session 索引（sessionTurns 同款；
-// fixture 对应 idx_model_usage_session），会话内小集合 + 小排序，无整表物化
+// fixture 同名镜像 model_usage_session_turn_idx），会话内小集合 + 小排序，无整表物化
 // 风险。真实库 EXPLAIN/计时照录 docs/acceptance/round2-batch1-explain-timing.md。
 function contextGaugeRows(sessionId, limit = 100) {
   // 方向钉（本仓首次引入会话内序列 limit）：ORDER BY started_at DESC LIMIT ?

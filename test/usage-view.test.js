@@ -43,6 +43,10 @@ test('C1-5 视图形态: registerView("usage") + 空态经 ZC.emptyState + 30 �
   // 轮 T-测-9：子串禁令会被 "appending" 类词误伤显红）。
   assert.ok(!/\bpending\b/.test(src), 'usage.js 不得出现单词「pending」');
   assert.ok(!src.includes('待批'), 'usage.js 不得出现「待批」字样');
+  // R2-测（第 2 轮变异 G 补钉）：时间线条宽对 NULL duration 行（error 早夭）
+  // 按 0 宽渲染——`|| 0` 防宽是第 1 轮落下的有意防御形态，钉住防无声回退。
+  assert.ok(/pct\(t\.duration_ms \|\| 0, maxDur\)/.test(src),
+    '时间线条宽须保持 pct(t.duration_ms || 0, maxDur) 防宽形态');
 });
 
 test('C1-5 色值禁令: usage.js 无硬编码色值（#hex / rgb( / hsl( / 具名色 0 命中）', () => {

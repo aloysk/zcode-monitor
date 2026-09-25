@@ -64,7 +64,7 @@
 
 **现状锚点（2026-09-25 实读）**
 
-- 会话内查询走 `model_usage_session_turn_idx(session_id, turn_id)`（真实库 sqlite_master 实测存在，分析 §7-C2）；fixture 对应 `idx_model_usage_session`（fixture-db.js:36）。两段查询模式先例：`sessionList`（db.js:515-534，页内 id 索引寻址聚合）。
+- 会话内查询走 `model_usage_session_turn_idx(session_id, turn_id)`（真实库 sqlite_master 实测存在，分析 §7-C2）；fixture 对应 `idx_model_usage_session`（fixture-db.js:36；四席全量审查轮已对齐为同名复合索引 `model_usage_session_turn_idx`）。两段查询模式先例：`sessionList`（db.js:515-534，页内 id 索引寻址聚合）。
 - SSE model 行载荷已含 `input_tokens`/`query_source`/`model_id`（`recentModelRowsAfterRowid` db.js:808-821；发射于 live.js:44-59）——**水位增量零服务端改动**。行在请求完成时落库（`recordModelUsageFact` 完成后写入），生成中不跳动（UI 口径说明义务）。
 - widget hover 卡现状：`.tip`（widget.html:157-173），数据源 `GET /api/widget/today` → `todayUsage()`（index.js:214、db.js:482-492；注意其 `tokens` 是速度口径 output+reasoning，非 input）。
 - Context 标签现状：`renderContext`（sessions.js:159-326，左侧 turn 轨+右侧对话，compaction part 行已存在 :374-376 但无水位视图）。

@@ -337,12 +337,26 @@ test('EXPLAIN 形态: 本族每条 SQL 无基表 SCAN（TEMP B-TREE 允许）；
       : stmt.all(...Array.from({ length: anon }, () => 's1'));
     return rows.map(r => r.detail);
   };
+  // 别名形态防逸出（第 2 轮 SQL 席 F-2：EQP 对别名打的是别名名——如
+  // `FROM model_usage m` 的基表 SCAN 打出「SCAN m」，全名正则抓不到；F-SQL-4
+  // 注释声明的「含别名形态一律过判据」此前并未真正交付）。从捕获 SQL 建立
+  // alias→基表 映射，判据同时匹配基表名与已知别名。
+  const aliasOf = {};
+  for (const sql of sqls) {
+    for (const m of sql.matchAll(
+      /\bFROM\s+(turn_usage|tool_usage|model_usage|session)\s+(?:AS\s+)?([A-Za-z_]\w*)/gi)) {
+      aliasOf[m[2].toLowerCase()] = m[1];
+    }
+  }
+  const baseNames = ['turn_usage', 'tool_usage', 'model_usage', 'session'];
+  const scanRe = new RegExp('\\bSCAN\\s+('
+    + [...baseNames, ...Object.keys(aliasOf)].join('|') + ')\\b', 'i');
   for (const sql of checked) {
     const plan = explain(sql);
     assert.ok(plan.length > 0);
     for (const line of plan) {
-      assert.ok(!/SCAN\s+(turn_usage|tool_usage|model_usage|session)\b/.test(line),
-        `出现基表 SCAN：${line}（SQL：${sql.slice(0, 80)}…）`);
+      assert.ok(!scanRe.test(line),
+        `出现基表 SCAN（含别名形态）：${line}（SQL：${sql.slice(0, 80)}…）`);
     }
   }
 });

@@ -45,17 +45,21 @@ CREATE TABLE tool_usage (
 -- destructive / time_to_first_output_ms 是官方 schema 列（zai-org/ZCode MIG
 -- 0010_usage_observability；usage-accounting.md §1），WP0 约定 fixture 随
 -- db.js 现行查询所假设列集扩列（C1 usageToolBreakdown 的 destructive 分布）。
--- 索引名与列序对齐真实库 sqlite_master 实测（四席全量审查轮修正，2026-09-25）：
--- tool_usage_started_tool_idx 是 (started_at, tool_name) 覆盖索引、
--- tool_usage_session_tool_idx 是 (session_id, tool_name)、
--- model_usage_session_turn_idx 是 (session_id, turn_id) 复合索引（真实库
--- usageAttributionByTurn 的 GROUP BY turn_id 免 TEMP B-TREE 即由此提供）。
--- 此前 fixture 用单列 idx_tool_usage_started_at/idx_model_usage_session——
--- 功能等价但名字/形状双漂移：fixture EXPLAIN 门禁只能守护 fixture 计划形态，
+-- 索引名与列序对齐真实库 sqlite_master 实读（四席全量审查轮修正，2026-09-25；
+-- 第 2 轮勘误：tool_usage session 前导索引真库是 session_turn_idx(session_id,
+-- turn_id) + UNIQUE session_tool_call_idx(session_id, tool_call_id)——第一轮误拼
+-- 的 session_tool_idx(session_id, tool_name) 真库不存在）：
+--   tool_usage_started_tool_idx(started_at, tool_name) 覆盖索引、
+--   tool_usage_session_turn_idx(session_id, turn_id)、
+--   model_usage_session_turn_idx(session_id, turn_id) 复合索引（真实库
+--   usageAttributionByTurn 的 GROUP BY turn_id 免 TEMP B-TREE 即由此提供）。
+-- 对齐动机：fixture EXPLAIN 门禁只能守护 fixture 计划形态，名字/形状双漂移时
 -- 真实库 planner 翻转（加索引/ANALYZE）CI 抓不到，复合索引带来的计划差异
--- fixture 也复现不了。
+-- fixture 也复现不了。UNIQUE 镜像列 tool_call_id 允许多行 NULL（fixture 种子
+-- 行常缺该列，SQLite UNIQUE 对 NULL 互不判重）。
 CREATE INDEX tool_usage_started_tool_idx ON tool_usage(started_at, tool_name);
-CREATE INDEX tool_usage_session_tool_idx ON tool_usage(session_id, tool_name);
+CREATE INDEX tool_usage_session_turn_idx ON tool_usage(session_id, turn_id);
+CREATE UNIQUE INDEX tool_usage_session_tool_call_idx ON tool_usage(session_id, tool_call_id);
 -- 主键 (session_id, turn_id) 镜像真实库（usage-accounting.md §1 实测记载；
 -- 真实库 sessionTurns 的 session 寻址即走其自动索引 sqlite_autoindex_）。
 CREATE TABLE turn_usage (

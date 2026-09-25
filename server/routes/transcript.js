@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const tr = require('../transcript');
-const { clampAtLeast } = require('../http-hardening');
+const { clampAtLeast, firstParam } = require('../http-hardening');
 
 const router = express.Router();
 
@@ -15,7 +15,10 @@ const router = express.Router();
 // condition (not an error), so we return 200 with found:false rather than 404.
 router.get('/:sessionId', (req, res) => {
   const { sessionId } = req.params;
-  const types = req.query.types ? req.query.types.split(',') : null;
+  // firstParam 归一（四席全量审查第 2 轮）：?types=a&types=b 数组无 .split、
+  // bracket 对象形态直透 —— 此前抛 TypeError 落 500（实测）。
+  const typesParam = firstParam(req.query.types);
+  const types = typesParam ? typesParam.split(',') : null;
   // limit 钳非负（R5 修-high）：旧形态 `+q.limit` 直传，?limit=-1 会变成
   // out.slice(0,-1) 静默丢最后一行。null（缺省）= 不限；显式 0 = 取前 0 条
   //（readTranscript 以 null/非 null 区分二者）；负值/NaN 钳 0。

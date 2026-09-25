@@ -397,6 +397,16 @@ test('SEC-安-1: 重复 query 参数数组形态取首值（200），不再 500'
     const w = await getJson(port, '/api/usage/turns?window=7d&window=30d');
     assert.equal(w.status, 200);
     assert.equal(w.body.window, '7d', 'window 数组取首值');
+    // R2-SEC-001 深层形态（第 2 轮安全席实测 500 的两形）：bracket/嵌套数组
+    // 归一为 ''（同缺参语义）——level=turn 时 session_id 空 → 400 引导。
+    const deep = await getJson(port,
+      '/api/usage/attribution?window=24h&level=turn&session_id[foo]=bar');
+    assert.equal(deep.status, 400, '对象形态 session_id 归一为空 → 400 引导（不得 500）');
+    assert.equal(deep.body.error, 'bad_request');
+    const nested = await getJson(port,
+      '/api/usage/attribution?window=24h&level=turn&session_id[0][x]=y');
+    assert.equal(nested.status, 400, '嵌套数组形态同归一（不得 500）');
+    assert.equal(nested.body.error, 'bad_request');
   });
 });
 

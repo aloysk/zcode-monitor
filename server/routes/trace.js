@@ -3,13 +3,15 @@
 const express = require('express');
 const dbq = require('../db');
 const log = require('../log-tail');
-const { clampLimit } = require('../http-hardening');
+const { clampLimit, firstParam } = require('../http-hardening');
 
 const router = express.Router();
 
 // GET /api/trace/errors?window=24h&kind=both&limit=200
+// window/kind 经 firstParam 归一（四席全量审查第 2 轮）：数组形态此前静默
+// 落 'all' 全窗聚合（errors 端最重路径）或空结果——不是 500 但行为失真。
 router.get('/errors', (req, res) => {
-  const window = req.query.window || '24h';
+  const window = firstParam(req.query.window) || '24h';
   let sinceMs = null;
   if (window === 'today') sinceMs = dbq.startOfDayMs();
   else if (window === '24h') sinceMs = Date.now() - 24 * 3600_000;
@@ -19,7 +21,7 @@ router.get('/errors', (req, res) => {
     window,
     summary: dbq.errorSummary(sinceMs),
     items: dbq.errorsList({
-      sinceMs, kind: req.query.kind || 'both',
+      sinceMs, kind: firstParam(req.query.kind) || 'both',
       limit: clampLimit(req.query.limit, 200, 1000),
     }),
   });
@@ -27,7 +29,7 @@ router.get('/errors', (req, res) => {
 
 // GET /api/trace/slow-tools?window=24h&limit=50
 router.get('/slow-tools', (req, res) => {
-  const window = req.query.window || '24h';
+  const window = firstParam(req.query.window) || '24h';
   let sinceMs = null;
   let meta;
   if (window === 'today') sinceMs = dbq.startOfDayMs();

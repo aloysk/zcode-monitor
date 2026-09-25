@@ -308,6 +308,17 @@ test('C2-4 附: sessions 列表重复 q/task_type 数组形态取首值（不 50
     const sessions = JSON.parse(r.body).sessions;
     assert.ok(sessions.some(s => s.id === 's1'), 'q 取首值「水位」命中 s1');
     assert.ok(!sessions.some(s => s.id === 'zzz'), '次值不参与过滤');
+    // R2-SEC-001 深层形态（第 2 轮安全席实测 500）：bracket/对象归一为 ''
+    //（同缺参语义——不筛选、不得 500、不得静默 LIKE '%[object Object]%'）
+    const r2 = await get(server.address().port, '/api/sessions?task_type[foo]=bar');
+    assert.equal(r2.status, 200, '对象形态 task_type 不得 500');
+    const j2 = JSON.parse(r2.body);
+    assert.ok(j2.sessions.some(s => s.id === 's1'), '对象形态同缺参（不筛选）');
+    const r3 = await get(server.address().port, '/api/sessions?q[foo]=bar');
+    assert.equal(r3.status, 200, '对象形态 q 不得 500');
+    const j3 = JSON.parse(r3.body);
+    assert.ok(j3.sessions.some(s => s.id === 's1'),
+      '对象形态 q 归空不筛选——此前静默 LIKE [object Object] 搜空');
   } finally { server.close(); }
 });
 
