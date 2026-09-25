@@ -1353,7 +1353,7 @@ function signalsInflightSessionIds(
   const rows = db().prepare(`
     SELECT session_id
     FROM message
-    WHERE rowid > (SELECT MAX(rowid) FROM message) - 8000
+    WHERE rowid > (SELECT MAX(rowid) FROM message) - ${livegen.INFLIGHT_TAIL_ROWS}
       AND json_extract(data, '$.role') = 'assistant'
       AND json_extract(data, '$.time.completed') IS NULL
       AND time_created > ?
@@ -1442,9 +1442,11 @@ function sessionsWithSignals({ sinceMs, sessionIds = null, windowMs } = {}) {
 
 // 窄/宽窗形态装配（本分节三查询共享）：返回 FROM/WHERE 片段与 cap 参数基座。
 // pinIdx 仅 top-focus 窄窗需要（见分节头注）；日桶/活动桶窄窗不强制（分桶表达式
-// 安全形态）。
-function recapModelWindow(sinceMs, capRows, pinIdx) {
-  const wide = sinceMs <= Date.now() - USAGE_CAP_WINDOW_MS;
+// 安全形态）。nowMs 可注入（缺省 Date.now()）：路由层 buildRecapPayload 把同一
+// 注入时钟传下来，meta.scope 申报与实际查询形态共用一个时钟源（两源在 8d 阈值
+// 毫秒邻域内可分叉——评审第 1 轮 minor；缺省回退保持既有独立调用面不变）。
+function recapModelWindow(sinceMs, capRows, pinIdx, nowMs = Date.now()) {
+  const wide = sinceMs <= nowMs - USAGE_CAP_WINDOW_MS;
   if (wide) {
     return {
       from: 'FROM model_usage NOT INDEXED',
@@ -1473,8 +1475,9 @@ function recapModelWindow(sinceMs, capRows, pinIdx) {
 // 桶键碎片化（每行一桶），CAST(@tz AS INTEGER) 恢复「INTEGER 列 + 整型字面量」
 // 的整除语义（timeseries 的 started_at/3600000 同族）。
 function recapDailyUsage(sinceMs, { tzMs = 0, untilMs = null,
-                                   capRows = USAGE_CANDIDATE_CAP_ROWS } = {}) {
-  const w = recapModelWindow(sinceMs, capRows, false);
+                                   capRows = USAGE_CANDIDATE_CAP_ROWS,
+                                   nowMs } = {}) {
+  const w = recapModelWindow(sinceMs, capRows, false, nowMs);
   const params = { ...w.params, since: sinceMs, tz: tzMs };
   let until = '';
   if (untilMs != null) { until = ' AND started_at < @until'; params.until = untilMs; }
@@ -1499,8 +1502,9 @@ function recapDailyUsage(sinceMs, { tzMs = 0, untilMs = null,
 // 「N× parallel」＝桶内会话数的 max/avg（路由层从桶级分布派生）。事件源不用
 // message 表（无时间前导索引，§1.2 事实 4）。
 function recapActivityBuckets(sinceMs, { tzMs = 0, untilMs = null,
-                                        capRows = USAGE_CANDIDATE_CAP_ROWS } = {}) {
-  const w = recapModelWindow(sinceMs, capRows, false);
+                                        capRows = USAGE_CANDIDATE_CAP_ROWS,
+                                        nowMs } = {}) {
+  const w = recapModelWindow(sinceMs, capRows, false, nowMs);
   const params = { ...w.params, since: sinceMs, tz: tzMs };
   let until = '';
   if (untilMs != null) { until = ' AND started_at < @until'; params.until = untilMs; }
@@ -1520,9 +1524,15 @@ function recapActivityBuckets(sinceMs, { tzMs = 0, untilMs = null,
 // GROUP BY session_id 单段聚合产不出 directory 级跨会话去重的 activeMinutes——
 // 故对全部窗口行涉及的 session ids 归并（ids 有界＝窗口行集去重会话数，directory
 // 数远小于会话数），Top N 截断只在 directory 级归并完成后（截断不污染聚合计数）。
+// session IN 寻址按 IN_CHUNK 分块（notify.js sessionTokenSums 同款纪律）：ids
+// 上界＝7d 全窗去重会话数，去重会话数超 SQLite 变量上限 32766 时单条 IN 抛
+// too many SQL variables → /api/recap 500（评审第 1 轮实锤形态）；分块后每段
+// ≤500 参数恒在限内，块数＝⌈ids/500⌉（真库 7d 域千级会话 → 个位数段）。
+const RECAP_IN_CHUNK = 500;
 function recapTopFocus(sinceMs, { tzMs = 0, limit = 10,
-                                  capRows = USAGE_CANDIDATE_CAP_ROWS } = {}) {
-  const w = recapModelWindow(sinceMs, capRows, true);
+                                  capRows = USAGE_CANDIDATE_CAP_ROWS,
+                                  nowMs, inChunk = RECAP_IN_CHUNK } = {}) {
+  const w = recapModelWindow(sinceMs, capRows, true, nowMs);
   // schema source: zai-org/ZCode MIG 0010_usage_observability + USAGE queryAppUsage
   //（token 口径官方权威值）
   const grp = db().prepare(`
@@ -1533,14 +1543,18 @@ function recapTopFocus(sinceMs, { tzMs = 0, limit = 10,
     GROUP BY session_id, bucket
   `).all({ ...w.params, since: sinceMs, tz: tzMs });
   if (!grp.length) return [];
-  // session→directory 一次寻址（sessionList 两段模式第二段形态；缺行会话
+  // session→directory 分块寻址（sessionList 两段模式第二段形态；缺行会话
   // directory=null 如实呈现）
   const ids = [...new Set(grp.map(r => r.session_id))];
-  const ph = ids.map(() => '?').join(',');
-  // schema source: zai-org/ZCode MIG 0010_usage_observability（session 表）
-  const dirOf = new Map(db().prepare(
-    `SELECT id, directory FROM session WHERE id IN (${ph})`
-  ).all(...ids).map(r => [r.id, r.directory]));
+  const dirOf = new Map();
+  for (let i = 0; i < ids.length; i += inChunk) {
+    const chunk = ids.slice(i, i + inChunk);
+    const ph = chunk.map(() => '?').join(',');
+    // schema source: zai-org/ZCode MIG 0010_usage_observability（session 表）
+    for (const r of db().prepare(
+      `SELECT id, directory FROM session WHERE id IN (${ph})`
+    ).all(...chunk)) dirOf.set(r.id, r.directory);
+  }
   const byDir = new Map();
   for (const g of grp) {
     const dir = dirOf.has(g.session_id) ? dirOf.get(g.session_id) : null;

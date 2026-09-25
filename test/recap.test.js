@@ -5,8 +5,8 @@
 // 形态：express listen(0) + http.get（usage-routes.test.js 同款）；env 指向
 // os.tmpdir() fixture 后再 require（db.js 模块级缓存连接——env 先行是既有约定）。
 // 时间注入：now/tz 一律常量注入（tz 固定 UTC+8＝480），测试与宿主机时区/时刻
-// 无关（R2 跨本地午夜用例先例）；db 层宽窄判定用真实 Date.now()，窗口边界距
-// 8d 阈值天级远，毫秒漂移不构成翻转面。
+// 无关（R2 跨本地午夜用例先例）；db 层宽窄判定消费同注入 nowMs（路由层同源
+// 传递——评审第 1 轮时钟统一），8d 阈值邻域不再依赖「窗口边界天级远」的旧声明。
 // 数据布局（usage 族同款时间轴约定）：单 fixture 全程共享、node:test 顺序执行，
 // 各阶段「先断言后插行」——晚段期望值计入早段基线行（逐处标注）。
 // ⚠ 禁止单筛本文件用例：阶段 0 是空库断言（须最先跑），其后各阶段在同库上
@@ -88,6 +88,9 @@ test('C7-5 空库: week 空 top_focus/全零日桶/环比基线空 → delta nul
     active_minutes: 0, parallel_max: 0, parallel_avg: 0 });
   assert.deepEqual(w.comparison, {
     window_days: 7,
+    // 前窗 [ps−7d, ps) 起点距今 ≥14d > 8d 阈值 → 恒宽窗 cap 路径，previous_
+    // scope 恒申报（评审第 1 轮 major：前窗受 cap 钳制须披露，不得静默）
+    previous_scope: `recent_30d_capped_${dbq.USAGE_CANDIDATE_CAP_ROWS}_rows`,
     tokens: { current: 0, previous: 0, delta_pct: null },
     active_minutes: { current: 0, previous: 0, delta_pct: null },
   }, '空基线 → delta_pct null（不伪造 ±Infinity）');
@@ -184,6 +187,15 @@ test('C7-3 HTTP period: month/year period_start=本地月/年首日；未知值�
     assert.equal(m.body.period, 'month');
     assert.equal(m.body.period_start, new Date(expMonthStart).toISOString(),
       '本月 1 日（注入 tz 的本地日界）');
+    // month 档数据面非 null 钉（评审第 1 轮 minor：此前 null 断言全在 year 档，
+    // month 误 null 化——复制 year 分支——测试不红）：tokens 为数（宽窗 cap 与
+    // 否都产出数值）、top_focus 为数组、comparison 字段缺席（环比仅 week）。
+    assert.ok(m.body.days.length >= 1, 'month 档有日桶序列');
+    assert.ok(m.body.days.every(d => typeof d.tokens === 'number'),
+      'month 档日桶 tokens 非 null（token 类字段仅 year 档 null）');
+    assert.ok(Array.isArray(m.body.top_focus), 'month 档 top_focus 为数组非 null');
+    assert.ok(m.body.top_focus.length >= 1, 'month 档 top_focus 有归并组（种子行在窗）');
+    assert.ok(!('comparison' in m.body), '环比仅 week 档');
     const y = await getJson(port, '/api/recap?period=year');
     assert.equal(y.body.period, 'year');
     assert.equal(y.body.period_start, new Date(expYearStart).toISOString(),
@@ -252,6 +264,12 @@ test('C7-5 归并钉: by-directory tokens/calls/sessions/activeMinutes 逐项相
   assert.deepEqual(dbq.recapTopFocus(now - 4 * DAY, { tzMs: TZ_MS, limit: 1 }), [
     { directory: 'F:/projB', tokens: 550, calls: 2, sessions: 2, active_minutes: 2 },
   ]);
+  // 分块寻址对拍（评审第 1 轮 minor：ids 无上界超 SQLite 32766 变量限即 500，
+  // 按 RECAP_IN_CHUNK=500 分块）：inChunk=2 时 8 会话分 4 段寻址，结果与
+  // 单段逐位一致（分块只改寻址形态、不改语义）
+  const chunked = dbq.recapTopFocus(now - 4 * DAY, { tzMs: TZ_MS, inChunk: 2 });
+  assert.deepEqual(chunked, dbq.recapTopFocus(now - 4 * DAY, { tzMs: TZ_MS }),
+    'IN 分块寻址与单段结果逐位一致');
   // 空窗（未来窗）→ 空数组不抛错（C7-5 空窗条款）
   assert.deepEqual(dbq.recapTopFocus(now + DAY, { tzMs: TZ_MS }), []);
   assert.deepEqual(dbq.recapDailyUsage(now + DAY, { tzMs: TZ_MS }), []);
@@ -279,6 +297,10 @@ test('C7-4 HTTP week 环比: token/活动两维 delta 与构造一致；top_focu
     assert.deepEqual(r.body.comparison.tokens, { current: 1204, previous: 1000, delta_pct: 20.4 });
     // 活动桶 6（阶段 1 两桶 + 阶段 2 两桶 + tf 两桶）vs 1 → +500%
     assert.deepEqual(r.body.comparison.active_minutes, { current: 6, previous: 1, delta_pct: 500 });
+    // 前窗恒宽窗（起点距今 ≥14d > 8d 阈值）→ previous_scope 披露在案
+    assert.equal(r.body.comparison.previous_scope,
+      `recent_30d_capped_${dbq.USAGE_CANDIDATE_CAP_ROWS}_rows`,
+      '环比前窗 cap 形态披露（不静默）');
     assert.deepEqual(r.body.activity, { caliber: 'event_5min_buckets',
       active_minutes: 6, parallel_max: 3, parallel_avg: 1.5 });
     const byDate = Object.fromEntries(r.body.days.map(d => [d.date, d]));
@@ -357,6 +379,25 @@ test('C7-4 year 默认 cap: scope 申报 200k；token_coverage_from=候选集最
     }
     assert.ok(r.body.days.every(d => d.tokens === null), 'year 档 token 类字段 null');
     assert.equal(r.body.top_focus, null);
+  });
+});
+
+// ── 阶段 12b：deltaPct 负增长分支（前窗加大基线行 → cur<prev 的直接用例）──
+// 评审第 1 轮 note：此前 delta_pct 断言仅 prev=0（null）与正增长两分支，
+// 负增长（cur<prev）无直接用例。期望值计入阶段 9 cap 种子（current 1204+
+// capMid20+rNew30=1254；previous 1000+cmp22000+capOld10=3010）。
+test('C7-4 deltaPct 负增长: cur<prev → 负百分数（−58.3），非 null 非 ±Infinity', async () => {
+  buildModelUsage(fx.conn, [
+    modelRow({ id: 'cmp2', session_id: 'cmpPrev', started_at: now - 10 * DAY,
+      computed_total_tokens: 2000 }),
+  ]);
+  await withRecapServer({ now, tzOffsetMinutes: TZ }, async (port) => {
+    const r = await getJson(port, '/api/recap?period=week');
+    assert.deepEqual(r.body.comparison.tokens,
+      { current: 1254, previous: 3010, delta_pct: -58.3 });
+    // 活动桶：current 6+capMid/rNew 两桶=8；previous cmp1/cmp2 同桶 1+capOld=2
+    assert.deepEqual(r.body.comparison.active_minutes,
+      { current: 8, previous: 2, delta_pct: 300 });
   });
 });
 

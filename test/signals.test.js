@@ -144,6 +144,10 @@ test('C6-1(e): subagent/workflow_child completed 新鲜 → idle（task_type 过
     const sig = out.get('sE');
     assert.equal(sig.state, 'idle', `${t} 的完成是后台行为，不进 waiting`);
     assert.equal(sig.waiting_since, null);
+    // reason 两形态区分钉：会话行在案但非 interactive ≠ 会话行缺失（后者
+    // 真实判定依据是 task_type 未知，不共用一条文案——评审第 1 轮 minor）
+    assert.equal(sig.reason,
+      '最新行 completed 但会话非 interactive（后台完成不构成等待）');
   }
   // 会话行缺失（model 行先于 session 行落库形态）→ 不按 interactive 猜
   const out = classifySessions(mkIn({
@@ -152,6 +156,8 @@ test('C6-1(e): subagent/workflow_child completed 新鲜 → idle（task_type 过
       started_at: N - 3 * MIN, completed_at: N - 2 * MIN, rid: 9 }]]),
   }));
   assert.equal(out.get('sE2').state, 'idle');
+  assert.equal(out.get('sE2').reason,
+    '最新行 completed 但会话行缺失（task_type 未知，不按 interactive 猜）');
 });
 
 test('C6-1(f): 在飞且近窗 error → working（优先级钉，既往回合不降级）', () => {
@@ -345,7 +351,10 @@ test('C6-3: 每行含 signal 字段（working/waiting/broken/idle 四态逐项�
     const r = await get(port, '/api/sessions');
     assert.equal(r.status, 200);
     const rows = JSON.parse(r.body).sessions;
-    assert.ok(rows.length >= 8, '全部种子会话在默认页（≤100）');
+    // 精确计数（评审第 1 轮 note：宽松 >=8 改精确——该时点 session 表恰 10 行：
+    // sgW/sgZ/sgWait + sgAdv + sgB/sgSub/sgOld/sgIdle + sgP1/sgP2；sgNew/sgOlder
+    // 只有 model 行无 session 行、不进列表）
+    assert.equal(rows.length, 10, '全部种子会话在默认页（≤100）');
     const by = Object.fromEntries(rows.map(s => [s.id, s]));
     // 既有字段不变（batch1 契约 additive 钉）
     for (const s of rows) {
@@ -400,6 +409,46 @@ test('C6-5: 分页域 vs 全库域分歧行（waiting 会话不在第 1 页）�
     assert.ok(j.oldest_waiting_ms >= 5 * MIN && j.oldest_waiting_ms <= 5 * MIN + 60e3,
       `oldest_waiting_ms≈5min（实得 ${j.oldest_waiting_ms}ms）`);
     assert.ok(Number.isFinite(Date.parse(j.generated_at)));
+  } finally { server.close(); }
+});
+
+// ── C6-5 补：completed+completed_at=NULL 的 DB 种子端到端路径 ──────────────────
+// 规格 §2.1 需求 1 第 2 轮钉的对称面：broken 侧 NULL 种子（b1）既有 DB 行，
+// completed 侧此前仅有分类器内存注入（C6-1 注入面用例）——本用例补种子行流经
+// sessionsWithSignals → /api/signals/summary 与 /api/sessions 的 HTTP 面
+//（routes/signals.js 的 null 排除守卫与 SQL bare-column 取 NULL 的组合）。
+test('C6-5 completed+NULL: 种子行流经 summary/sessions——waiting 态 + waiting_since=null 不入 oldest 聚合', async () => {
+  buildSession(fx.conn, [
+    { id: 'sgNullC', title: '完成无收尾时刻', task_type: 'interactive', directory: 'F:/demo',
+      time_created: T(60), time_updated: T(3) },
+  ]);
+  buildModelUsage(fx.conn, [
+    { id: 'nc1', session_id: 'sgNullC', turn_id: 'k8', status: 'completed',
+      started_at: T(3), completed_at: null, duration_ms: 60e3, query_source: 'main_turn',
+      model_id: 'glm-5', computed_total_tokens: 40 },
+  ]);
+  // 组装层：NULL completed_at 行入 waiting 态、waiting_since=null（bare-column
+  // +MAX(rowid) 取 NULL 伴随列——与内存注入断言（C6-1 注入面）经同一分类器）
+  const sigs = dbq.sessionsWithSignals({ sinceMs: T(15) });
+  assert.equal(sigs.get('sgNullC').state, 'waiting');
+  assert.strictEqual(sigs.get('sgNullC').waiting_since, null);
+  const server = await listen(makeApp());
+  try {
+    const port = server.address().port;
+    // summary：计入 waiting_count（3），但 null waiting_since 不参与
+    // oldest_waiting_ms 聚合（NaN 防护——oldest 仍是 sgAdv 的 ~5min）
+    const r = await get(port, '/api/signals/summary');
+    assert.equal(r.status, 200);
+    const j = JSON.parse(r.body);
+    assert.equal(j.waiting_count, 3, 'NULL waiting_since 会话计入 waiting_count');
+    assert.ok(Number.isFinite(j.oldest_waiting_ms), 'oldest_waiting_ms 无 NaN');
+    assert.ok(j.oldest_waiting_ms >= 5 * MIN && j.oldest_waiting_ms <= 5 * MIN + 90e3,
+      `oldest 仍取 completed_at 非 NULL 的最久者（实得 ${j.oldest_waiting_ms}ms）`);
+    // /api/sessions 行：signal.waiting_since===null 的 waiting 态行
+    const rows = JSON.parse((await get(port, '/api/sessions')).body).sessions;
+    const row = rows.find(s => s.id === 'sgNullC');
+    assert.equal(row.signal.state, 'waiting');
+    assert.strictEqual(row.signal.waiting_since, null);
   } finally { server.close(); }
 });
 

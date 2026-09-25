@@ -115,6 +115,14 @@ test('C6-4: 顶栏 waiting chip——元素在案、summary 30s 轮询、点击�
   assert.ok(segs.appBind.includes("location.hash = 'sessions'"), 'chip 点击跳转代码在案');
   const app = readPublic('app.js');
   assert.ok(/\bsignalsLoop\(\);/.test(app), 'boot 区 signalsLoop() 启动在案');
+  // hidden 生效钉（评审第 1 轮 blocker 同轮加钉）：.badge 的 display:inline-block
+  // 会盖过 UA 对 [hidden] 的 display:none——chip 必须复用 .snap-alert 类（styles.css
+  // 的 .snap-alert[hidden]{display:none} 兜底），否则 waiting=0 默认态常显空黄徽标。
+  assert.ok(segs.chip.includes('class="badge yellow snap-alert"'),
+    'chip 复用 snap-alert 类（[hidden] 兜底 + 锚点指针语义，styles.css 零触碰约束内修复）');
+  const css = readPublic('styles.css');
+  assert.ok(/\.snap-alert\[hidden\]\s*\{\s*display:\s*none;?\s*\}/.test(css),
+    'styles.css 的 .snap-alert[hidden] 兜底规则在案（删兜底即挂）');
 });
 
 test('C6-4: 服务端装配面——routes/signals.js 存在、index.js 挂 /api/signals', () => {

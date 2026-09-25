@@ -64,9 +64,10 @@ function buildRecapPayload({
     if (capStart != null && capStart > coverageFrom) coverageFrom = capStart;
   }
 
-  // 主窗查询（日桶 + 活动桶；开窗到现在）。
-  const daily = dbq.recapDailyUsage(periodStart, { tzMs, capRows });
-  const buckets = dbq.recapActivityBuckets(periodStart, { tzMs, capRows });
+  // 主窗查询（日桶 + 活动桶；开窗到现在）。nowMs 同源传递：db 层宽窄判定与
+  // 路由层 meta.scope 申报共用注入 now（单一时钟源，8d 阈值邻域不分叉）。
+  const daily = dbq.recapDailyUsage(periodStart, { tzMs, capRows, nowMs: now });
+  const buckets = dbq.recapActivityBuckets(periodStart, { tzMs, capRows, nowMs: now });
 
   // 日序列装配：自 coverage 对齐本地自然日起至今天；activity 桶按 288/日折叠
   // 成逐日 active_minutes/parallel_max。dayKey 已含 tz 归一——Date(dayKey*DAY)
@@ -127,19 +128,26 @@ function buildRecapPayload({
   // Top focus（year 档 null——directory 级 token 归因在 30d prune 外不可读，
   // 排序键本身是 token，伪值即伪序）。
   const top_focus = p === 'year'
-    ? null : dbq.recapTopFocus(periodStart, { tzMs, capRows });
+    ? null : dbq.recapTopFocus(periodStart, { tzMs, capRows, nowMs: now });
 
-  // 环比（仅 week 档，token+活动两维）。前一窗 [ps−7d, ps) 同为窄窗精确路径
-  //（7d < 8d 宽窄阈值），untilMs 切片不与 cap 路径交叠。
+  // 环比（仅 week 档，token+活动两维）。前窗 [ps−7d, ps) 的形态披露：前窗
+  // 起点距今 ≥14d，宽窄阈值 USAGE_CAP_WINDOW_MS=8d 下恒落宽窗 rowid cap 候选
+  // 集路径（NOT INDEXED + 尾界钳制）——previous 数值与主窗不同族，受 cap
+  // 钳制（真库 200k cap ≈最近 14.5 天，前窗远端行可被截断；评审第 1 轮
+  // major：原注释「同为窄窗精确路径…不与 cap 路径交叠」失实）。previous_
+  // scope 按 meta.scope 同款缺席语义申报（仅 cap 生效时存在；阈值公式化——
+  // USAGE_CAP_WINDOW_MS 若未来调至 >14d，此处自动翻转）。
   let comparison = null;
   if (p === 'week') {
     const prevStart = periodStart - 7 * DAY_MS;
-    const prevDaily = dbq.recapDailyUsage(prevStart, { tzMs, untilMs: periodStart, capRows });
-    const prevBuckets = dbq.recapActivityBuckets(prevStart, { tzMs, untilMs: periodStart, capRows });
+    const prevWide = prevStart <= now - dbq.USAGE_CAP_WINDOW_MS;
+    const prevDaily = dbq.recapDailyUsage(prevStart, { tzMs, untilMs: periodStart, capRows, nowMs: now });
+    const prevBuckets = dbq.recapActivityBuckets(prevStart, { tzMs, untilMs: periodStart, capRows, nowMs: now });
     const curTokens = daily.reduce((s, r) => s + (r.tokens || 0), 0);
     const prevTokens = prevDaily.reduce((s, r) => s + (r.tokens || 0), 0);
     comparison = {
       window_days: 7,
+      ...(prevWide && { previous_scope: `recent_30d_capped_${capRows}_rows` }),
       tokens: {
         current: curTokens, previous: prevTokens,
         delta_pct: deltaPct(curTokens, prevTokens),

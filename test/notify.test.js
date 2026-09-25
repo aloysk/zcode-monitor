@@ -222,6 +222,24 @@ test('C8-1 引擎层: waiting_timeout 仅 interactive（subagent waiting 不触�
 });
 
 // ── C8-2：引擎防噪（冷却门只在发送路径）─────────────────────────────────────
+
+// tick 瞬态失败分支（评审第 1 轮测试质量席 minor：此前无用例注入抛错 dbq 驱动
+// tick）：evaluate 抛错 → 跳过本 tick、不崩进程、不发射、限频日志路径可达。
+test('C8-2 tick 瞬态失败: evaluate 抛错（SQLITE_BUSY 形态）→ 跳过本 tick 不崩不发射', () => {
+  const bus = new EventEmitter();
+  const sent = [];
+  bus.on('notify', p => sent.push(p));
+  const badDbq = { db: () => { throw new Error('database is locked'); } };
+  const engine = makeNotifyEngine({ dbq: badDbq, bus, tickMs: 1e9 });
+  try {
+    assert.doesNotThrow(() => engine.tick(), '瞬态失败跳过本 tick（不崩进程）');
+    assert.equal(sent.length, 0, '失败 tick 不发射事件');
+    // 第二次同样跳过（限频日志间隔内不刷屏——行为面 = 连续失败不恢复也不抛）
+    assert.doesNotThrow(() => engine.tick());
+    assert.equal(sent.length, 0);
+  } finally { engine.stop(); }
+});
+
 test('C8-2 error_burst 全局冷却: 同条件第二次 tick 不再发', () => {
   wipe();
   const now = Date.now();

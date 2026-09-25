@@ -180,6 +180,57 @@ interactive 且最新行 status='completed' → waiting 候选。后续判定＝
   （#3）同在线内。margin 偏窄（month 档 ~80% 线位），列入 R-22 复测观察面
   （既有「7d warm >450ms 或行数 model >150k 重测」触发线继续生效）。
 
+### §2 增补（2026-09-25 实现评审第 1 轮修复轮）：环比前窗形态 + 请求级累计
+
+评审第 1 轮（代码席/SQL 席）指出两处缺口并已随本修复轮收口：①原注释
+「环比前窗同为窄窗精确路径…不与 cap 路径交叠」失实——前窗起点
+`ps−7d = now−14d` 恒 ≥8d 宽窄阈值，**实际恒走 NOT INDEXED + rowid cap 候选
+集路径**（previous 数值受 200k cap 钳制，真库 cap ≈最近 14.5 天，前窗远端
+行可被截断且此前无披露）；②/api/recap 单请求 5 条同步 SQL 串行累计此前
+无照录与判据。收口：`comparison.previous_scope` 按 meta.scope 同款缺席语义
+申报（仅 cap 生效时存在，阈值公式化自动翻转）+ db 层宽窄判定消费路由注入
+nowMs（单一时钟源）；照录如下（探针＝tmpdir 临时脚本
+`zcmon-recap-timing-probe.js`/`zcmon-recap-eqp-probe.js`，真库只读，预热/
+二次单次执行墙钟）：
+
+| # | 路径 | 计时（warm/second，ms） | 形态 |
+|---|---|---|---|
+| P1 | buildRecapPayload week 全装配（5 查询串行） | 2193.2 / 2925.9 | 含主窗三路 + 前窗两路 |
+| P2 | buildRecapPayload month 全装配 | 1432.6 / 1148.4 | 主窗三路宽窗 + spans |
+| P3 | buildRecapPayload year 全装配 | 756.5 / 738.4 | 主窗两路宽窗 + spans |
+| P4 | 前窗日桶（since=now−14d, until=now−7d） | 229.5 / 248.3 | 宽窗 cap（EQP 照录见下） |
+| P5 | 前窗活动桶（同窗） | 229.6 / 215.9 | 同上 |
+
+前窗 EQP（第一手照录，`EXPLAIN QUERY PLAN` 与 recapDailyUsage 前窗运行时
+形态逐字一致）：`SEARCH model_usage USING INTEGER PRIMARY KEY (rowid>?)` |
+`SCALAR SUBQUERY 1` | `SEARCH model_usage` | `USE TEMP B-TREE FOR GROUP BY`
+——与 #4/#5 宽窗形态同族（非 #1 窄窗形态），前窗恒宽窗实证。
+
+**请求级累计评估**：week 档单请求串行累计 2.2-2.9s（P1，随系统状态波动；
+SQL 席同法独立测得 1557ms——本机 warm 波动 ~2 倍与 R-22 §1.3 观察一致）。
+接受理由：/api/recap 是人读页按需请求（非轮询/非 SSE 常开），单条 SQL 各自
+在线内（#1-#8 + P4/P5 全部 ≤500ms 触发线）、合计阻塞与 R-9「慢但可用」
+（1.4-1.8s 单查询）同族；export 的 recap 数据集同源消费（C12 机器面无节流
+可反复触发）——本地面板单用户姿态下不构成滥用面。观察触发线（并入 R-22
+复测口径）：week 全装配 warm >4s 或消费面出现真实脚本高频拉取时再议
+（缓存/降频）。
+
+## §T8 C12-7 导出端点真机冒烟（2026-09-25，PORT=7393 专属口，真实库只读）
+
+> 端口偏差注记（实现评审第 1 轮，三席共提）：spec §4 硬红线 6 字面为「冒烟
+> 一律 PORT=7399」；本节与 §3 的 C8 冒烟分别用 7393/7396——执行时 7399 有
+> 外部并发运行体活动（R-21 环境背景：playwright-mcp SSE 长连接/残留测试进程
+> 反复重连，占用会致 E2E 假红或挂死）。意图红线全保留：避开 7331 生产实例、
+> 起服前后 netstat 双检、结束杀净自起进程（本节与 §3 均照录）。spec 字面
+> 未随 R-21 环境背景修订，属规格滞后非执行违规；后续批次应把硬红线 6 修订为
+> 「7399 优先，被外部运行体占用时改用 7393/7396 专属口并 netstat 双检」。
+
+EXPLAIN 不适用——C12 同源钉（export 消费源端点相同查询函数，零新 SQL，C12-2 源码契约+测试已证）。本节为下载对照照录：
+
+- usage 核心数值与源端点逐位一致：`GET /api/export/usage?window=24h`（包络）data.timeline=100 / totals.turns=924 / totals.model_requests=22899 / meta.truncated=false == `GET /api/usage/turns?window=24h` 同字段；schema_version=1、meta.retention_days=30、generated_at ISO。
+- 三数据集两格式各下载一次：overview.json 23,756B / overview.csv 610 行（kpis=19、speed=9、recent_speed=500=50 行×10 字段、series=25=JSON series.length、by_model=6=JSON、by_tool=50=JSON）/ usage.json 36,479B / usage.csv 101 行（=JSON timeline 100+首行）/ recap.json 3,005B（days=8）/ recap.csv 9 行（=JSON days 8+首行，列集 date,tokens,calls,sessions,active_minutes,parallel_max）。
+- 响应头：`Content-Disposition: attachment; filename="zcode-monitor-usage-24h-20260925T085508361Z.csv"`、`X-Zcode-Monitor-Export-Schema-Version: 1`（json/csv 双形态）、`Content-Type: text/csv; charset=utf-8`、`X-Content-Type-Options: nosniff`（全局头不破坏）。
+- 端口纪律：起服前 netstat 无 LISTENING（仅两条历史 CLOSE_WAIT/FIN_WAIT_2 客户端尾巴，不阻塞 bind），结束后杀净（pid 见下）。
 
 ---
 
@@ -226,7 +277,7 @@ spec §2.2 原文实现并保留，测试用显式开启钉；收口/终审裁�
 默认关）。spec §2.2 需求 2 表与交付默认的偏差即此一处，其余三规则与表
 逐项相等（test/notify.test.js 默认值钉）。
 
-**7396 冒烟（真库只读，2026-09-25）**：`PORT=7396 OPEN_BROWSER=0
+**7396 冒烟（真库只读，2026-09-25；端口偏差注记见 §T8 头注，同因同处置）**：`PORT=7396 OPEN_BROWSER=0
 HOST=127.0.0.1` 起服 → `/api/health` 200（ok/freshness ok）→ SSE
 `/api/live/events` 客户端挂 38s，**首个引擎 tick（boot+30s）即收到
 `event: notify` 帧**（真库实况：error_burst，5min 窗 7 行 tool 错误——
@@ -239,16 +290,3 @@ data: {"id":"error_burst:all:1790326289715","rule":"error_burst","title":"错误
 全链路（boot→单例装配→30s tick→真库评估→共享 bus→live.js per-connection
 转发→客户端帧）实测打通；服务端日志零 `[notify]` 错误；进程 SIGKILL 回收、
 端口复查无 LISTENING。
-
----
-
-## §T8 C12-7 导出端点真机冒烟（2026-09-25，PORT=7393 专属口，真实库只读）
-
-EXPLAIN 不适用——C12 同源钉（export 消费源端点相同查询函数，零新 SQL，C12-2 源码契约+测试已证）。本节为下载对照照录：
-
-- usage 核心数值与源端点逐位一致：`GET /api/export/usage?window=24h`（包络）data.timeline=100 / totals.turns=924 / totals.model_requests=22899 / meta.truncated=false == `GET /api/usage/turns?window=24h` 同字段；schema_version=1、meta.retention_days=30、generated_at ISO。
-- 三数据集两格式各下载一次：overview.json 23,756B / overview.csv 610 行（kpis=19、speed=9、recent_speed=500=50 行×10 字段、series=25=JSON series.length、by_model=6=JSON、by_tool=50=JSON）/ usage.json 36,479B / usage.csv 101 行（=JSON timeline 100+首行）/ recap.json 3,005B（days=8）/ recap.csv 9 行（=JSON days 8+首行，列集 date,tokens,calls,sessions,active_minutes,parallel_max）。
-- 响应头：`Content-Disposition: attachment; filename="zcode-monitor-usage-24h-20260925T085508361Z.csv"`、`X-Zcode-Monitor-Export-Schema-Version: 1`（json/csv 双形态）、`Content-Type: text/csv; charset=utf-8`、`X-Content-Type-Options: nosniff`（全局头不破坏）。
-- 端口纪律：起服前 netstat 无 LISTENING（仅两条历史 CLOSE_WAIT/FIN_WAIT_2 客户端尾巴，不阻塞 bind），结束后杀净（pid 见下）。
-
----

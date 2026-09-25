@@ -37,8 +37,17 @@ if (files.length === 0) {
 } else {
   delete process.env.NODE_TEST_CONTEXT; // 见头部注释 1)
   const stream = run({ files });
+  // 失败明细透出（2026-09-25 实现评审第 1 轮：首跑间歇红只剩用例名无断言
+  // 明细、不可诊断——e.details.error 携带断言消息与栈，一并不打给 stderr；
+  // 孙进程形态下它可能是结构化克隆对象而非 Error 实例，按字段防御取值）。
   stream.on('test:fail', (e) => {
     console.error(`test/index.js: 失败: ${e && e.name ? e.name : '(未命名)'}`);
+    const err = e && e.details && e.details.error;
+    if (err) {
+      const msg = typeof err === 'string' ? err : (err.message || err.code || '');
+      const stack = typeof err === 'string' ? '' : (err.stack || '');
+      if (msg || stack) console.error(`  ${msg}\n${stack}`.trim());
+    }
     process.exitCode = 1; // 见头部注释 2)：必须在事件内即时设置
   });
 }

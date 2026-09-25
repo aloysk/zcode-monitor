@@ -102,9 +102,16 @@ function classifySessions(
       });
       continue;
     }
-    out.set(id, m.status === 'completed'
-      ? idleSignal('最新行 completed 但会话非 interactive（后台完成不构成等待）')
-      : idleSignal(`最新行 status=${m.status}，不构成信号`));
+    if (m.status === 'completed') {
+      // completed 不进 waiting 的两形态分述（reason 携带真实判定依据）：
+      // 会话行缺失（model 行先于 session 行落库/截断域外）≠ 会话行在案但
+      // task_type 非 interactive——前者是「task_type 未知，不按 interactive 猜」。
+      out.set(id, idleSignal(type == null
+        ? '最新行 completed 但会话行缺失（task_type 未知，不按 interactive 猜）'
+        : '最新行 completed 但会话非 interactive（后台完成不构成等待）'));
+      continue;
+    }
+    out.set(id, idleSignal(`最新行 status=${m.status}，不构成信号`));
   }
   return out;
 }
