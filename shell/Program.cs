@@ -486,9 +486,10 @@ internal sealed class WidgetForm : Form
 
     // WebView2 init recreates the form's native window (multiple IME ghost
     // windows observed = several handle recreations), and each recreation
-    // drops TopMost/ShowInTaskbar from the actual window styles even though
-    // the WinForms properties still report true. Bake both bits into
-    // CreateParams so every recreation carries them.
+    // drops property-based styles (TopMost/ShowInTaskbar) from the actual
+    // window even though the WinForms properties still report true. Bake the
+    // TOOLWINDOW bit into CreateParams so every recreation carries it — the
+    // z-band is never a style property here (see SetTopmostBand).
     protected override CreateParams CreateParams
     {
         get
