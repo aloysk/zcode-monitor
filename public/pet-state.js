@@ -22,18 +22,19 @@
   const GESTURE_WINDOW_MS = 500;      // click 手势判定窗口（≈Windows 默认双击时长）
 
   // 单一心情判定（优先级从高到低）：
-  //   error > tantrum > generating > waiting_permission（预留位次）> sleep > cruise
+  //   error > tantrum > generating > waiting_permission > sleep > cruise
   // 入睡只查 now - s.lastActive 这一个时钟；s.sleepAfterMs 可注入（A4-3）。
-  // waiting_permission 预留说明（未接线）：/api/live 与 /api/gen/state 目前都
-  // 拿不到权限信号——2026-09-22 只读实测：tool_usage.approval_status 尾部取值
-  // 全 'none'、permission 表 max rowid 0。出现信号源后接线三步：SSE 分派里加
-  // permHoldUntil = Date.now() + ERROR_HOLD_MS；本函数 gen 之后插入
-  // `if (now < s.permHoldUntil) return 'permission';`；animFor 已备好
-  // 'waiting_permission' 行，无需再改。
+  // waiting_permission 已接线（batch2 C6）：数据源＝pet.html 每 5s 轮询
+  // /api/signals/summary（分类器的时间启发式 waiting，非 approval_status——
+  // 该列只记终态，数据面无权限等待信号源），waiting_count>0 时页面侧推进
+  // st.permHoldUntil = Date.now() + WAITING_HOLD_MS（页面常量，≥2× 轮询周期，
+  // 防 hold 在两次 poll 之间失效落 sleep 抖动）。位次＝gen 之后（生成画面
+  // 优先）、sleep 之前；error/tantrum 恒压过本态。
   function computeMood(now, s) {
     if (now < s.errorHoldUntil) return 'error';   // 系统报错：优先于一切（生成中也先报错）
     if (now < s.comboHoldUntil) return 'tantrum'; // 用户互动反馈，短暂压过后台生成画面
     if (s.gen) return 'gen';
+    if (now < (s.permHoldUntil || 0)) return 'permission'; // 会话在等用户（C6 接线，见头注）
     if (now - s.lastActive >= s.sleepAfterMs) return 'sleep';
     return 'cruise';
   }
@@ -44,7 +45,7 @@
   // 个懊恼动画，语义都成立，不新增行（9 行契约不动）。
   function animFor(mood, tps) {
     if (mood === 'error' || mood === 'tantrum') return 'failed';
-    if (mood === 'permission') return 'waiting_permission'; // 预留，见 computeMood
+    if (mood === 'permission') return 'waiting_permission'; // C6 接线，见 computeMood 头注
     if (mood === 'gen') {
       if (tps == null || !isFinite(tps) || tps < 30) return 'running';
       if (tps <= 80) return 'jumping';

@@ -277,11 +277,41 @@ async function snapshotLoop() {
   setTimeout(snapshotLoop, 30 * 1000);
 }
 
+// C6 顶栏 waiting chip：/api/signals/summary 轮询（周期 30s——waiting 是分钟级
+// 信号，chip 降频足够；healthLoop 实测 5s 周期，不作先例，spec §2.1 需求 4
+// 第 2 轮勘正口径）。waiting_count>0 显示 + 点击跳会话页（waiting 徽标在那；
+// 置顶分组已按 C6-8 处置摘除），为 0 隐藏；获取失败静默隐藏（fail-safe，
+// 不告警——freshness-chip/snapshot-alert 同款纪律）。oldest_waiting_ms 经
+// fmtFreshnessLag 显示格式化（60s/1h 只是显示阈值，与任何分档判定无关）。
+async function signalsLoop() {
+  let s = null;
+  try { s = await getJSON('/api/signals/summary', { retries: 1 }); }
+  catch { s = null; } // fail-safe：chip 停在隐藏态，不告警不猜
+  const chip = $('#waiting-chip');
+  if (chip) {
+    if (s && s.waiting_count > 0) {
+      chip.hidden = false;
+      chip.textContent = s.waiting_count + ' 等待中';
+      chip.title = 'interactive 会话时间启发式判定为等待用户（低置信，可能误报）'
+        + `——最长等待 ${fmtFreshnessLag(s.oldest_waiting_ms || 0)}`
+        + '\n点击到会话页查看 waiting 徽标';
+    } else {
+      chip.hidden = true;
+    }
+  }
+  setTimeout(signalsLoop, 30 * 1000);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   // sync theme icon with the (already-applied) attribute
   syncThemeIcon(currentTheme());
   const toggle = $('#theme-toggle');
   if (toggle) toggle.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); toggleTheme(); });
+
+  // C6 waiting chip 跳转：与 nav 拦截器同款形态（preventDefault + hash 赋值），
+  // 点击落到会话页（waiting 徽标随行内渲染）。
+  const wchip = $('#waiting-chip');
+  if (wchip) wchip.addEventListener('click', (e) => { e.preventDefault(); location.hash = 'sessions'; });
 
   // Checkpoint button: fold WAL into main db so history survives ZCode exit.
   const ckpt = $('#checkpoint-btn');
@@ -324,6 +354,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   healthLoop();
   snapshotLoop();
+  signalsLoop();
   // If a ?theme= override was used to open the page, persist it so subsequent
   // visits (and the toggle button) start from that choice.
   const q = new URLSearchParams(location.search).get('theme');

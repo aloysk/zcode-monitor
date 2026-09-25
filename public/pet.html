@@ -217,6 +217,11 @@ const IN_WEBVIEW = !!(window.chrome && window.chrome.webview);
 const PS = window.PetState;
 const { SLEEP_AFTER_MS, ERROR_HOLD_MS, COMBO_HOLD_MS, GESTURE_WINDOW_MS } = PS;
 const GEN_STALE  = 10 * 60 * 1000; // see staleness guard in poll()
+// C6 waiting hold：/api/signals/summary 见 waiting_count>0 时推进 permHoldUntil
+// 的 hold 时长。钉 ≥2× 轮询周期（poll 5s）——hold 短于两个周期则两次 poll 之间
+// 失效、mood 落 sleep，动画每 5s 抖动断裂一次（ERROR_HOLD_MS=4s 形态因此拒收，
+// spec §2.1 需求 6）。页面侧常量，可调整。
+const WAITING_HOLD_MS = 10 * 1000;
 
 const $ = id => document.getElementById(id);
 const petEl = $('pet'), bubbleEl = $('bubble'), bnumEl = $('bnum'), bunitEl = $('bunit'), blanesEl = $('blanes');
@@ -513,6 +518,18 @@ async function poll() {
   // the cat run forever. 10 min without any gen event demotes to cruise —
   // long enough that a real marathon generation isn't visually cut short.
   if (st.gen && Date.now() - genLastAt > GEN_STALE) { st.gen = false; st.lanes = 0; }
+  // C6 waiting 行：随 poll 通道另起一条 summary fetch（5s 周期，pet.html poll
+  // 先例形态——/api/widget/recent 是数组响应无法附带摘要）。waiting_count>0
+  // 时推进 permHoldUntil（hold=2× 轮询周期，见 WAITING_HOLD_MS 头注），mood 落
+  // waiting_permission（位次＝gen 之后，纯决策在 pet-state.js）；失败静默——
+  // hold 自然过期回落，不猜不告警。
+  try {
+    const r2 = await fetch('/api/signals/summary', { cache: 'no-store' });
+    if (r2.ok) {
+      const sum = await r2.json();
+      if (sum && sum.waiting_count > 0) st.permHoldUntil = Date.now() + WAITING_HOLD_MS;
+    }
+  } catch { /* silent: dead server keeps the last known mood */ }
   // idle demotion is time-based, so it must run even when the fetch failed
   render();
 }

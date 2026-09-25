@@ -107,6 +107,40 @@
     } catch (e) { $('#list-scroll').innerHTML = errorCard(e); }
   }
 
+  // ── C6 会话状态徽标（§2.1 需求 4）──────────────────────────────────────
+  // 分类器四态、三态位只承三态：working/waiting/idle 各一枚；broken 会话的
+  // 三态位渲染 idle 形态、可见性由叠加的 broken 徽标独占（评审钉，防发散）。
+  // 形态全复用既有 badge 类（类目色 + color-mix 8% 透明底，styles.css 零触碰）：
+  // working=blue（运行中，statusBadge 的 running 同色）、idle=dim、broken=red；
+  // waiting 的低置信只落在虚线描边上（badge.yellow 的文本/描边色本就不透明——
+  // 「弱化」不得降文本对比，§6 第 2 条 AA 调和的评审钉），hover title 固定
+  // 置信标注文案（spec §2.1 需求 4 照抄，含「启发式」grep 锚）；全段禁用
+  // approval 语义措辞（approval_status 只记终态——spec 同条的措辞禁令）。
+  // signal 字段缺失
+  // （旧缓存/旧服务）时徽标整位不渲染：renderList 是无 try/catch 的逐键热
+  // 路径，装饰性元素不得拖垮列表（C2 mini 条同款纪律）。
+  //
+  // needs-attention 置顶分组（§2.1 需求 4 原设计）已按 C6-8 误报抽样处置
+  // **摘除**（residuals R-28）：48h 回放 576 样本误报 39.8%（复核跑 580/41.2%，
+  // 均 >20% 线），收窗 8min 重测反升至 47.8%——spec §2.1 需求 7 降级条款
+  // 生效：waiting 徽标与置信标注保留（低置信如实呈现），置顶（对 waiting 的
+  // 视觉强推送）摘除；broken 徽标不受影响（数据驱动、无误报问题）。
+  const SIGNAL_WAIT_TITLE = '启发式判定：最近一次模型活动正常收尾且当前无在飞请求'
+    + '——数据面无权限等待信号源，判定为时间启发式（可能误报）';
+  function signalBadgesHtml(sig) {
+    if (!sig || !sig.state) return '';
+    const reasonTitle = escapeHtml(sig.reason || '');
+    const threeState = sig.state === 'working'
+      ? `<span class="badge blue" title="${reasonTitle}">working</span>`
+      : sig.state === 'waiting'
+        ? `<span class="badge yellow" style="border-style:dashed" title="${SIGNAL_WAIT_TITLE}">waiting</span>`
+        : `<span class="badge dim" title="${reasonTitle}">idle</span>`;
+    const broken = sig.state === 'broken'
+      ? ` <span class="badge red" title="${reasonTitle}">broken</span>`
+      : '';
+    return threeState + broken;
+  }
+
   function renderList() {
     const q = ($('#list-search')?.value || '').toLowerCase().trim();
     const tt = $('#list-tasktype')?.value || '';
@@ -119,39 +153,44 @@
     if (sort === 'tokens') items.sort((a,b) => (b.total_tokens||0) - (a.total_tokens||0));
     else if (sort === 'calls') items.sort((a,b) => ((b.model_calls||0)+(b.tool_calls||0)) - ((a.model_calls||0)+(a.tool_calls||0)));
     else items.sort((a,b) => (b.time_updated||0) - (a.time_updated||0));
+    // 排序/过滤语义与服务端排序不因 C6 改动（置顶分组已按 C6-8 处置摘除，
+    // 见上方徽标注释块；三态徽标随行内渲染，不参与排序）。
 
     const el = $('#list-scroll');
     if (!items.length) { el.innerHTML = '<div class="empty">无匹配会话</div>'; return; }
-    el.innerHTML = items.map(s => {
-      // 徽标四态：已知三类显式映射；未知 task_type 落 dim+原值——不冒充 main
-      //（dwf 轮的教训：此前未知类型一律标 main，selection_side_chat 就曾被错标）。
-      const tt = s.task_type;
-      const badge = tt === 'subagent_child' ? '<span class="badge dim">subagent</span>'
-        : tt === 'workflow_child' ? '<span class="badge purple">workflow</span>'
-        : tt === 'interactive' ? '<span class="badge blue">main</span>'
-        : `<span class="badge dim">${escapeHtml(tt || '?')}</span>`;
-      // C2 mini 水位条（sessionList latest_model）：无 model 行会话
-      //（latest_model.model_id===null）不渲染——空数据形状钉死（C2-4 源码契约）；
-      // 未知模型（context_tokens===null）条可渲染但不显百分比（不猜窗口，
-      // 「非官方权威」标注挂 title——miniGaugeHtml 内实现）。组件缺失（加载失败）
-      // 时静默降级为不渲染——renderList 是逐键热路径且无 try/catch，装饰性元素
-      // 不得拖垮整个会话列表。
-      const lm = s.latest_model || {};
-      const cg = ZCg();
-      const mini = cg && lm.model_id != null && lm.input_tokens != null
-        ? cg.miniGaugeHtml(lm.input_tokens, lm.context_tokens)
-        : '';
-      return `<div class="listitem ${s.id===currentId?'active':''}" data-id="${escapeHtml(s.id)}">
-        <div class="t">${escapeHtml(s.title || '(无标题)')}</div>
-        <div class="s">
-          <span>${relTime(new Date(s.time_updated).toISOString())}</span>
-          <span>${badge}</span>
-          ${s.total_tokens?`<span>${fmtNum(s.total_tokens)} tok</span>`:''}
-          ${s.model_calls?`<span>${fmtInt(s.model_calls)} req</span>`:''}
-          ${mini}
-        </div>
-      </div>`;
-    }).join('');
+    el.innerHTML = items.map(s => renderListRow(s)).join('');
+  }
+
+  function renderListRow(s) {
+    // 徽标四态：已知三类显式映射；未知 task_type 落 dim+原值——不冒充 main
+    //（dwf 轮的教训：此前未知类型一律标 main，selection_side_chat 就曾被错标）。
+    const tt = s.task_type;
+    const badge = tt === 'subagent_child' ? '<span class="badge dim">subagent</span>'
+      : tt === 'workflow_child' ? '<span class="badge purple">workflow</span>'
+      : tt === 'interactive' ? '<span class="badge blue">main</span>'
+      : `<span class="badge dim">${escapeHtml(tt || '?')}</span>`;
+    // C2 mini 水位条（sessionList latest_model）：无 model 行会话
+    //（latest_model.model_id===null）不渲染——空数据形状钉死（C2-4 源码契约）；
+    // 未知模型（context_tokens===null）条可渲染但不显百分比（不猜窗口，
+    // 「非官方权威」标注挂 title——miniGaugeHtml 内实现）。组件缺失（加载失败）
+    // 时静默降级为不渲染——renderList 是逐键热路径且无 try/catch，装饰性元素
+    // 不得拖垮整个会话列表。
+    const lm = s.latest_model || {};
+    const cg = ZCg();
+    const mini = cg && lm.model_id != null && lm.input_tokens != null
+      ? cg.miniGaugeHtml(lm.input_tokens, lm.context_tokens)
+      : '';
+    return `<div class="listitem ${s.id===currentId?'active':''}" data-id="${escapeHtml(s.id)}">
+      <div class="t">${escapeHtml(s.title || '(无标题)')}</div>
+      <div class="s">
+        <span>${relTime(new Date(s.time_updated).toISOString())}</span>
+        <span>${badge}</span>
+        ${signalBadgesHtml(s.signal)}
+        ${s.total_tokens?`<span>${fmtNum(s.total_tokens)} tok</span>`:''}
+        ${s.model_calls?`<span>${fmtInt(s.model_calls)} req</span>`:''}
+        ${mini}
+      </div>
+    </div>`;
   }
 
   function renderListActive() {

@@ -73,8 +73,10 @@ test('契约: 睡眠与错误态的可视接线齐备（静帧+呼吸+zzz / SSE 
   assert.ok(pet.includes('PS.classifyGesture'), '手势不变量判定走共享纯函数');
   // 阈值常量唯一权威在 pet-state.js（行为单测守护其值），页面解构消费
   assert.ok(pet.includes('const { SLEEP_AFTER_MS'), '页面阈值取自共享模块');
-  // permission 预留说明随决策逻辑住在 pet-state.js（接线注记三步俱在）
+  // permission 接线说明随决策逻辑住在 pet-state.js（batch2 C6 接线后原「预留」
+  // 注记更新为已接线形态：数据源＝/api/signals/summary 轮询 + permHoldUntil
+  // 位次注记；接线行为面由 signals-view.test.js 的 C6-6 用例守护）
   const psSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'pet-state.js'), 'utf8');
-  assert.ok(psSrc.includes('预留'), 'permission 预留说明必须留痕（pet-state.js）');
+  assert.ok(psSrc.includes('已接线'), 'permission 接线说明必须留痕（pet-state.js）');
   assert.ok(psSrc.includes('waiting_permission'), 'waiting_permission 行映射齐备');
 });

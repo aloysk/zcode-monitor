@@ -90,6 +90,60 @@ started_tool(77)→session_turn(78)，与上文照录一致。
 
 ---
 
+## 1.5 T3 / C6-8：waiting 误报回放抽样与超线处置（2026-09-25）
+
+探针脚本留 `os.tmpdir()`（`zcmon-t3-c68-replay.js` / `zcmon-t3-c68-retest.js`，
+只读连接 + busy_timeout 5000ms；运行时窗内库活度自然前进，两脚本相隔数分钟、
+主口径复核数字随窗沿漂移 ±2pp 属正常）。
+
+**回放口径（spec C6-8 钉）**：历史时刻 t ∈ [now−48h, now−30min]（t+2min 已
+流逝、30d prune 窗内），步长 10min；每时刻每会话经 started_at 索引窗
+[t−15min, t) 取最新行（`INDEXED BY model_usage_started_model_idx` + 子查询
+`ORDER BY started_at DESC LIMIT 2000` + 外层 GROUP BY session_id 取
+bare-column+MAX(rowid)——与在线分类器 `signalsRecentModelLatest` 同源形态）；
+interactive 且最新行 status='completed' → waiting 候选。后续判定＝[t, t+2min)
+窗内该会话有无新 model/tool 行（两路 INDEXED BY 强制 started_at 前导索引，
+禁 message 时间谓词）；有 → 误报。
+
+**EQP 照录（三路查询）**：
+
+| 查询 | EQP |
+|---|---|
+| 候选窗（model 近窗最新行） | `CO-ROUTINE (subquery-1)` \| `SEARCH model_usage USING INDEX model_usage_started_model_idx (started_at>? AND started_at<?)` \| `SCAN (subquery-1)` \| `USE TEMP B-TREE FOR GROUP BY` |
+| model 后续判定 | `SEARCH model_usage USING INDEX model_usage_started_model_idx (started_at>? AND started_at<?)` |
+| tool 后续判定 | `SEARCH tool_usage USING INDEX tool_usage_started_tool_idx (started_at>? AND started_at<?)` |
+
+（`SCAN (subquery-1)` 是对子查询协程输出 ≤2000 行的扫描、非基表扫描。）
+
+**抽样结果与处置**：
+
+| 口径 | 样本 | 误报 | 占比 | 耗时 |
+|---|---|---|---|---|
+| 主口径（窗 15min，286 时刻） | 576 | 229 | **39.8%** | 82.5ms |
+| 主口径复核（同法重跑） | 580 | 239 | 41.2% | 82.5ms |
+| 处置 A：收窗重测（15min→8min） | 452 | 216 | **47.8%** | 63.3ms |
+| 诊断变体：completed_at<t（剔除「行还在飞就被判 waiting」的膨胀面） | 421 | 97 | 23.0% | 72.5ms |
+| 诊断变体 × 收窗 8min | 294 | 74 | 25.2% | 55.2ms |
+
+- **判定：超线**（主口径 39.8% > 20% 阈值；样本 576 ≥ 30 例充足）。
+- **口径近似声明**：历史时刻的在飞集合不可回放（rowid 尾界锚定当下
+  MAX(rowid)），回放省略在飞排除——偏差方向保守（混入的 working 会话在 t 后
+  2min 内大概率出现新行、只可能推高误报率）。诊断变体显示该膨胀面贡献约
+  18pp（41.2%→23.0%），但剔除后仍超线。另按 spec 口径，「用户在 2min 内
+  回复」与「agent 自续」同计误报（无法区分、spec 明文接受该代理）。
+- **处置决策（spec §2.1 需求 7 二选一照录）**：收窗重测一轮已执行——
+  **47.8%，不降反升**（收窗剔除「长间隙真等待」、留下「短间隙自续」，此路
+  不通）；落入**降级**：waiting 徽标保留（含低置信虚线与置信标注 hover）、
+  **置顶分组摘除**（views/sessions.js 降级注记 + test/signals-view.test.js
+  降级态契约钉）、**C8 waiting_timeout 提醒摘除**（T4 实施约束，登记
+  residuals R-28 转达）。置顶验收面（C6-4 的置顶子项）随降级处置不再在案，
+  徽标/置信标注/chip/pet 接线各面不受影响。
+- 顶栏 waiting chip 保留的依据：降级条款字面摘除面为「置顶与 C8 waiting
+  提醒」；chip 是 C6 需求 4 的面板常驻信号显示（非打扰性提醒、自带低置信
+  披露 hover），与徽标同族保留。
+
+---
+
 ## 2. T6 / C7-7：recap 查询族真实库 EXPLAIN + 计时（2026-09-25）
 
 探针脚本留 `os.tmpdir()`（`zcmon-c7-7-probe.js`，只读连接）；SQL 与
@@ -125,3 +179,4 @@ started_tool(77)→session_turn(78)，与上文照录一致。
   「cap 保留/放宽」取舍变更，R-22 cap 治理维持现状；week 窄窗最高 313.6ms
   （#3）同在线内。margin 偏窄（month 档 ~80% 线位），列入 R-22 复测观察面
   （既有「7d warm >450ms 或行数 model >150k 重测」触发线继续生效）。
+
