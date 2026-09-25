@@ -239,3 +239,16 @@ data: {"id":"error_burst:all:1790326289715","rule":"error_burst","title":"错误
 全链路（boot→单例装配→30s tick→真库评估→共享 bus→live.js per-connection
 转发→客户端帧）实测打通；服务端日志零 `[notify]` 错误；进程 SIGKILL 回收、
 端口复查无 LISTENING。
+
+---
+
+## §T8 C12-7 导出端点真机冒烟（2026-09-25，PORT=7393 专属口，真实库只读）
+
+EXPLAIN 不适用——C12 同源钉（export 消费源端点相同查询函数，零新 SQL，C12-2 源码契约+测试已证）。本节为下载对照照录：
+
+- usage 核心数值与源端点逐位一致：`GET /api/export/usage?window=24h`（包络）data.timeline=100 / totals.turns=924 / totals.model_requests=22899 / meta.truncated=false == `GET /api/usage/turns?window=24h` 同字段；schema_version=1、meta.retention_days=30、generated_at ISO。
+- 三数据集两格式各下载一次：overview.json 23,756B / overview.csv 610 行（kpis=19、speed=9、recent_speed=500=50 行×10 字段、series=25=JSON series.length、by_model=6=JSON、by_tool=50=JSON）/ usage.json 36,479B / usage.csv 101 行（=JSON timeline 100+首行）/ recap.json 3,005B（days=8）/ recap.csv 9 行（=JSON days 8+首行，列集 date,tokens,calls,sessions,active_minutes,parallel_max）。
+- 响应头：`Content-Disposition: attachment; filename="zcode-monitor-usage-24h-20260925T085508361Z.csv"`、`X-Zcode-Monitor-Export-Schema-Version: 1`（json/csv 双形态）、`Content-Type: text/csv; charset=utf-8`、`X-Content-Type-Options: nosniff`（全局头不破坏）。
+- 端口纪律：起服前 netstat 无 LISTENING（仅两条历史 CLOSE_WAIT/FIN_WAIT_2 客户端尾巴，不阻塞 bind），结束后杀净（pid 见下）。
+
+---

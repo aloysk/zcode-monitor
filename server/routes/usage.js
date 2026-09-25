@@ -5,43 +5,23 @@
 // opts 注入可测（缺省 30=本机实测值；上游 USAGE_RETENTION_DAYS 是 ZCode 侧
 // 可配置项，本仓不读其配置文件——响应 meta 只回显本仓常量）。
 // 路由只消费 db.js「Usage attribution」分节的 T2 查询族，不在路由层重复聚合。
-// 响应公共头（window/since/meta.retention_days）由下方 resolveWindow 唯一
-// 装配——口径标注义务（窗口读数上限即 30 天保留窗）覆盖本族全部端点。
+// 响应公共头（window/since/meta.retention_days）由 server/routes/usage-window.js
+// 的共享 resolveWindow 唯一装配（batch2 T8 结构性提取、行为零变更：闭包内实现
+// 与模块级 wideWindowScope 移出，本文件薄委托；/api/export 同源消费同一
+// helper）——口径标注义务（窗口读数上限即 30 天保留窗）覆盖本族全部端点。
 const express = require('express');
 const dbq = require('../db');
 const { clampLimit, firstParam } = require('../http-hardening');
-
-// 宽窗（30d 档）候选钳制副作用的 meta 申报（slow_tools_scope 先例）：db 层对
-// 窗宽 ≥8d（本族值域即 30d 档）的 tool/attribution session 层查询启用 rowid
-// 尾部候选集上界（USAGE_CANDIDATE_CAP_ROWS；启用依据与实测数字见 db.js 分节
-// 头注及 docs/acceptance/round2-batch1-explain-timing.md）——读数上限=最新 cap
-// 行，如实注明不静默。值域内 24h/7d 走 started_at 索引精确窗口，无此副作用；
-// turn_usage 与 attribution turn 层不启用钳制（会话内天然小集合）。
-function wideWindowScope(window) {
-  return window === '30d'
-    ? { scope: `recent_30d_capped_${dbq.USAGE_CANDIDATE_CAP_ROWS}_rows` }
-    : {};
-}
+const { resolveWindow: sharedResolveWindow, wideWindowScope } = require('./usage-window');
 
 function makeUsageRouter({ retentionDays = 30 } = {}) {
   const router = express.Router();
 
-  // ── 共享 helper：窗口解析 + 响应公共头（本族三端点统一消费的唯一装配点）──
-  // 值域 24h|7d|30d，默认 24h、未知值回退 24h且回显 '24h'。
-  // 与 server/routes/overview.js:8-18 的路由内联窗口解析是两套值域（本族含
-  // 30d=完整保留窗、不含 today）——overview 既有内联不动，不越界改既有路由。
-  // sinceMs 供端点喂给 T2 查询；head 即响应公共头（since 为 ISO 时间）。
+  // 窗口解析薄委托（提取重构的真正不变量）：调用点与返回值形状零改动。保持
+  // 具名函数形态是既有源码契约钉——usage-routes「窗口解析具名函数仅一处定义」
+  // 对本文件的计数断言（箭头薄委托会使计数归零而红）。
   function resolveWindow(q) {
-    const w = firstParam(q && q.window); // 数组形态取首值（与其余字符串参数同语义）
-    const known = w === '7d' || w === '30d';
-    const window = known ? w : '24h';
-    const sinceMs = w === '7d' ? Date.now() - 7 * 86400_000
-                  : w === '30d' ? Date.now() - 30 * 86400_000
-                  : Date.now() - 24 * 3600_000; // 默认/未知（含 today 等外族值）→ 24h
-    return {
-      sinceMs, window,
-      head: { window, since: new Date(sinceMs).toISOString(), meta: { retention_days: retentionDays } },
-    };
+    return sharedResolveWindow(q, retentionDays);
   }
 
   // GET /turns?window=&limit= — C1 回合健康度窗口聚合 + 逐回合时间线。
