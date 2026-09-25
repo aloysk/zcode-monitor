@@ -4,7 +4,8 @@
 // 覆盖面：
 //   1) 已知 model_id（模块导出表首个键——自洽，不硬编码 id）→ 返回
 //      {context_tokens, max_output_tokens} 数值对象（不带内部标注字段）；
-//   2) 未知 id → null（不猜窗口）；精确匹配钉（前缀/后缀/大小写变形不命中）；
+//   2) 未知 id → null（不猜窗口）；等值匹配钉（前缀/后缀变形不命中；大小写
+//      折叠命中是官方 matchesRule 'i' 语义的照搬——四席全量审查轮定谳）；
 //   3) 源码头注纪律：「非官方权威」声明 + zcode-api 许可证纪律（只取数值不
 //      复制文本）+ 权威核对路径（zai-org/ZCode 源码常量）；
 //   4) 每条数值带出处标注（已核对官方源码常量含出处文件，或 unverified）；
@@ -28,16 +29,39 @@ test('C2-1: 已知 model_id（表首个键，自洽）→ 数值对象 {context_
   assert.deepStrictEqual(Object.keys(m).sort(), ['context_tokens', 'max_output_tokens']);
 });
 
-test('C2-1: 未知 model_id → null；精确匹配钉（无前缀/后缀/大小写模糊）', () => {
+test('C2-1: 未知 model_id → null；等值匹配钉（前缀/后缀变形不命中，大小写折叠命中＝官方语义）', () => {
   assert.strictEqual(modelsMeta.resolve('nonexistent-model-x'), null);
   const known = Object.keys(modelsMeta.table)[0];
-  // 「不猜窗口」：已知键的变形形态一律不命中（v1 不做 variant/模糊键）
-  assert.strictEqual(modelsMeta.resolve(known.toLowerCase()), null, '大小写变形不得模糊命中');
+  // 「不猜窗口」：已知键的形态变形一律不命中（前缀截断/后缀追加）
   assert.strictEqual(modelsMeta.resolve(known + '-x'), null, '后缀变形不得模糊命中');
   assert.strictEqual(modelsMeta.resolve(known.slice(0, -1)), null, '前缀截断不得模糊命中');
-  // 健壮性：非字符串入参 → null（DB 列可为 NULL）
+  // 大小写折叠命中（官方 matchesRule 'i' 语义的照搬，非「猜」——四席全量审查轮
+  // 2026-09-25 定谳：'GLM-5.3-flash' 真库 89 行据此获值，旧「大小写不命中」与
+  // 头注 (c) 自引的官方语义自相矛盾）。折叠命中值＝表键原值。
+  const lower = modelsMeta.resolve(known.toLowerCase());
+  assert.deepStrictEqual(lower, modelsMeta.resolve(known), '大小写折叠等值命中');
+  // 真库实测形态钉：小写 flash 变体与 kimi 系（latest-row/200k 双域实测成员）
+  assert.deepStrictEqual(modelsMeta.resolve('GLM-5.3-flash'),
+    { context_tokens: 1000000, max_output_tokens: 128000 });
+  assert.deepStrictEqual(modelsMeta.resolve('GLM-5.3-highspeed'),
+    { context_tokens: 1000000, max_output_tokens: 128000 });
+  assert.deepStrictEqual(modelsMeta.resolve('kimi-k3'),
+    { context_tokens: 1048576, max_output_tokens: 131072 });
+  assert.deepStrictEqual(modelsMeta.resolve('kimi-k3[1m]'),
+    { context_tokens: 1048576, max_output_tokens: 131072 });
+  // 健壮性：非字符串入参 → null（DB 列可为 NULL）；原型键不可达（Map 承载）
   assert.strictEqual(modelsMeta.resolve(null), null);
   assert.strictEqual(modelsMeta.resolve(undefined), null);
+  assert.strictEqual(modelsMeta.resolve('__proto__'), null);
+});
+
+test('C2-1: 表键小写折叠后唯一（折叠相撞即收录错误——resolve 折叠匹配的前提）', () => {
+  const seen = new Map();
+  for (const id of Object.keys(modelsMeta.table)) {
+    const lc = id.toLowerCase();
+    assert.ok(!seen.has(lc), `表键折叠相撞：${id} vs ${seen.get(lc)}`);
+    seen.set(lc, id);
+  }
 });
 
 test('C2-1: 源码头注纪律——「非官方权威」声明与 zcode-api 许可证纪律注释', () => {

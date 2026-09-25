@@ -11,9 +11,8 @@
 //     checkpoint 待合并（最近数据在 ZCode 干净退出前有丢失风险）；
 //   - freshness（C9-1，2026-09-25）：db/jsonl 双源「数据落后」读数 + ok/warn/err
 //     三档——档位判定全在服务端（阈值经 opts 注入，小值可测），前端只渲染
-//     格式化。db 源 = 最后 model 行 started_at vs now（rowid 尾界
-//     ORDER BY rowid DESC LIMIT 1，latestModelRowid db.js 同款 O(log n) 通道，
-//     无行→null）；jsonl 源 = defaultTodayFile() 的 mtime vs now（「名字最新」
+//     格式化。db 源 = 最后 model 行 started_at vs now（rowid = MAX(rowid)
+//     标量子查询寻址，latestModelRowid db.js 同款 O(log n) 通道，无行→null）；jsonl 源 = defaultTodayFile() 的 mtime vs now（「名字最新」
 //     语义，禁用 todayLogFile——其 UTC 映射在本地 00:00-08:00 指向昨日停写
 //     旧文件，freshness 将每天误报 err 档 8 小时，log-tail.js 头注已定性）。
 //     档位归属 >=（含等值）：lag 恰等于阈值即入档；无行/无文件 → lag_ms 与
@@ -41,9 +40,15 @@ function makeHealthRoute({ dbq, runtime, runtimeState, dbPath, logDir,
 
   // db 源：复用本请求已探活的连接；行 started_at 晚于 now（时钟偏移）钳 0。
   // 任何异常（连接损坏/库不可读）→ null：ok:false 已另行如实上报，lag 无从测。
+  // 取行形态用 MAX(rowid) 标量子查询（latestModelRowid db.js 同款通道）：EQP 为
+  // SEARCH … INTEGER PRIMARY KEY——`ORDER BY rowid DESC LIMIT 1` 的倒扫截断
+  // 实测同快（LIMIT 1 右叶即止），但 EQP 打 SCAN，纳入本仓 EXPLAIN 机检集会被
+  // 误判（四席全量审查轮 2026-09-25 改）。
   function dbLagMs(db) {
     try {
-      const row = db.prepare('SELECT started_at FROM model_usage ORDER BY rowid DESC LIMIT 1').get();
+      const row = db.prepare(
+        'SELECT started_at FROM model_usage WHERE rowid = (SELECT MAX(rowid) FROM model_usage)'
+      ).get();
       if (!row || row.started_at == null) return null;
       return Math.max(0, Date.now() - row.started_at);
     } catch { return null; }

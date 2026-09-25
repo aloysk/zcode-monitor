@@ -1,7 +1,8 @@
 'use strict';
 // test/db-retry.test.js — R4 修-low：db.js 连接自愈层（makeRetryingStatement/
 // isBusyErr/isConnBroken）的 stub 测试。运行时行为不变，仅导出测试缝。
-// BUSY 重试成功 / NOTADB 耗尽上抛且 invalidateDb 生效 / 普通错误首试即抛。
+// BUSY 重试成功 / NOTADB invalidateDb（close 旧连接）+ 原始错误即抛 / 普通错误
+// 首试即抛。
 // fixture 经 ZCODE_DB 注入（观察 invalidateDb 用真实连接身份变化：缓存被丢弃
 // 后下次 db() 重开新连接）。
 const test = require('node:test');
@@ -40,25 +41,29 @@ test('makeRetryingStatement: BUSY 前两次失败第三次成功 → 返回结�
   assert.equal(n, 3, '恰好两次重试');
 });
 
-test('makeRetryingStatement: SQLITE_NOTADB → invalidateDb 生效（连接缓存被丢弃重开）且耗尽后如实上抛', () => {
+test('makeRetryingStatement: SQLITE_NOTADB → invalidateDb 生效（close 旧连接+缓存重开）且原始错误即抛（死语句不重试）', () => {
   // 先建立缓存连接，稍后以连接身份变化观察 invalidateDb 被调用
   const raw1 = dbq.db()._raw;
   assert.ok(raw1, '前置：连接已缓存');
 
+  let n = 0;
   const raw = {
-    get: () => { throw mkErr('file is not a database', 'SQLITE_NOTADB'); },
+    get: () => { n++; throw mkErr('file is not a database', 'SQLITE_NOTADB'); },
   };
   const stmt = dbq.makeRetryingStatement(raw);
   assert.throws(() => stmt.get(), e => e.code === 'SQLITE_NOTADB',
-    '重试耗尽后按原错误上抛');
+    '按原始 NOTADB 错误上抛（进翻译层得 503 database_unavailable）');
+  assert.equal(n, 1, '连接损伤首试即抛——死语句上的重试无意义'
+    + '（自愈发生在调用方下次 db().prepare 重绑新连接；且 invalidateDb 已 close'
+    + '旧连接，重试会抛未翻译的 not-open TypeError 把 503 退化成 500）');
 
   const raw2 = dbq.db()._raw;
   assert.notEqual(raw2, raw1, 'invalidateDb 已丢弃旧连接缓存（下次 db() 重开）');
-  // 显式关闭被 invalidateDb 丢弃的旧连接（越界修复经授权，2026-09-25）：Windows
-  // 下句柄释放不依赖 GC 时序，否则 after 钩子 rmSync 报 EPERM——已实证（30 循环
-  // 3 复现）；根因是 db.js invalidateDb 置 null 前不 close，本轮以测试侧显式
-  // 关闭绕行、未改运行时行为。
-  try { raw1.close(); } catch { /* 已随 GC 释放则无妨 */ }
+  // R-26 销账钉（四席全量审查轮，2026-09-25）：invalidateDb 置 null 前已 close
+  // 旧连接——以 .open 为 oracle（实测 better-sqlite3 close() 幂等、二次调用不抛
+  // 错，throws 断言不可用）；此前置 null 不 close，句柄释放依赖 V8 GC 时序，
+  // Windows 下曾致 fixture rmSync EPERM ~10%。
+  assert.equal(raw1.open, false, '旧连接应已被 invalidateDb 关闭（R-26 运行时契约）');
 
   // isBusyErr/isConnBroken 分类缝（导出面直测）
   assert.equal(dbq.isBusyErr(mkErr('x', 'SQLITE_BUSY')), true);

@@ -9,7 +9,7 @@
 // 装配——口径标注义务（窗口读数上限即 30 天保留窗）覆盖本族全部端点。
 const express = require('express');
 const dbq = require('../db');
-const { clampLimit } = require('../http-hardening');
+const { clampLimit, firstParam } = require('../http-hardening');
 
 // 宽窗（30d 档）候选钳制副作用的 meta 申报（slow_tools_scope 先例）：db 层对
 // 窗宽 ≥8d（本族值域即 30d 档）的 tool/attribution session 层查询启用 rowid
@@ -32,7 +32,7 @@ function makeUsageRouter({ retentionDays = 30 } = {}) {
   // 30d=完整保留窗、不含 today）——overview 既有内联不动，不越界改既有路由。
   // sinceMs 供端点喂给 T2 查询；head 即响应公共头（since 为 ISO 时间）。
   function resolveWindow(q) {
-    const w = q && q.window;
+    const w = firstParam(q && q.window); // 数组形态取首值（与其余字符串参数同语义）
     const known = w === '7d' || w === '30d';
     const window = known ? w : '24h';
     const sinceMs = w === '7d' ? Date.now() - 7 * 86400_000
@@ -78,9 +78,11 @@ function makeUsageRouter({ retentionDays = 30 } = {}) {
   // level=session（默认；未知值同回退）或 level=turn；turn 层缺 session_id →
   // 400（计划拍板：下钻必须有锚）。空窗口 → 空数组 + meta，不抛错。
   // 行数两级同档：50/200。截断经 meta.truncated 如实标注（诚实原则）。
+  // 字符串参数经 firstParam 归一（?k=a&k=b 的数组形态不再 500，取首值）。
   router.get('/attribution', (req, res) => {
-    const level = req.query.level === 'turn' ? 'turn' : 'session';
-    if (level === 'turn' && !req.query.session_id) {
+    const level = firstParam(req.query.level) === 'turn' ? 'turn' : 'session';
+    const sessionId = firstParam(req.query.session_id);
+    if (level === 'turn' && !sessionId) {
       return res.status(400).json({
         error: 'bad_request',
         message: 'level=turn 需要 session_id（下钻必须有锚）。',
@@ -91,7 +93,7 @@ function makeUsageRouter({ retentionDays = 30 } = {}) {
     // turn 层是会话内查询（无窗口语义、无钳制）；session 层宽窗才有 scope 申报。
     let rows, truncated, scope = {};
     if (level === 'turn') {
-      ({ rows, truncated } = dbq.usageAttributionByTurn(req.query.session_id, limit));
+      ({ rows, truncated } = dbq.usageAttributionByTurn(sessionId, limit));
     } else {
       scope = wideWindowScope(window);
       ({ rows, truncated } = dbq.usageAttributionBySession(sinceMs, limit));

@@ -8,8 +8,9 @@
 //   C2-4：GET /api/sessions —— 每会话 latest_model 三字段（「更晚但 input 更小」
 //         行守护 rowid-max 语义；无 model 行会话三字段 null 且存在）；
 //   C2-6：dbq.todayUsage() 增列（input/cache_read SUM + cache_hit_rate 响应侧算好）
-//         与 /api/widget/today 直通——端点是 index.js:214 `res.json(dbq.todayUsage())`
-//         直通，本文件用同款最小 express 直通挂载断言 HTTP 面（规格 C2-6 判定物是
+//         与 /api/widget/today 直通——端点是 index.js 的 `res.json(dbq.todayUsage())`
+//         直通（源码契约钉见 C2-6 首例，防测试侧复制品漂移），本文件用同款最小
+//         express 直通挂载断言 HTTP 面（规格 C2-6 判定物是
 //         HTTP 响应；不必拉起完整 index.js），db 层断言为充分补充。
 // 全部 fixture 在 os.tmpdir()（ZCODE_DB 等 env 注入，require 前设置），绝不触碰
 // 真实库；水位/列表行全部落在「昨日」——todayUsage 只聚合当日（startOfDayMs
@@ -17,6 +18,8 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const { createFixtureDb, buildSession, buildModelUsage } = require('./helpers/fixture-db');
 const modelsMeta = require('../server/models-meta');
@@ -151,11 +154,20 @@ function sessionsApp() {
   return app;
 }
 
-// index.js:214 同款直通挂载（res.json(dbq.todayUsage())，零加工）
+// index.js 同款直通挂载（res.json(dbq.todayUsage())，零加工）——真实装配形态
+// 经 C2-6 首例的源码契约钉守护（复制品与真身漂移即红）。
 function widgetTodayApp() {
   const app = express();
   app.get('/api/widget/today', (_req, res) => res.json(dbq.todayUsage()));
   return app;
+}
+
+// 当日锚点（T-测-8，四席全量审查轮）：不早于本地零点+1min 且不早于 1min 前
+// ——Date.now()-1000 形态在本地午夜后 1s 内会落到昨日（todayUsage 只聚合当日，
+// 闪挂窗 ~2×1s/86400s；文件内 I-测-5 sBig 锚点同法规避）。
+function todayAnchor() {
+  const d0 = new Date(); d0.setHours(0, 0, 0, 0);
+  return Math.max(Date.now() - 60_000, d0.getTime() + 60_000);
 }
 
 test('C2-2: s1 序列默认 5 行、行序 ASC、行形状八字段逐项核对、compact 边界、context_tokens 通路', async () => {
@@ -284,23 +296,60 @@ test('C2-4: GET /api/sessions 每会话 latest_model 三字段（rowid-max 守�
   } finally { server.close(); }
 });
 
+test('C2-4 附: sessions 列表重复 q/task_type 数组形态取首值（不 500）', async () => {
+  // 四席全量审查轮（SEC-安-1 同族）：?q=a&q=b 的数组形态此前直透 LIKE 绑定
+  // 抛错落 500——firstParam 归一后取首值，与 HTML 表单重复键语义一致。
+  const server = await listen(sessionsApp());
+  try {
+    const q = encodeURIComponent('水位');
+    const r = await get(server.address().port,
+      `/api/sessions?q=${q}&q=zzz&task_type=interactive&task_type=zzz`);
+    assert.equal(r.status, 200, '数组 q/task_type 不得 500');
+    const sessions = JSON.parse(r.body).sessions;
+    assert.ok(sessions.some(s => s.id === 's1'), 'q 取首值「水位」命中 s1');
+    assert.ok(!sessions.some(s => s.id === 'zzz'), '次值不参与过滤');
+  } finally { server.close(); }
+});
+
 test('C2-6: 当日行 input 1000/cache_read 400 → todayUsage 与 /api/widget/today 直通均含三字段', async () => {
-  // 当日 completed 行（今日基线＝此刻，startOfDayMs 本地零点窗内）
+  const anchor = todayAnchor();
+  // 当日 completed 行（今日基线＝todayAnchor，本地零点窗内）
   buildModelUsage(fx.conn, [{
     id: 'today1', session_id: 's1', turn_id: 'ttoday', trace_id: 'trtoday',
-    status: 'completed', started_at: Date.now() - 1000, completed_at: Date.now() - 500,
+    status: 'completed', started_at: anchor, completed_at: anchor + 500,
     duration_ms: 500, query_source: 'main_turn', model_id: KNOWN_A, provider_id: 'zai',
     input_tokens: 1000, output_tokens: 100, reasoning_tokens: null,
     cache_read_input_tokens: 400, cache_creation_input_tokens: 50,
     tool_call_count: 0, computed_total_tokens: 1100,
   }]);
-  // db 层断言（文件内注释：端点是 index.js:214 res.json(dbq.todayUsage()) 直通，
+  // status='completed' 谓词钉（T-测-1，四席全量审查轮——变异实验：删掉该谓词
+  // 旧测试照绿）：当日 error 行不计入 requests/token SUM/cache 分母（真实库
+  // 每日必有 error 行，fixture s1 的 g3 即此形态）。input 取 1000/cache 400
+  // 与 today1 同量级——若谓词被删，三字段全面虚高立红。
+  buildModelUsage(fx.conn, [{
+    id: 'todayErr', session_id: 's1', turn_id: 'ttodayE', trace_id: 'trtodayE',
+    status: 'error', started_at: anchor + 100, completed_at: anchor + 600,
+    duration_ms: 500, query_source: 'main_turn', model_id: KNOWN_A, provider_id: 'zai',
+    input_tokens: 1000, output_tokens: 0, reasoning_tokens: null,
+    cache_read_input_tokens: 400, cache_creation_input_tokens: 0,
+    tool_call_count: 0, computed_total_tokens: 1000,
+    error_type: 'api_error', error_code: '500', error_message: 'boom',
+  }]);
+  // 源码契约钉（C1-5 `app.use('/api/usage'` 同款，T-测-4）：index.js 真实装配
+  // 是直通挂载——本文件的 widgetTodayApp 是复制品，真身日后加缓存/包装层时
+  // 本断言红（防复制品假绿）。
+  const indexSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
+  assert.ok(indexSrc.includes('res.json(dbq.todayUsage())'),
+    'index.js 须保持 todayUsage 直通挂载（复制品契约）');
+  // db 层断言（端点是 index.js 的 res.json(dbq.todayUsage()) 直通，
   // db 层即响应体——HTTP 例为同款最小挂载的补充钉）
   const out = dbq.todayUsage();
-  assert.equal(out.input_tokens, 1000);
-  assert.equal(out.cache_read_tokens, 400);
+  assert.equal(out.input_tokens, 1000, 'error 行不计入 input SUM');
+  assert.equal(out.cache_read_tokens, 400, 'error 行不计入 cache_read SUM');
   assert.equal(out.cache_hit_rate, 0.4);
-  // 既有速度口径字段并存、命名不混淆（tokens=output+reasoning=100）
+  // 既有速度口径字段并存、命名不混淆（tokens=output+reasoning=100；
+  // requests 只数 completed）
   assert.equal(out.tokens, 100);
   assert.equal(out.requests, 1);
 
@@ -318,9 +367,10 @@ test('C2-6: 当日行 input 1000/cache_read 400 → todayUsage 与 /api/widget/t
 test('C2-6: 当日全 input=0（全零行日）→ cache_hit_rate === null（零分母，禁 NaN/Infinity）', async () => {
   // 清场后只留全零行（C2-2/C2-4 断言已完成，模型行清空不影响本例）
   fx.conn.prepare('DELETE FROM model_usage').run();
+  const anchor = todayAnchor();
   buildModelUsage(fx.conn, [{
     id: 'zero1', session_id: 's1', turn_id: 'tzero', trace_id: 'trzero',
-    status: 'completed', started_at: Date.now() - 1000, completed_at: Date.now() - 500,
+    status: 'completed', started_at: anchor, completed_at: anchor + 500,
     duration_ms: 500, query_source: 'main_turn', model_id: KNOWN_A, provider_id: 'zai',
     input_tokens: 0, output_tokens: 7, reasoning_tokens: null,
     cache_read_input_tokens: 0, cache_creation_input_tokens: 0,

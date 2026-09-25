@@ -387,3 +387,27 @@ test('C2-4（renderList 部分）: mini 条渲染段 +「未知模型不显百�
   assert.ok(/lm\.model_id != null/.test(src),
     '不渲染分支须以 model_id 判空实现（空数据形状钉死，不留实施歧义）');
 });
+
+// ── XSS 黑盒（四席全量审查轮 SEC-安-2，2026-09-25）──
+// context-gauge 的 HTML 构建器（gauge/mini/曲线）消费库内字符串（模型名等），
+// 此前只有源码契约钉（escapeHtml 字面形态）——重构改名会静默失效。本例以
+// 实际载荷过构建器断言输出无裸注入向量（视图锁 IIFE 的 usage/attribution 面
+// 维持源码钉；UMD 双端导出的本组件走黑盒——freshness.test.js C9-3 对
+// emptyState 的同款已存在，两处合围共享组件面）。
+test('SEC-安-2: HTML 构建器对模型名/title 载荷全转义（无裸 <img 注入向量）', () => {
+  const PAYLOAD = '<img src=x onerror=alert(1)>';
+  const bar = CG.gaugeBarHtml(0.5, { title: PAYLOAD });
+  assert.ok(!bar.includes('<img'), 'gaugeBarHtml title 不得含裸 <img');
+  assert.ok(bar.includes('&lt;img'), '载荷须以转义形态出现');
+
+  const mini = CG.miniGaugeHtml(100, 200, { title: PAYLOAD });
+  assert.ok(!mini.includes('<img') && mini.includes('&lt;img'),
+    'miniGaugeHtml opts.title 同款全转义');
+
+  const curve = CG.deltaCurveHtml([
+    { started_at: 1_800_000_000_000, model_id: PAYLOAD, molecule: 100, delta: 50 },
+    { started_at: 1_800_000_060_000, model_id: 'GLM-5.1', molecule: 150, delta: 50 },
+  ]);
+  assert.ok(!curve.includes('<img'), 'deltaCurveHtml hover bits（model_id）不得含裸 <img');
+  assert.ok(curve.includes('&lt;img'), 'model_id 载荷须以转义形态出现');
+});

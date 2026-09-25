@@ -366,3 +366,58 @@ test('F-测-5: ≥6 种 error_type → meta.truncated===true 且与顶层过渡�
     assert.equal(j.body.by_error_type.length, 5, 'Top5 截断不静默');
   });
 });
+
+// ── 阶段 9：重复 query 参数归一（四席全量审查轮，2026-09-25）——Express qs 把
+// ?k=a&k=b 解析成数组，字符串参数直透 better-sqlite3 绑定抛错落 500（修复前
+// 实测 GET /api/usage/attribution?session_id=s1&session_id=s2 → 500 internal）。
+// firstParam 归一后取首值（http-hardening.js）。
+test('SEC-安-1: 重复 query 参数数组形态取首值（200），不再 500', async () => {
+  await withUsageServer(async (port) => {
+    // session_id 数组 → 首值 sA（阶段 3 的 sA 两 turn 形状复用断言）
+    const t = await getJson(port,
+      '/api/usage/attribution?window=24h&level=turn&session_id=sA&session_id=sB');
+    assert.equal(t.status, 200, '数组 session_id 不得 500');
+    assert.equal(t.body.level, 'turn');
+    assert.deepEqual(t.body.rows.map(r => r.turn_id), ['ta', 'tb'], '取首值 sA（次值不参与）');
+    // level 数组 → 首值胜出：turn 在首 + session_id 锚 → 200 turn 层
+    const lvTurn = await getJson(port,
+      '/api/usage/attribution?window=24h&level=turn&level=x&session_id=sA');
+    assert.equal(lvTurn.status, 200, '数组 level 取首值 turn（带锚不 400）');
+    assert.equal(lvTurn.body.level, 'turn');
+    // 首值未知 → 回退 session 层（无 400 面）
+    const lvSess = await getJson(port, '/api/usage/attribution?window=24h&level=x&level=turn');
+    assert.equal(lvSess.status, 200);
+    assert.equal(lvSess.body.level, 'session', '首值未知 → 回退 session');
+    // qs 数组下标形态（level[0]=turn → ['turn']）同取首值
+    const lvIdx = await getJson(port,
+      '/api/usage/attribution?window=24h&level[0]=turn&session_id=sA');
+    assert.equal(lvIdx.status, 200);
+    assert.equal(lvIdx.body.level, 'turn', '数组下标形态同首值语义');
+    // window 数组 → 首值 7d
+    const w = await getJson(port, '/api/usage/turns?window=7d&window=30d');
+    assert.equal(w.status, 200);
+    assert.equal(w.body.window, '7d', 'window 数组取首值');
+  });
+});
+
+// ── 阶段 10：attribution 上限钳界钉（四席全量审查轮，T-测-2——此前 200 上限
+// 零触达：clampLimit(…, 50, 200) 的 200 变异全套仍绿）。201 会话各 1 行 →
+// ?limit=99999 钳 200 + meta.truncated===true。行放 H(1)（本例为文件末段，
+// 晚插行不再影响既有数值钉）。
+test('C5-2 上限钳界: 201 会话 + ?limit=99999 → 恰 200 行 + meta.truncated===true', async () => {
+  const rows = [];
+  for (let i = 0; i < 201; i++) {
+    rows.push({ id: `cap-${i}`, session_id: `capS-${i}`, turn_id: `capT-${i}`,
+      status: 'completed', started_at: H(1), duration_ms: 100,
+      query_source: 'main_turn', model_id: 'GLM-5.3', provider_id: 'zai',
+      input_tokens: 10, output_tokens: 1, computed_total_tokens: 10 });
+  }
+  buildModelUsage(fx.conn, rows);
+  await withUsageServer(async (port) => {
+    const j = await getJson(port, '/api/usage/attribution?window=24h&limit=99999');
+    assert.equal(j.status, 200);
+    assert.equal(j.body.rows.length, 200, '上限 200 钳界（超上限不整页透出）');
+    assert.equal(j.body.meta.truncated, true, '截断如实标注');
+    assert.equal('scope' in j.body.meta, false, '24h 窄窗无 cap 申报（8d 阈值不可达）');
+  });
+});

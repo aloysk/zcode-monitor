@@ -39,8 +39,9 @@ test('C1-5 视图形态: registerView("usage") + 空态经 ZC.emptyState + 30 �
   assert.ok(src.includes('30 天'),
     'usage.js 须含「30 天」保留窗口口径文案');
   // approval 列只呈现终态值域分布——「pending/待批」语义禁令（C1 需求 2 的
-  // UI 层钉：时间启发式属后续批次 C6，本批不碰）。
-  assert.ok(!src.includes('pending'), 'usage.js 不得出现「pending」字样');
+  // UI 层钉：时间启发式属后续批次 C6，本批不碰）。词边界匹配（四席全量审查
+  // 轮 T-测-9：子串禁令会被 "appending" 类词误伤显红）。
+  assert.ok(!/\bpending\b/.test(src), 'usage.js 不得出现单词「pending」');
   assert.ok(!src.includes('待批'), 'usage.js 不得出现「待批」字样');
 });
 

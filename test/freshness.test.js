@@ -128,6 +128,27 @@ test('C9-1: db 落后 1min、jsonl 刚写 → 双源 ok', async () => {
   assert.equal(fr.jsonl.level, 'ok');
 });
 
+// 四席全量审查轮（2026-09-25）T-测-5 补例：
+//   ①时钟偏移行（started_at 晚于 now）→ lag 钳 0 不产负数；
+//   ②取行口径是 rowid 最大（MAX(rowid) 通道）非 started_at 最新——晚落库长
+//     请求行（started_at 更早但 rowid 更新）两口径 lag 读数不同，本例钉 rowid
+//     口径（与 recentModelRowsAfterRowid/live 水位同源语义）。
+test('C9-1: 未来时间戳行 → lag 钳 0；取行口径 MAX(rowid)（晚落库行胜出，非 started_at 最新）', async () => {
+  const t0 = Date.now();
+  clearModelRows();
+  insertModelRow('m-future', t0 + 3600 * 1000); // 时钟偏移：晚于 now 1h
+  let r = await getHealth();
+  assert.equal(r.json.freshness.db.lag_ms, 0, '负 lag 钳 0（Math.max(0,…) 分支首例）');
+  assert.equal(r.json.freshness.db.level, 'ok', '0 < 5min → ok');
+
+  clearModelRows();
+  insertModelRow('m-old-top', t0 - 2 * 3600 * 1000); // 先插：started_at 较新（2h 前）、rowid 较旧
+  insertModelRow('m-new-late', t0 - 4 * 3600 * 1000); // 后插：晚落库——started_at 更旧、rowid 更新
+  r = await getHealth();
+  assert.ok(Math.abs(r.json.freshness.db.lag_ms - 4 * 3600 * 1000) <= 30000,
+    '取 rowid 最大行（m-new-late，4h 前）——误用 started_at 最新口径会得 ≈2h');
+});
+
 // I-测-6b 补例：db 探活 ok 但 model_usage 查询抛错（连接探活与行查询是两次
 // prepare——库文件可读而表损坏/列缺失的形态）→ freshness.db 走 catch 兜底
 // null/null（levelFor(null)=null，不伪造 0/ok；jsonl 源同用注入桩置不可测）。

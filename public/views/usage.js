@@ -176,7 +176,7 @@
     }
     const maxDur = Math.max(...tl.map(t => t.duration_ms || 0), 1);
     setHtml('#usage-timeline', `<div class="turns">${tl.map(t => {
-      const w = pct(t.duration_ms, maxDur);
+      const w = pct(t.duration_ms || 0, maxDur); // NULL duration（error 早夭行）显 0 宽，防 NaN%
       const fill = t.status === 'error' ? 'var(--sev-err)' : t.status === 'cancelled' ? 'var(--sev-warn)' : 'var(--accent)';
       const dur = t.duration_ms ? fmtDur(t.duration_ms / 1000) : '…';
       return `<div class="turn" data-turn="${escapeHtml(t.turn_id || '')}">

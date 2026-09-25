@@ -84,7 +84,8 @@ NOT INDEXED/无 rowid 尾界、归因页查询钉 INDEXED BY started_at 索引�
    隐藏截断用户点名窗，否决）。
 2. **窄窗不变形实证**：cap=200k 下 24h 与 7d 的 tools-main/tools-approval/
    attr-page 三查询 capped 与 uncapped 结果**逐字节相等**（JSON.stringify 比对，
-   六组全 true）。
+   六组全 true；系对 capped **变体**的强制对拍——8d 阈值下 24h/7d 实际不可达
+   钳制路径，见条目 5）。
 3. **30d 有效窗收窄量化（如实申报义务）**：tool_usage 30d 550,352 行被裁至
    200,000（最早保留行年龄 **8.53 天**）；model_usage 407,161 → 200,000（**12.05
    天**）。即 30d 档读数实际是「最近约 8.5/12 天」——路由 meta 须注明 scope
@@ -94,9 +95,12 @@ NOT INDEXED/无 rowid 尾界、归因页查询钉 INDEXED BY started_at 索引�
    （实测 `SCAN model_usage USING INDEX model_usage_session_turn_idx`，30d 热态
    783.979ms——cap 形同虚设）；钉后 `SEARCH model_usage USING INTEGER PRIMARY KEY
    (rowid>?)`，337-357ms。tools 族不钉也自然选 rowid 尾界，仍统一钉死为契约。
-5. **增长边界**：若单日用量涨至 7d 档行数超 200k，7d 档将被尾界收窄（今日
-   24%/57% 余量）——与 slowTools「时间跨度会随使用时长无限增长，规模必须有独立
-   上界」同一取舍：上界即 cap、语义收窄经 meta 如实申报；触及线时重测再定。
+5. **增长边界**：8d 阈值下 7d 档**恒走精确路径、不被尾界收窄**（§头 8d 修正的
+   目的即此——旧文本「7d 档行数超 200k 时同被收窄」是 7d 阈值时代的陈旧声明，
+   四席全量审查轮 2026-09-25 勘误）。7d 档用量的增长表现为查询时延上升，由
+   下方重测触发线兜住（无 meta.scope 申报的静默变慢即触发线的监控对象）；
+   30d 档候选集 cap=200k 的语义收窄经 meta.scope 如实申报（与 slowTools
+   「时间跨度会随使用时长无限增长，规模必须有独立上界」同一取舍：上界即 cap）。
    **重测触发线（六席终审轮补充，2026-09-25，F-SQL-1）**：tool/attribution 族
    任一 7d 函数级 warm 计时 >450ms，或 7d 档窗内行数 >180k（tools）/>150k
    （model_usage）——满足其一即重评 cap 上调/加列覆盖面并重基线本表数字

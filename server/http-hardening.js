@@ -90,6 +90,16 @@ function clampAtLeast(value, fallback, max = Infinity) {
   return Number.isFinite(n) ? Math.max(0, Math.min(n, max)) : fallback;
 }
 
+// 重复 query 参数归一（四席全量审查轮，2026-09-25）：Express qs 把 `?k=a&k=b`
+// 解析成数组——字符串参数（LIKE/等值绑定、枚举比较）直接透传给 better-sqlite3
+// 绑定会抛错落 500（实测 GET /api/usage/attribution?session_id=s1&session_id=s2）。
+// 取首值归一（HTML 表单重复键的常见解析语义；clampLimit 数值面 `+[]` 的
+// Number 化已天然安全，本 helper 只管字符串等值/绑定面）。空数组回落 ''（与
+// 缺参同语义：如 attribution 的 session_id 空 → 400 引导）。
+function firstParam(v) {
+  return Array.isArray(v) ? (v.length ? v[0] : '') : v;
+}
+
 // 锁竞争/连接损伤错误翻译中间件工厂（R4 修-low，自 server/index.js 内联逻辑抽出
 // 供测试挂载，行为不变）：SQLite busy/locked → 503 database_busy（可重试），
 // 连接损伤（CORRUPT/NOTADB/IOERR）→ 503 database_unavailable，均先 invalidateDb
@@ -127,4 +137,4 @@ function makeErrorTranslator({ invalidateDb } = {}) {
 }
 
 module.exports = { LOOPBACK_HOST_RE, loopbackHostGate, CSP, securityHeaders, petsStaticOptions,
-                   makeErrorTranslator, clampLimit, clampAtLeast };
+                   makeErrorTranslator, clampLimit, clampAtLeast, firstParam };

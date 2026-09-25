@@ -6,7 +6,7 @@ const path = require('path');
 const os = require('os');
 const dbq = require('../db');
 const modelsMeta = require('../models-meta');
-const { clampLimit } = require('../http-hardening');
+const { clampLimit, firstParam } = require('../http-hardening');
 
 const router = express.Router();
 
@@ -47,8 +47,10 @@ router.get('/', (req, res) => {
     // 同步冻结）。helper 语义见 http-hardening.js。
     limit: clampLimit(req.query.limit, 100, 500),
     offset: +req.query.offset || 0, // SQLite 负 OFFSET 语义即 0，无横面风险
-    q: req.query.q || '',
-    taskType: req.query.task_type || '',
+    // firstParam 归一（四席全量审查轮）：?q=a&q=b 的数组形态此前直透 LIKE
+    // 绑定抛错落 500，与 usage 族同修（既有行为的加固，非口径变更）。
+    q: firstParam(req.query.q) || '',
+    taskType: firstParam(req.query.task_type) || '',
   });
   // C2：每会话最新 model 行的窗口值经 models-meta resolve 附带——窗口值唯一
   // 通路（前端不持有、不复制模型窗口表）；未知模型 → null（不猜窗口，

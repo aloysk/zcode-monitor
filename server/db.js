@@ -74,8 +74,17 @@ function openDbRetrying() {
 let _raw = null;     // the underlying better-sqlite3 Database
 let _proxy = null;   // a facade whose prepare() returns retrying statements
 
-// Drop the cached connection so the next call reopens it.
-function invalidateDb() { _raw = null; _proxy = null; }
+// Drop the cached connection so the next call reopens it. The old connection
+// is closed first (R-26): dropping the reference alone leaves an orphaned
+// better-sqlite3 handle whose release depends on V8 GC finalizer timing —
+// on Windows that kept test fixtures rmSync-EPERM ~10% of runs, and in
+// production it widens the orphan-handle window on every NOTADB self-heal.
+// close() can itself throw on a damaged connection, so it stays wrapped.
+function invalidateDb() {
+  const raw = _raw;
+  _raw = null; _proxy = null;
+  if (raw) { try { raw.close(); } catch { /* already broken */ } }
+}
 
 // A prepared-statement wrapper that retries .all()/.get() on transient locks
 // and self-heals the connection on damage. Existing call sites use
@@ -87,7 +96,15 @@ function makeRetryingStatement(rawStmt) {
       try {
         return rawStmt[method](...params);
       } catch (e) {
-        if (isConnBroken(e)) { invalidateDb(); if (i < maxAttempts - 1) continue; }
+        // Connection damage (NOTADB/CORRUPT/IOERR): drop the connection —
+        // now including close() — and rethrow the ORIGINAL error. Retrying
+        // the same statement on the dead rawStmt is meaningless (the heal
+        // happens on the caller's next db().prepare, which rebinds to the
+        // reopened connection), and once invalidateDb closes the old
+        // connection a retry here would throw an untranslated
+        // "database connection is not open" TypeError, degrading the
+        // contract 503 database_unavailable to a raw 500.
+        if (isConnBroken(e)) { invalidateDb(); throw e; }
         if (isBusyErr(e) && i < maxAttempts - 1) {
           spinMs(30 * Math.pow(2, i)); // 30, 60, 120ms
           continue;
@@ -989,8 +1006,10 @@ function attrLimit(limit) {
 //     寻址；NOT INDEXED 钉死计划——attr 页查询不钉时 planner 会为省 GROUP BY 的
 //     TEMP B-TREE 改走 session 索引全扫，cap 形同虚设）。
 //   - <8d 窗（本族值域 24h/7d）保持 started_at 索引精确路径（7d 实测 ≤204ms
-//     在线内）；cap=200k 下 24h/7d 结果与不钳逐字节相等（实测钉）。副作用如实
-//     申报是调用方义务（路由 meta 注明 scope，slow_tools_scope 先例）。
+//     在线内）；「cap=200k 下 24h/7d 结果与不钳逐字节相等」是对拍证据（强制
+//     capped 变体 vs uncapped 的 A/B，实测钉）——8d 阈值下 24h/7d 实际不可达
+//     钳制路径，见下条。副作用如实申报是调用方义务（路由 meta 注明 scope，
+//     slow_tools_scope 先例）。
 //   - 阈值是 8d 而非 7d（评审修复）：宽窄判定在此处对 Date.now() 二次求值，
 //     而 sinceMs 由路由在更早时刻算出（T1≤T2 恒真）——阈值若取 7d，7d 请求的
 //     窗宽（7d+求值延迟）恒过线、被静默尾界收窄且路由无 scope 申报（路由按
@@ -1187,7 +1206,12 @@ function usageAttributionBySession(sinceMs, limit = 50, { candidateCapRows = USA
     s.tokens += g.tokens || 0;
     s.duration_ms_sum += g.duration_ms_sum || 0;
     s.calls += g.calls || 0;
-    s.by_query_source[g.query_source] = (s.by_query_source[g.query_source] || 0) + (g.tokens || 0);
+    // String() 与 approvals 侧同款：query_source schema 是 NOT NULL，NULL 仅
+    // 外部 ZCODE_DB 可达——显式折叠成 'null' 键（与字符串值域可区分）而非
+    // 静默依赖 JS 对象键的隐式 coercion；'__proto__' 等原型键同理属外部库
+    // 理论形态，值域假设见本分节头注。
+    const qs = String(g.query_source);
+    s.by_query_source[qs] = (s.by_query_source[qs] || 0) + (g.tokens || 0);
   }
   // token 降序 + 诚实截断（会话数 > limit 即 truncated——与旧 SQL LIMIT+1 探针
   // 同义；排序移 JS 后并列 tokens 的次序由插入序稳定决定）。

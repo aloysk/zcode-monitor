@@ -208,9 +208,9 @@ test('规模钳制: 宽窗（≥8d）小 cap 裁最旧 rowid、窄窗不启用 c
     { id: 'tc1', session_id: 'capS', turn_id: 'k1', tool_name: 'CapTool', status: 'completed',
       started_at: now - 9 * DAY, duration_ms: 10 },
     { id: 'tc2', session_id: 'capS', turn_id: 'k1', tool_name: 'CapTool', status: 'completed',
-      started_at: now - 9 * DAY, duration_ms: 10 },
+      started_at: now - 9 * DAY, duration_ms: 10, approval_status: 'approved' },
     { id: 'tc3', session_id: 'capS', turn_id: 'k1', tool_name: 'CapTool', status: 'completed',
-      started_at: now - 9 * DAY, duration_ms: 10 },
+      started_at: now - 9 * DAY, duration_ms: 10, approval_status: 'denied' },
   ]);
   buildModelUsage(fx.conn, [
     { id: 'cm1', session_id: 'capS', turn_id: 'k1', status: 'completed',
@@ -223,6 +223,12 @@ test('规模钳制: 宽窗（≥8d）小 cap 裁最旧 rowid、窄窗不启用 c
   const capped = dbq.usageToolBreakdown(now - 10 * DAY, { candidateCapRows: 2 });
   assert.deepEqual(capped.map(g => [g.tool_name, g.calls]), [['CapTool', 2]],
     'cap=2 恰留最新 2 行（rowid 尾界），窗内更旧行被裁');
+  // approvals 第二查询的 cap 一致性（四席全量审查轮 T-测-3 补钉——此前宽窗下
+  // approval_status 从未值断言：approvals 查询单独丢掉 rowid 尾界谓词时计数钉
+  // 仍绿、双口径漂移不可见）：tc2(approved)/tc3(denied) 在 cap 窗内、tc1(NULL)
+  // 被裁出——分布恰两键；若 approvals 查询丢了 cap 会多出 'null':1 键立红。
+  assert.deepEqual(capped[0].approval_status, { approved: 1, denied: 1 },
+    'approvals 分布与主聚合同 cap 窗（被裁行不得计入分布）');
   // 宽窗 + cap=1（attribution 页查询）：只留最新 1 行 model（cm2，tokens=50），
   // cm1（rowid 更旧，tokens=500）被裁——降序首行不是 550 证明裁剪生效。
   const a = dbq.usageAttributionBySession(now - 10 * DAY, 50, { candidateCapRows: 1 });
@@ -238,6 +244,31 @@ test('规模钳制: 宽窗（≥8d）小 cap 裁最旧 rowid、窄窗不启用 c
   const narrow = dbq.usageToolBreakdown(now - 60 * MIN, { candidateCapRows: 1 });
   assert.ok(narrow.some(g => g.tool_name === 'Bash') && narrow.some(g => g.tool_name === 'Read'),
     '窄窗走 started_at 精确路径，cap 不参与');
+});
+
+// ── 阶段 8b：NULL 键契约 + 未标记侧归类 + success_rate 小数口径（四席全量
+// 审查轮 2026-09-25 补钉——db.js 分节注释明言的三条契约此前零覆盖）：
+//   approval_status NULL → 'null' 键（String() 契约，与字符串值域可区分）；
+//   read_only/destructive NULL → 计入未标记侧（官方写入侧恒置布尔，NULL 只
+//   可能出现在外部 ZCODE_DB，按未标记归类不另造第三键）；
+//   success_rate 的 toFixed(4) 小数口径（此前只测过 0/1 两态）。
+test('NULL 契约: approval_status NULL → \'null\' 键；ro/destructive NULL 归未标记侧；success_rate 2/3→0.6667', () => {
+  buildToolUsage(fx.conn, [
+    { id: 'tn1', session_id: 'nulls', turn_id: 'n1', tool_name: 'NulApr', status: 'completed',
+      started_at: H(25), duration_ms: 100, read_only: null, destructive: null },
+    { id: 'tn2', session_id: 'nulls', turn_id: 'n2', tool_name: 'NulApr', status: 'completed',
+      started_at: H(25), duration_ms: 200, read_only: null, destructive: null },
+    { id: 'tn3', session_id: 'nulls', turn_id: 'n3', tool_name: 'NulApr', status: 'error',
+      started_at: H(25), duration_ms: 50, read_only: null, destructive: null },
+  ]);
+  const g = dbq.usageToolBreakdown(H(26)).find(x => x.tool_name === 'NulApr');
+  assert.ok(g, 'NulApr 组存在');
+  assert.deepEqual(g.approval_status, { null: 3 },
+    'SQL NULL 键折叠为 \'null\' 字符串键（与字符串值域可区分的显式契约）');
+  assert.deepEqual(g.read_only, { ro: 0, rw: 3 }, 'NULL read_only 计入未标记侧（rw）');
+  assert.deepEqual(g.destructive, { 1: 0, 0: 3 }, 'NULL destructive 计入未标记侧（0 键）');
+  assert.equal(g.calls, 3);
+  assert.equal(g.success_rate, 0.6667, 'toFixed(4) 小数口径：1 − 1/3');
 });
 
 // ── 阶段 9：EXPLAIN 形态（fixture 上本族每条 SQL 无基表 SCAN）──
@@ -262,6 +293,12 @@ test('EXPLAIN 形态: 本族每条 SQL 无基表 SCAN（TEMP B-TREE 允许）；
   //（C2 mini 条数据面；直调 sessionList 捕获同款 4 条 SQL：页 + model/tool/
   // latestModel 三条页内 IN 聚合，与 GET /api/sessions 的服务端路径零漂移——
   // captureSql 经 db() 代理捕获真实执行 SQL）。
+  // d7 独立成数组（四席全量审查轮 T-测-7：原 slice(12,16) 位置切片在捕获次序
+  // 重排时会静默取错批，7d 形态钉失效而计数钉仍绿）。
+  const d7 = [
+    ...captureSql(() => dbq.usageToolBreakdown(since7d)),         // 2 条（7d 窄窗形态钉）
+    ...captureSql(() => dbq.usageAttributionBySession(since7d, 5)), // 2 条（7d 窄窗形态钉）
+  ];
   const sqls = [
     ...captureSql(() => dbq.usageTurnsSummary(since)),            // 2 条（totals + 分布）
     ...captureSql(() => dbq.usageTurnTimeline(since, 5)),         // 1 条
@@ -270,8 +307,7 @@ test('EXPLAIN 形态: 本族每条 SQL 无基表 SCAN（TEMP B-TREE 允许）；
     ...captureSql(() => dbq.usageAttributionByTurn('sA', 5)),     // 1 条
     ...captureSql(() => dbq.usageToolBreakdown(wideSince)),       // 2 条（宽窗形态）
     ...captureSql(() => dbq.usageAttributionBySession(wideSince, 5)), // 2 条（宽窗单趟分组 + 标题）
-    ...captureSql(() => dbq.usageToolBreakdown(since7d)),         // 2 条（7d 窄窗形态钉）
-    ...captureSql(() => dbq.usageAttributionBySession(since7d, 5)), // 2 条（7d 窄窗形态钉）
+    ...d7,
     ...captureSql(() => dbq.contextGaugeRows('sA', 5)),           // 1 条（C2 水位种子，session 索引寻址）
     ...captureSql(() => dbq.sessionList({ limit: 5 })),           // 4 条（含 latestModel 第三聚合）
   ];
@@ -287,9 +323,7 @@ test('EXPLAIN 形态: 本族每条 SQL 无基表 SCAN（TEMP B-TREE 允许）；
   assert.equal(sqls.filter(s => /NOT INDEXED/.test(s)).length, 3,
     '宽窗形态必须钉 NOT INDEXED（tools×2 + attr 单趟分组×1）');
   // 7d 窄窗形态钉（I-码-1）：无 NOT INDEXED/无 rowid 尾界；归因分组查询钉
-  // INDEXED BY started_at 索引。（slice(12,16) 显式取 7d 四条——其后追加了
-  // contextGauge/sessionList 捕获条目。）
-  const d7 = sqls.slice(12, 16);
+  // INDEXED BY started_at 索引。（d7 独立数组直取，捕获次序重排免疫。）
   assert.equal(d7.filter(s => /NOT INDEXED|rowid >/.test(s)).length, 0,
     '7d 档不得走宽窗 rowid 钳制路径（阈值 8d 语义）');
   assert.ok(d7.some(s => /INDEXED BY model_usage_started_model_idx/.test(s)),
