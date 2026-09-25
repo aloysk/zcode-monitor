@@ -42,6 +42,22 @@ npm test                   # node --test test/index.js（聚合入口）
 
 ## 当前状态（2026-09-25）
 
+- batch1 四席全量审查三轮（feature/ecosystem-round2-batch1，6a6f654→22914c6→
+  f3ab96e）：代码/SQL/测试质量/安全四席并行对抗评审 × 3 轮全量覆盖（R2 起含
+  变异测试验钉，R3 四席 READY）。R1 六 MED+11 LOW：models-meta 升级为官方
+  大小写不敏感匹配语义（zcode-builtin.json modelRules 逐条回放实证；新增
+  kimi-k3/kimi-k3[1m]/GLM-5.3-highspeed 三键，值域 200k 行+逐会话最新行双域
+  勘定）；R-26 运行时修复（invalidateDb 现在显式 close 旧连接——better-sqlite3
+  close 幂等、`.open===false` 为关闭判据；连接断开分支改即时重抛原错，防死
+  stmt 重试把 503 降级成未翻译 500）；freshness 改 MAX(rowid) 行口径；
+  firstParam 归一化助手诞生。R2：firstParam 补类型守卫（数组/对象形态不再
+  500），接线 agents/transcript/trace 遗留路由；fixture 虚构索引纠正为真实库
+  镜像。R3：fixture 索引建序对齐真实库 rootpage 序（SQLite 规划器在同效覆盖
+  索引间取后建者，建序即 EQP 保真度），overview window/transcript limit/trace
+  lines 最后三个同族缺口收口。测试 294→297 全绿（两种计数口径），EQP 机检
+  16/16 镜像，R-27 登记（live.js SSE 错误载荷 e.message 透传，main 既有）。
+  UI 复验：7399 真机库四页截图（r5-*，SSE 页须 CDP 真等待——virtual-time
+  与 EventSource 死锁），mini 水位条/水位区/时间线/顶栏健康链全渲染无 NaN。
 - 生态采纳 batch1（feature/ecosystem-round2-batch1，T1-T7 七任务 + 六席终审
   修复两轮 25+9 条）：C9 快赢（/api/health freshness + 顶栏新鲜度 chip +
   emptyState 共享组件）→ C1/C5 同基座 L1 查询族 + /api/usage 三端点 →
