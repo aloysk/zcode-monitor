@@ -1159,8 +1159,9 @@ function usageAttributionBySession(sinceMs, limit = 50, { candidateCapRows = USA
   const lim = attrLimit(limit);
   // 窄窗（<8d，本族 24h/7d 档）：INDEXED BY 强制 started_at 索引（overviewKpis
   // 同款问题+同款解法，见其头注）——缺省计划会全索引扫 session 索引求
-  // GROUP BY session_id 的序（fixture EXPLAIN 实测 SCAN model_usage USING INDEX
-  // idx_model_usage_session，真实库 40 万行同形态即 2.4s 级事件循环阻塞）；
+  // GROUP BY session_id 的序（EXPLAIN 实测 SCAN model_usage USING session
+  // 前导索引——真实库即 model_usage_session_turn_idx，40 万行同形态即 2.4s 级
+  // 事件循环阻塞；fixture 镜像同索引）；
   // 复用 overviewKpis 的连接级 sqlite_master 探测记忆与「缺索引库回退不加
   // INDEXED BY」取舍。
   // 宽窗（≥8d，本族 30d 档）：NOT INDEXED + rowid 尾界 cap（见分节头注）。钉子

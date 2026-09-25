@@ -57,9 +57,16 @@ CREATE TABLE tool_usage (
 -- 真实库 planner 翻转（加索引/ANALYZE）CI 抓不到，复合索引带来的计划差异
 -- fixture 也复现不了。UNIQUE 镜像列 tool_call_id 允许多行 NULL（fixture 种子
 -- 行常缺该列，SQLite UNIQUE 对 NULL 互不判重）。
+-- 创建序镜像真库 rootpage 序（第 3 轮 SQL 席终审实证）：SQLite 在两个等价
+-- session 前导覆盖索引间选「创建序最晚」者——真库 rootpage 是
+-- session_tool_call_idx(76) 先、session_turn_idx(78) 后，fixture 若倒序建，
+-- sessionList toolAgg 的 EQP 会选另一个等价索引（COVERING …session_turn_idx
+-- vs …session_tool_call_idx），16 条同组 EQP 对照即漂一条。UNIQUE 镜像列
+-- tool_call_id 允许多行 NULL（fixture 种子行常缺该列，SQLite UNIQUE 对 NULL
+-- 互不判重）。
 CREATE INDEX tool_usage_started_tool_idx ON tool_usage(started_at, tool_name);
-CREATE INDEX tool_usage_session_turn_idx ON tool_usage(session_id, turn_id);
 CREATE UNIQUE INDEX tool_usage_session_tool_call_idx ON tool_usage(session_id, tool_call_id);
+CREATE INDEX tool_usage_session_turn_idx ON tool_usage(session_id, turn_id);
 -- 主键 (session_id, turn_id) 镜像真实库（usage-accounting.md §1 实测记载；
 -- 真实库 sessionTurns 的 session 寻址即走其自动索引 sqlite_autoindex_）。
 CREATE TABLE turn_usage (

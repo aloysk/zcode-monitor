@@ -53,8 +53,11 @@ router.get('/slow-tools', (req, res) => {
 });
 
 // GET /api/trace/logs/tail?lines=200
+// lines 双侧钳界（第 3 轮安全席观察项收口，clampLimit 家族语义）：旧形态
+// Math.min(+lines || 200, 2000) 无下界——?lines=-5 产出负数行静默空 events；
+// 数组/对象形态经 clampLimit 的 Number 化天然回落缺省。
 router.get('/logs/tail', async (req, res) => {
-  const lines = Math.min(+req.query.lines || 200, 2000);
+  const lines = clampLimit(req.query.lines, 200, 2000);
   const events = await log.tailLog({ lines });
   res.json({ events });
 });

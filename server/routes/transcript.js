@@ -21,9 +21,12 @@ router.get('/:sessionId', (req, res) => {
   const types = typesParam ? typesParam.split(',') : null;
   // limit 钳非负（R5 修-high）：旧形态 `+q.limit` 直传，?limit=-1 会变成
   // out.slice(0,-1) 静默丢最后一行。null（缺省）= 不限；显式 0 = 取前 0 条
-  //（readTranscript 以 null/非 null 区分二者）；负值/NaN 钳 0。
-  const limit = req.query.limit != null && req.query.limit !== ''
-    ? clampAtLeast(req.query.limit, 0)
+  //（readTranscript 以 null/非 null 区分二者）；负值/NaN 钳 0。第 3 轮代码席
+  // 补：经 firstParam 归一——?limit=5&limit=6 数组形态此前 `+['5','6']`→NaN→
+  // 钳 0 静默空转录，现取首值 5；对象形态同缺参（null 不限）。
+  const limitRaw = firstParam(req.query.limit);
+  const limit = limitRaw !== '' && limitRaw != null
+    ? clampAtLeast(limitRaw, 0)
     : null;
   const { events, meta, found, count } = tr.readTranscript(sessionId, {
     limit,

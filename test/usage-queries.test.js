@@ -396,3 +396,36 @@ test('attrLimit 兜底: limit=Infinity / -Infinity / NaN → 钳 1 不抛错（s
   assert.equal(dbq.usageAttributionByTurn('sA', NaN).rows.length, 1);
   assert.equal(dbq.contextGaugeRows('sA', Infinity).length, 1, 'contextGaugeRows 同款兜底');
 });
+
+// ── 阶段 12：fixture 索引镜像契约（第 3 轮测试席补钉——变异③存活的根因：
+// R2 的索引对齐无任何清单守护，fixture 再漂移时 CI 静默绿，EQP 门禁「对
+// 真库 planner 可迁移」的前提失效）。经 PRAGMA index_list/index_info 对照
+// 真实库 sqlite_master 实读（2026-09-25 三轮核对）：名字 + 列序 + 唯一性
+// 逐项钉死；origin='c' 只取显式 CREATE INDEX（TEXT 主键的自动索引不在此列）。
+// 创建序同时受「阶段 9 toolAgg EQP 走 session_turn_idx」间接守护（SQLite 在
+// 等价覆盖索引间选创建序最晚者——序倒换会在真库对照时漂移，见 fixture-db.js
+// 头注）。
+test('fixture 索引镜像契约: 三表索引清单（名/列序/唯一性）与真实库 sqlite_master 一致', () => {
+  const idxOf = (tbl) => fx.conn.pragma(`index_list(${tbl})`)
+    .filter(i => i.origin === 'c')
+    .map(i => ({
+      name: i.name,
+      unique: !!i.unique,
+      cols: fx.conn.pragma(`index_info(${i.name})`).map(r => r.name),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const expect = (tbl, list) => assert.deepEqual(
+    idxOf(tbl), list.sort((a, b) => a.name.localeCompare(b.name)), tbl);
+  expect('tool_usage', [
+    { name: 'tool_usage_session_tool_call_idx', unique: true, cols: ['session_id', 'tool_call_id'] },
+    { name: 'tool_usage_session_turn_idx', unique: false, cols: ['session_id', 'turn_id'] },
+    { name: 'tool_usage_started_tool_idx', unique: false, cols: ['started_at', 'tool_name'] },
+  ]);
+  expect('model_usage', [
+    { name: 'model_usage_session_turn_idx', unique: false, cols: ['session_id', 'turn_id'] },
+    { name: 'model_usage_started_model_idx', unique: false, cols: ['started_at', 'provider_id', 'model_id'] },
+  ]);
+  expect('turn_usage', [
+    { name: 'turn_usage_started_idx', unique: false, cols: ['started_at'] },
+  ]);
+});
