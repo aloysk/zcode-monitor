@@ -6,7 +6,8 @@
 //    X-Zcode-Monitor-Checkpoint（与 server/checkpoint-route.js 的 force 首部闸
 //    配套——首部丢了按钮会恒 403）；
 // 2) public/views/sessions.js：tool stdout/stderr 渲染点在 escapeHtml( 内
-//   （exec 目录日志是不可信文本，直插即存储型 XSS 面）。
+//   （exec 目录日志是不可信文本，直插即存储型 XSS 面）；
+// 3) R-8 零外联字体：widget/pet 无远程字体 @import、CSP 无字体域白名单。
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -35,4 +36,22 @@ test('契约: sessions.js 的 stdout/stderr 渲染点在 escapeHtml( 内', () =>
   // 反向守护：不得存在未消毒的直插形态
   assert.ok(!/<pre>\$\{out\.(stdout|stderr)\}<\/pre>/.test(src),
     'exec 输出不得以 ${out.stdout}/${out.stderr} 直插 <pre>');
+});
+
+// 3) R-8 已决：系统字体为最终形态，页面零外联——widget/pet 两页不得再引入
+//    远程字体 @import，CSP 不得再放行 fonts.googleapis/gstatic 域（曾是被
+//    「CSP 仅存外联域」钉住的状态，重新引入即回归）。styles.css 的 Geist/
+//    JetBrains Mono 与两页的 Source Sans 3/Noto Sans SC 家族名保留为本地
+//    可选（本机装了就用、没装走系统栈），属预期形态不算外联。
+test('契约: 零外联字体——widget/pet 无远程 @import，CSP 无字体域白名单（R-8）', () => {
+  for (const page of ['widget.html', 'pet.html']) {
+    const src = readPublic(page);
+    assert.ok(!/@import\s+url\(/.test(src), `${page} 不得有 @import url(（R-8：系统字体为最终形态）`);
+    assert.ok(!/fonts\.(googleapis|gstatic)\.com/.test(src), `${page} 不得引用 Google Fonts 域`);
+  }
+  const styles = readPublic('styles.css');
+  assert.ok(!/fonts\.(googleapis|gstatic)\.com/.test(styles), 'styles.css 不得引用 Google Fonts 域');
+  const csp = fs.readFileSync(path.join(__dirname, '..', 'server', 'http-hardening.js'), 'utf8');
+  assert.ok(!/fonts\.(googleapis|gstatic)\.com/.test(csp),
+    'CSP 常量不得再放行字体域（style-src/font-src 均应只含 self + unsafe-inline）');
 });
