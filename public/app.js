@@ -150,11 +150,13 @@ function rethemeCharts() {
 }
 
 // 主题图标：顶栏用主题化单色 SVG（index.html），这里按主题切换月/日显示。
+// SVG 元素的 hidden IDL 属性不反射 content attribute（仅 HTMLElement 反射），
+// 裸赋值只写 expando、CSS [hidden] 选择器不命中——必须走 setAttribute/removeAttribute（R-40）。
 function syncThemeIcon(theme) {
   const moon = document.querySelector('#theme-icon .icon-moon');
   const sun = document.querySelector('#theme-icon .icon-sun');
-  if (moon) moon.hidden = theme !== 'dark';
-  if (sun) sun.hidden = theme === 'dark';
+  if (moon) { if (theme === 'dark') moon.removeAttribute('hidden'); else moon.setAttribute('hidden', ''); }
+  if (sun) { if (theme === 'dark') sun.setAttribute('hidden', ''); else sun.removeAttribute('hidden'); }
 }
 
 function setTheme(theme) {
@@ -393,6 +395,14 @@ function notifyChime() {
 function presentNotify(n) {
   if (!n || typeof n !== 'object') return;
   if (notifyDuplicate(n.id)) return;
+  // body 入口统一过一次消毒闸（pet/widget 气泡同款隐私姿态对称：body 含会话
+  // 标题等库内字符串，服务端生成的载荷仍按不可信输入处理——sanitize.js 隐私
+  // 剥除；模块缺失回退原文保页面不崩）。单次过闸，下方 toast/系统通知/TTS
+  // 三出口共用钳后文本；title 是服务端规则常量（「错误爆发」等）非库内字符串。
+  if (n.body != null) {
+    const raw = String(n.body);
+    n.body = window.SanitizeSpeech ? window.SanitizeSpeech.sanitizeSpeech(raw) : raw;
+  }
   const sw = notifySwitches();
   const ch = notifyChannels(n.intensity || 'quiet', sw);
   if (ch.bubble) toast(`${n.title || n.rule}：${n.body || ''}`, 5000);

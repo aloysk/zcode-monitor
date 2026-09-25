@@ -133,11 +133,11 @@ test('C12-6 空态: 三数据集空库 200、JSON 空集形状+meta 完整（ove
 
   // 阶段 1 收尾 seed：既有种子（s1/s2 会话 + model/tool/turn 行）+ 导出专用毒字段。
   fx.seed();
-  // 公式注入毒集＝OWASP CSV Injection 建议集（= + - @ 四符 + TAB/CR 前缀形态，
-  // 终审第 1 轮安全席 note 补齐后两形态）。
+  // 公式注入毒集＝OWASP CSV Injection 建议集（= + - @ 四符 + TAB/CR/LF 前缀
+  // 形态，终审第 1 轮安全席 note 补 TAB/CR、五席第 1 轮补 LF）。
   buildTurnUsage(fx.conn, [
     '=SUM(A1:A5)', '逗号, "引号"', '行一\n行二', '-2+3+cmd', '@cmd', '+4200',
-    '\tTAB 开头公式形态', '\rCR 开头公式形态',
+    '\tTAB 开头公式形态', '\rCR 开头公式形态', '\nLF 开头公式形态',
   ].map((t, i) => ({
     turn_id: `poison${i + 1}`, session_id: 's1', status: 'error', error_type: t,
     started_at: H(30 - i), duration_ms: 100,
@@ -270,6 +270,8 @@ test('C12-3 CSV 转义: 毒字段 RFC 4180 + 公式注入前置 \'；首行列�
       'TAB 前置转义（OWASP 扩展字符集）' + csvDump());
     assert.ok(csv.text.includes("'\rCR 开头公式形态"),
       'CR 前置转义（OWASP 扩展字符集）' + csvDump());
+    assert.ok(csv.text.includes("'\nLF 开头公式形态"),
+      'LF 前置转义（OWASP 扩展字符集，五席第 1 轮补）' + csvDump());
     // RFC 4180：毒字段双引号包裹、内部 " 加倍
     assert.ok(csv.text.includes('"逗号, ""引号"""'), '逗号/引号字段包裹+加倍');
     assert.ok(csv.text.includes('"行一\n行二"'), '换行字段包裹（多行单元格）');

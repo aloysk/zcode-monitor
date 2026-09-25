@@ -11,9 +11,10 @@
 
 - ~~三页提醒呈现双主题截图~~：pet 气泡＝既有 `c8-pet-notify-bubble{,-live}.png`
   两帧；widget 副行＝`c8-widget-subrow.png`（420×260，数字行下方 err 色
-  副行、胶囊窗不加宽）；index toast＝`c8-index-toast-{dark,light}.png`
-  （1280×800 双主题）；设置面板＝`c8-notify-settings-{dark,light}.png`
-  （三开关默认态双主题）。**severity 语义色/对比度/淡出时序观感仍需人眼。**
+  副行、胶囊窗不加宽）；index toast＝`c8-index-toast-{dark,light}-v2.png`
+  （1280×800 双主题，五席一轮重拍——见下勘误注）；设置面板＝
+  `c8-notify-settings-{dark,light}.png`（三开关默认态双主题）。
+  **severity 语义色/对比度/淡出时序观感仍需人眼。**
 - 出厂默认形态核对：设置帧内三开关默认态（声音✔/系统通知✘/TTS✘）已可见；
   alert 级「提示音+气泡」的实际听感/视觉形态需人工确认（降级矩阵函数行为
   已自动化钉死——notifyChannels 八矩阵点全测）。
@@ -29,11 +30,39 @@
 | 帧 | 内容 | 驱动方式 |
 |---|---|---|
 | `c8-widget-subrow.png` | widget 数字行下方 severity(err) 副行（胶囊单行窗、无弹窗） | onNotify + MessageEvent（真实渲染代码路径；服务端事件以驱动样例替代——R-30 无回放边界） |
-| `c8-index-toast-{dark,light}.png` | index 底部 toast 双主题 | presentNotify 同款驱动 |
+| `c8-index-toast-{dark,light}-v2.png` | index 底部 toast 双主题（五席一轮重拍，2026-09-25） | presentNotify 同款驱动 + `?theme=` 引导参数（见下勘误注） |
 | `c8-notify-settings-{dark,light}.png` | 「提醒」卡三开关默认态双主题 | 真实 DOM 直拍 |
 
-- AI 目检抽查未完成（两形态故障如实记录见 round2-batch2-gates.md）；帧的
-  视觉判定留人工。
+- AI 目检抽查：五席一轮（2026-09-25）对 v2 双帧已完成（analyze_image，
+  读图核验主题/toast 文案与配色/无乱码 NaN/无关闭按钮——详下勘误注）；
+  其余帧的视觉判定留人工（上轮两形态故障记录见 round2-batch2-gates.md）。
+
+### 勘误注（2026-09-25 五席审查第 1 轮：原 toast 双主题帧主题错位重拍）
+
+- **缺陷形态**：原 `c8-index-toast-{light,dark}.png` 两帧中，light 帧实拍于
+  深色态（页面深底）、dark 帧内未见 toast——双帧均不能作双主题证据。
+  旧帧已移出隔离（`C:/Users/18086/Desktop/zcode-monitor-cleanup-20260923/`，
+  治理通道 mv、非 rm）。
+- **根因**：index.html 的主题引导脚本只在页面加载时运行——加载完成后写
+  `localStorage` 不重载不会改 `data-theme`（只有 `setTheme()`/重载会），
+  上轮拍摄用的加载后注入形态落空；dark 帧则系 presentNotify 触发与截图
+  的竞速错过 5s toast 驻留窗。
+- **本轮方法**：`http://127.0.0.1:7399/?theme=light|dark#overview`——
+  `?theme=` 查询参数由引导脚本在首绘前消费（零竞态，DOMContentLoaded 时
+  replaceState 剥离）；CDP（PUT /json/new + WebSocket）navigate 后真等
+  3s，页面内 `presentNotify({id:'reshoot-1', rule:'error_burst', …,
+  severity:'err', intensity:'sound', …})` 驱动（= SSE notify 监听体同款
+  入口，R-30 无回放边界的文档化等价形态），700ms 后截屏；**拍摄时运行时
+  断言**双保险：`data-theme`、`#toast` 计算样式底色（light
+  rgb(255,255,255) / dark rgb(31,36,48)=#1f2430）、toast 文案、
+  `toast.hidden===false`。AI 目检复核双帧：主题/文案/配色全对、无乱码
+  NaN；**toast 右端无 × 关闭按钮**（app.js `toast()` 纯 textContent，
+  此前疑问就此核销）。
+- **主题判据勘正（防复发）**：**顶栏主题图标不能作主题判据**——五席一轮
+  实锤 `syncThemeIcon` 对 SVG 的 `hidden` 赋值只写 JS expando、从不翻转
+  content attribute，月亮图标双主题常显（缺陷登记 R-40，与本帧主题无关）。
+  主题判定应以页面底色/toast 计算样式/`data-theme` 为准（本轮 v2 帧即按
+  此三重核验）。
 
 ## 已完成的自动化核对（T5 冒烟，7394 真实库只读）
 
@@ -75,7 +104,8 @@ PORT=7399 OPEN_BROWSER=0 HOST=127.0.0.1 npm start   # 冒烟（7331 勿动）
 ```
 
 - 截图落位建议：`docs/acceptance/` 下 `c8-pet-notify-*.png`（已备两帧）、
-  `c8-widget-subrow.png`、`c8-index-toast.png`、`c8-notify-settings.png`
+  `c8-widget-subrow.png`、`c8-index-toast-{dark,light}-v2.png`、
+  `c8-notify-settings-{dark,light}.png`
   （沿用本目录既有 png 留痕惯例）。
 - 提示音听感（WebAudio 880Hz/0.2s/gain 0.06）与 TTS 播报（开 TTS 后）
   属人工听感面——自动化只钉了合成参数与守卫逻辑。

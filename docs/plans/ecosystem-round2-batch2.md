@@ -306,7 +306,7 @@ zcode-monitor-plan/
   | 规则 | 默认开关 | 触发条件 | 冷却 | 内建强度 |
   |---|---|---|---|---|
   | error_burst | 开 | 5min 窗 error 行（model+tool）≥3 | 10min（全局） | sound |
-  | waiting_timeout | 开 | interactive waiting 持续 ≥5min（持续=now−waiting_since，起点=C6 分类器派生口径） | 15min（per-session） | alert |
+  | waiting_timeout | **开**（**终审偏差注（2026-09-25 六席终审第 1 轮落锤）**：实施落**默认关**——C6-8 误报超线降级处置（R-28 ③款）的约束面，判定语义照本表原文完整保留，回翻只动 `server/notify.js` RULE_DEFAULTS 的 enabled 常量；与 spec §2.2 需求 2 表同款偏差注，2026-09-25 五席一轮补记） | interactive waiting 持续 ≥5min（持续=now−waiting_since，起点=C6 分类器派生口径） | 15min（per-session） | alert |
   | token_threshold | 关 | 单会话 30d 窗累计 `SUM(computed_total_tokens)` ≥1M | 每会话每档位一次（1M/5M/20M） | quiet |
   | inactive | 关 | 全库无 model 行 ≥30min 且 24h 窗内曾有活动 | 60min | quiet |
   token 阈值取数＝近窗活跃会话集合（C6 查询输出）经 session 复合索引会话内 SUM；**禁止全表 GROUP BY session 无界聚合、不建 C3 模块**；气泡文案/How 披露「按 30 天保留窗口径」。

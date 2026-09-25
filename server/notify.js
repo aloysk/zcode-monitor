@@ -95,7 +95,13 @@ const RULE_DEFAULTS = {
 // 单例与该文件自身的模块级状态先例（lastLogSize/currentLogFile）同族。
 let sharedBus = null;
 function sharedNotifyBus() {
-  if (!sharedBus) sharedBus = new EventEmitter();
+  if (!sharedBus) {
+    sharedBus = new EventEmitter();
+    // 每条 SSE 连接经 live.js 挂 1 个 notify listener：Node 缺省 10 上限会在
+    // 第 11 个客户端连接时打 MaxListenersExceededWarning——放宽到 50（本地
+    // 单用户多标签/多页同开形态；livegen.js 的 gen 总线非本批面，不动）。
+    sharedBus.setMaxListeners(50);
+  }
   return sharedBus;
 }
 
@@ -127,7 +133,11 @@ function evaluateRules(
   const titleMap = titles || new Map();
   const titleOf = (sid) => {
     const v = titleMap.get(sid);
-    return v != null && v !== '' ? v : sid;
+    if (v == null || v === '') return sid;
+    // 会话标题钳 80 字符（pet.html onNotify 气泡 80 字符防御的服务端单点
+    // 收口：超长标题在载荷源头截断，三消费页拿到的已是钳后文本——客户端
+    // 各自再钳时对已钳文本为幂等；截断以省略号明示）。
+    return v.length > 80 ? v.slice(0, 79) + '…' : v;
   };
   const out = [];
   const push = (rule, cfg, fields) => {
@@ -243,7 +253,7 @@ function inPlaceholders(n) {
 function makeNotifyEngine(
   { dbq, bus, tickMs = NOTIFY_TICK_MS,
     signalsWindowMs = SIGNALS_WINDOW_MS, cooldownCap = NOTIFY_COOLDOWN_CAP,
-    rules: ruleOverrides } = {},
+    nowFn = () => Date.now(), rules: ruleOverrides } = {},
 ) {
   if (!dbq) {
     throw new TypeError('makeNotifyEngine: dbq 必须注入（livegen createGenWatcher(dbq) 同款纪律）');
@@ -347,8 +357,11 @@ function makeNotifyEngine(
     return inputs;
   }
 
+  // 时钟统一入口（nowFn 仅测试拨针注入用——冷却「过期再发」分支的确定性
+  // 驱动；缺省 Date.now()，生产行为零变化）。tick 内冷却判定与 evaluate 的
+  // 缺省评估时刻同走它；显式传参的 evaluate(now) 直测路径不受影响。
   function evaluate(now) {
-    const t = now != null ? now : Date.now();
+    const t = now != null ? now : nowFn();
     return evaluateRules(gather(t), { rules });
   }
 
@@ -381,7 +394,7 @@ function makeNotifyEngine(
       }
       return;
     }
-    const t = Date.now();
+    const t = nowFn();
     // token 档位收敛（C8-2 防噪家族，发送路径专属——评估结果不动）：同一次
     // 评估内同会话跨多档（引擎首见即已跨高档的形态：重启后/会话新入近窗域，
     // 真实库实测 dwf actor 常态直跳 5M）只发最高档——逐档连发是同 tick 两帧
