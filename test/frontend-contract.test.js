@@ -59,3 +59,19 @@ test('契约: 零外联字体——widget/pet 无远程 @import，CSP 无字体�
   assert.ok(!/fonts\.(googleapis|gstatic)\.com/.test(csp),
     'CSP 常量不得再放行字体域（style-src/font-src 均应只含 self + unsafe-inline）');
 });
+
+// 4) R8-2（batch2 终审第 1 轮补钉）：batch2 新增/新改前端文件零外联资源——
+//    views/recap.js 是本批唯一全新前端视图、views/sessions.js 与 app.js/
+//    views/overview.js 携带 notify/waiting 新增段；app.js/overview.js 的
+//    http 外链面由 notify-view.test.js 的 C8-6 断言覆盖，本钉补齐 recap/
+//    sessions 两文件并把四文件的外联样式/字体形态一并钉死（CSP default-src
+//    'self' 是运行时兜底，本钉防源码层回归先于 CSP 拦截）。
+test('契约: batch2 前端文件零外联资源（R8-2——recap/sessions 并入零外联守护面）', () => {
+  for (const f of ['views/recap.js', 'views/sessions.js', 'app.js', 'views/overview.js']) {
+    const src = readPublic(f);
+    assert.ok(!/@import\s+url\(/i.test(src), `${f} 不得有外联 @import url(`);
+    assert.ok(!/url\(\s*['"]?https?:/i.test(src), `${f} 不得引用远程 url() 资源`);
+    assert.ok(!/fonts\.(googleapis|gstatic)\.com/.test(src), `${f} 不得引用 Google Fonts 域`);
+    assert.ok(!/https?:\/\/(?!127\.0\.0\.1|localhost)/.test(src), `${f} 不得含非回环 http(s) 链接`);
+  }
+});

@@ -50,6 +50,14 @@ const { SIGNALS_WINDOW_MS } = require('./signals');
 
 // 评估 tick 缺省 30s（§2.2 需求 1；可注入）。
 const NOTIFY_TICK_MS = 30 * 1000;
+// 冷却记忆上界（终审第 1 轮代码席 note：此前无任何淘汰路径，token_threshold
+// 的 cooldownMs=Infinity 使每会话每档位条目永不失效——与前端三页 notifySeen
+// NOTIFY_SEEN_CAP=200 的有界纪律对称收口）。超界丢最旧插入（Map 插入序≈发送
+// 序；对已存在键的 set 不改插入位，属可接受近似）。代价：域内会话数 >cap 时
+// 最旧冷却记忆被逐出、该会话/档位可能在下一 tick 重发一次提醒（幂等去重按
+// id、id 含 at 时间戳，跨 tick 重发是新 id——按有界内存优先接受；cap 量级
+// 取实际单用户近窗会话域上界（SIGNALS_MAX_ROWS=2000）之半）。
+const NOTIFY_COOLDOWN_CAP = 1000;
 // tick 取数失败的限频日志间隔（livegen 同款纪律：持续 busy 的库不得每 tick 刷屏）。
 const ERROR_LOG_INTERVAL_MS = 30 * 1000;
 // token 阈值累计窗＝30 天保留窗（三表 30d prune 下的口径边界：跨月历史不计，
@@ -234,7 +242,8 @@ function inPlaceholders(n) {
 
 function makeNotifyEngine(
   { dbq, bus, tickMs = NOTIFY_TICK_MS,
-    signalsWindowMs = SIGNALS_WINDOW_MS, rules: ruleOverrides } = {},
+    signalsWindowMs = SIGNALS_WINDOW_MS, cooldownCap = NOTIFY_COOLDOWN_CAP,
+    rules: ruleOverrides } = {},
 ) {
   if (!dbq) {
     throw new TypeError('makeNotifyEngine: dbq 必须注入（livegen createGenWatcher(dbq) 同款纪律）');
@@ -307,7 +316,11 @@ function makeNotifyEngine(
       };
     }
     if (rules.waiting_timeout.enabled || rules.token_threshold.enabled) {
-      const signals = dbq.sessionsWithSignals({ sinceMs: now - signalsWindowMs });
+      // windowMs 与 sinceMs 同注 signalsWindowMs（终审第 1 轮代码席 note：此前
+      // 只传导取数窗、分类器新鲜度复核用缺省 SIGNALS_WINDOW_MS——注入非默认
+      // 值时两窗分叉；生产默认两值同源，行为不变，注入语义补齐）。
+      const signals = dbq.sessionsWithSignals(
+        { sinceMs: now - signalsWindowMs, windowMs: signalsWindowMs });
       const titleIds = new Set();
       if (rules.waiting_timeout.enabled) {
         inputs.waitingSessions = [];
@@ -342,8 +355,15 @@ function makeNotifyEngine(
   // 冷却时间戳内存态：维度＝全局（error_burst/inactive，key=规则名）/
   // per-session（waiting_timeout，key=规则:会话）/ 每档位一次（token_threshold，
   // key=规则:会话:档位 + cooldownMs=Infinity）。进程重启即重置（无持久化，
-  // 与「冷却只拦发送」的防噪定位一致）。
+  // 与「冷却只拦发送」的防噪定位一致）。有界：超 cooldownCap 丢最旧插入
+  // （NOTIFY_COOLDOWN_CAP 头注——前端 notifySeen CAP 同族纪律）。
   const cooldownSentAt = new Map();
+  function rememberCooldown(key, t) {
+    cooldownSentAt.set(key, t);
+    while (cooldownSentAt.size > cooldownCap) {
+      cooldownSentAt.delete(cooldownSentAt.keys().next().value);
+    }
+  }
   let stopped = false;
   let lastErrorLogAt = 0;
 
@@ -378,10 +398,10 @@ function makeNotifyEngine(
       const last = cooldownSentAt.get(note.cooldownKey);
       if (last != null && t - last < rules[note.rule].cooldownMs) continue;
       if (note.rule === 'token_threshold' && topTier.get(note.session) !== note.tier) {
-        cooldownSentAt.set(note.cooldownKey, t); // 低档被高档涵盖：标已发、不发送
+        rememberCooldown(note.cooldownKey, t); // 低档被高档涵盖：标已发、不发送
         continue;
       }
-      cooldownSentAt.set(note.cooldownKey, t);
+      rememberCooldown(note.cooldownKey, t);
       const { cooldownKey, tier, ...payload } = note;
       emitBus.emit('notify', payload);
     }
@@ -403,5 +423,5 @@ function makeNotifyEngine(
 
 module.exports = {
   makeNotifyEngine, evaluateRules, sharedNotifyBus,
-  RULE_DEFAULTS, NOTIFY_TICK_MS, TOKEN_RETENTION_WINDOW_MS,
+  RULE_DEFAULTS, NOTIFY_TICK_MS, TOKEN_RETENTION_WINDOW_MS, NOTIFY_COOLDOWN_CAP,
 };

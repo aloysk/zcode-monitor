@@ -158,6 +158,11 @@
     const errors = days.reduce((s, d) => s + (d.errors || 0), 0);
     const activeDays = days.filter(d => (d.active_minutes || 0) > 0).length;
     const isSpan = a.caliber === 'session_span_union';
+    // 宽窗 cap 生效时 KPI 数字是「候选集内全部行」而非全窗全量（终审第 1 轮
+    // 视觉席 note：真机 year 档 calls 恰=200k cap 上限）——措辞随 meta.scope
+    // 如实切换，与覆盖披露卡同源不矛盾。
+    const capped = /capped/.test((data.meta && data.meta.scope) || '');
+    const callsWording = capped ? '候选集内全部行（宽窗截断）' : '覆盖内全部行';
     setHtml('#recap-totals', `
       <div class="kpi"><div class="label">活跃时长</div><div class="value v-accent">${fmtMin(a.active_minutes)}</div>
         <div class="delta">${isSpan ? '会话区间并集上界（含挂机时间）' : '5 分钟桶跨会话去重'}<span class="caliber" title="活跃时长口径双档：周/月＝事件级（每次模型请求投 5 分钟桶、并行会话同桶只计一次）；年＝session 区间并集上界——详见「运行原理」页 active hours 段">口径</span></div></div>
@@ -166,7 +171,7 @@
       <div class="kpi"><div class="label">token 消耗</div><div class="value">${tokens == null ? '—' : fmtNum(tokens)}</div>
         <div class="delta">${tokens == null ? '30 天保留外无数据源，不伪造' : 'SUM(computed_total_tokens) 覆盖内合计'}</div></div>
       <div class="kpi"><div class="label">模型请求</div><div class="value">${fmtInt(calls)}</div>
-        <div class="delta"><span style="${errors ? 'color:var(--sev-err)' : ''}">错误 ${fmtInt(errors)}</span> · 覆盖内全部行</div></div>
+        <div class="delta"><span style="${errors ? 'color:var(--sev-err)' : ''}">错误 ${fmtInt(errors)}</span> · ${callsWording}</div></div>
       <div class="kpi"><div class="label">活跃天数</div><div class="value">${fmtInt(activeDays)}</div>
         <div class="delta">覆盖 ${fmtInt(days.length)} 天（自覆盖起点起）</div></div>
     `);

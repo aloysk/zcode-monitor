@@ -1,6 +1,6 @@
 # 生态采纳第二轮第二批实施计划（ecosystem-round2-batch2）
 
-> **状态：草稿（评审中）**——本计划把 `docs/specs/ecosystem-round2-batch2.md`（37 条验收）拆成 8 个有序任务；每任务一个 commit，**由编排脚本统一提交，实施者不得自行 commit、不得跑全套测试（`npm test` 由脚本统一执行）**，回滚单位即 commit。
+> **状态：已实施（T1-T8 交付 + 六席终审第 1 轮 27 条修复轮闭环 2026-09-25；门禁照录见 acceptance/round2-batch2-gates.md）**——本计划把 `docs/specs/ecosystem-round2-batch2.md`（37 条验收）拆成 8 个有序任务；每任务一个 commit，**由编排脚本统一提交，实施者不得自行 commit、不得跑全套测试（`npm test` 由脚本统一执行）**，回滚单位即 commit。
 >
 > **For agentic workers:** 按本文 T1→T8 顺序逐任务执行，每任务完成其「完成判据」后即停，由脚本提交。步骤用 checkbox（`- [ ]`）跟踪。**实施者不运行 git commit/push、不删除文件、不改任务外文件；可自跑单文件测试 `cd F:/project/zcode-monitor-plan && node --test test/<file>.test.js`。**
 >

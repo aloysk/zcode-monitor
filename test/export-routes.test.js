@@ -133,8 +133,11 @@ test('C12-6 空态: 三数据集空库 200、JSON 空集形状+meta 完整（ove
 
   // 阶段 1 收尾 seed：既有种子（s1/s2 会话 + model/tool/turn 行）+ 导出专用毒字段。
   fx.seed();
+  // 公式注入毒集＝OWASP CSV Injection 建议集（= + - @ 四符 + TAB/CR 前缀形态，
+  // 终审第 1 轮安全席 note 补齐后两形态）。
   buildTurnUsage(fx.conn, [
     '=SUM(A1:A5)', '逗号, "引号"', '行一\n行二', '-2+3+cmd', '@cmd', '+4200',
+    '\tTAB 开头公式形态', '\rCR 开头公式形态',
   ].map((t, i) => ({
     turn_id: `poison${i + 1}`, session_id: 's1', status: 'error', error_type: t,
     started_at: H(30 - i), duration_ms: 100,
@@ -255,11 +258,18 @@ test('C12-3 CSV 转义: 毒字段 RFC 4180 + 公式注入前置 \'；首行列�
       + 'status,model_retry_count,tool_error_count,error_type,context_exceeded,computed_total_tokens\r\n'),
       'usage 首行列名（C1 timeline 行字段）');
     assert.ok(csv.text.endsWith('\r\n'), '行尾 CRLF');
-    // 公式注入防护：= + - @ 开头的字段前置 '
-    assert.ok(csv.text.includes("'=SUM(A1:A5)"), '= 前置转义');
-    assert.ok(csv.text.includes("'@cmd"), '@ 前置转义');
-    assert.ok(csv.text.includes("'+4200"), '+ 前置转义');
-    assert.ok(csv.text.includes("'-2+3+cmd"), '- 前置转义');
+    // 公式注入防护：= + - @ 开头的字段前置 '（断言失败时携带 CSV 全文——
+    // 2026-09-25 终审第 1 轮登记的「首跑间歇红只剩用例名不可诊断」处置面：
+    // 下次复现即有完整响应体可定位，residuals R-34 留痕）。
+    const csvDump = () => `\n[CSV 全文 ${csv.text.length} 字符]\n${csv.text}`;
+    assert.ok(csv.text.includes("'=SUM(A1:A5)"), '= 前置转义' + csvDump());
+    assert.ok(csv.text.includes("'@cmd"), '@ 前置转义' + csvDump());
+    assert.ok(csv.text.includes("'+4200"), '+ 前置转义' + csvDump());
+    assert.ok(csv.text.includes("'-2+3+cmd"), '- 前置转义' + csvDump());
+    assert.ok(csv.text.includes("'\tTAB 开头公式形态"),
+      'TAB 前置转义（OWASP 扩展字符集）' + csvDump());
+    assert.ok(csv.text.includes("'\rCR 开头公式形态"),
+      'CR 前置转义（OWASP 扩展字符集）' + csvDump());
     // RFC 4180：毒字段双引号包裹、内部 " 加倍
     assert.ok(csv.text.includes('"逗号, ""引号"""'), '逗号/引号字段包裹+加倍');
     assert.ok(csv.text.includes('"行一\n行二"'), '换行字段包裹（多行单元格）');

@@ -19,7 +19,7 @@ const { createFixtureDb, buildSession, buildModelUsage, buildToolUsage } =
   require('./helpers/fixture-db');
 const notify = require('../server/notify');
 const { RULE_DEFAULTS, evaluateRules, makeNotifyEngine, sharedNotifyBus,
-  NOTIFY_TICK_MS } = notify;
+  NOTIFY_TICK_MS, NOTIFY_COOLDOWN_CAP } = notify;
 
 const fx = createFixtureDb();
 process.env.ZCODE_DB = fx.dbPath;
@@ -185,6 +185,8 @@ test('C8-2 默认值钉: 四规则 on/off、窗/阈值、冷却、强度、sever
     enabled: false, idleMs: 30 * MIN, recentMs: 24 * 60 * MIN,
     cooldownMs: 60 * MIN, intensity: 'quiet', severity: 'ok',
   });
+  assert.equal(NOTIFY_COOLDOWN_CAP, 1000,
+    '冷却记忆上界常量钉（终审第 1 轮：与前端 NOTIFY_SEEN_CAP 有界纪律对称）');
 });
 
 // ── C8-1 引擎层：分类器消费（interactive 过滤）+ 无状态钉 ────────────────────
@@ -255,6 +257,72 @@ test('C8-2 error_burst 全局冷却: 同条件第二次 tick 不再发', () => {
     engine.tick(); // 同数据二次评估：条件仍成立，冷却拦发送
     assert.equal(sent.filter(p => p.rule === 'error_burst').length, 1, '10min 全局冷却窗内不重发');
   } finally { engine.stop(); }
+});
+
+// 冷却记忆有界（终审第 1 轮代码席 note 的行为钉）：cooldownCap 注入 2，
+// 三会话首 tick 齐发（3 条目 > cap → 最旧插入被逐出）。第二 tick 前撤掉
+// wc2/wc3 的候选行、只留 wc1（被逐出者）仍触发——若冷却记忆在则拦发送，
+// 被逐出则重发一次（有界内存的已申报代价）。注：cap < 同 tick 触发数时逐出
+// 会级联（每 tick 全员重发）——那是本设计声明的退化形态，本用例取非级联
+// 判别形态（候选收缩到被逐出者一人）钉「逐出=冷却记忆失效」机制本身。
+test('C8-2 冷却记忆有界: 超 cooldownCap 丢最旧——被逐出会话的冷却记忆失效、下 tick 重发', () => {
+  wipe();
+  const t0 = Date.now();
+  buildSession(fx.conn, ['wc1', 'wc2', 'wc3'].map((id, i) => ({
+    id, title: '界' + id, task_type: 'interactive', directory: 'F:/demo',
+    time_created: t0 - 60 * MIN, time_updated: t0 - (30e3 - i * 100),
+  })));
+  // 三会话都已完成足够久（waiting 远超 timeoutMs=1000），同 tick 齐触发。
+  buildModelUsage(fx.conn, ['wc1', 'wc2', 'wc3'].map((id, i) => ({
+    id: 'wm' + i, session_id: id, turn_id: 'k' + i, status: 'completed',
+    started_at: t0 - 260e3, completed_at: t0 - 250e3, duration_ms: 100,
+    query_source: 'main_turn', model_id: 'glm-5', computed_total_tokens: 10,
+  })));
+  const bus = new EventEmitter();
+  const sent = [];
+  bus.on('notify', p => sent.push(p));
+  const engine = makeNotifyEngine({ dbq, bus, tickMs: 1e9, cooldownCap: 2,
+    rules: { error_burst: { enabled: false }, waiting_timeout: { enabled: true, timeoutMs: 1000 } } });
+  try {
+    engine.tick();
+    assert.deepEqual(sent.map(p => p.session), ['wc1', 'wc2', 'wc3'], '首 tick 三会话齐发');
+    // 收缩候选域：只留被逐出的 wc1（wm0）仍构成 waiting 候选。
+    fx.conn.exec("DELETE FROM model_usage WHERE id IN ('wm1', 'wm2');");
+    engine.tick();
+    assert.deepEqual(sent.map(p => p.session), ['wc1', 'wc2', 'wc3', 'wc1'],
+      'wc1（最旧插入、已被逐出）冷却记忆失效 → 重发一次（有界淘汰的已申报代价）');
+    engine.tick();
+    assert.deepEqual(sent.map(p => p.session), ['wc1', 'wc2', 'wc3', 'wc1'],
+      '重发后 wc1 记忆回到 Map 尾部（size ≤ cap 稳态）→ 第三 tick 冷却拦发送');
+  } finally { engine.stop(); }
+});
+
+// signalsWindowMs 注入传导钉（终审第 1 轮代码席 note：此前只作用于取数窗
+// sinceMs、分类器新鲜度复核用缺省 15min——两窗分叉）。判别形态：行龄 20min，
+// 注入 30min 窗 → 取数窗含该行且分类器判新鲜 → waiting 触发；缺省引擎
+// （15min）下同一行被分类器判「超出判定窗」→ 不触发。
+test('C8-1 注入传导: signalsWindowMs 同时作用于取数窗与分类器判定窗', () => {
+  wipe();
+  const t0 = Date.now();
+  buildSession(fx.conn, [{
+    id: 'w30', title: '三十分钟窗', task_type: 'interactive', directory: 'F:/demo',
+    time_created: t0 - 60 * MIN, time_updated: t0 - 19 * MIN,
+  }]);
+  buildModelUsage(fx.conn, [{
+    id: 'wm30', session_id: 'w30', turn_id: 'k1', status: 'completed',
+    started_at: t0 - 20 * MIN, completed_at: t0 - 19 * MIN, duration_ms: 100,
+    query_source: 'main_turn', model_id: 'glm-5', computed_total_tokens: 10,
+  }]);
+  const mk = (signalsWindowMs) => {
+    const bus = new EventEmitter();
+    const engine = makeNotifyEngine({ dbq, bus, tickMs: 1e9, signalsWindowMs,
+      rules: { error_burst: { enabled: false }, waiting_timeout: { enabled: true, timeoutMs: 5 * MIN } } });
+    try { return engine.evaluate().map(n => n.rule); } finally { engine.stop(); }
+  };
+  assert.deepEqual(mk(30 * MIN), ['waiting_timeout'],
+    '30min 注入窗：行在取数窗内且分类器判新鲜 → 触发（两窗同源）');
+  assert.deepEqual(mk(undefined), [],
+    '缺省 15min：同一行被分类器判「超出判定窗」→ 不触发（判别锚）');
 });
 
 test('C8-2 waiting_timeout per-session 冷却独立 + 跨规则互不冷却', async () => {
@@ -429,6 +497,46 @@ test('C8-3 SSE: notify 帧载荷契约 + close 退订无泄漏', async () => {
     assert.ok(
       await waitFor(() => sharedNotifyBus().listenerCount('notify') === 0, 2000),
       '连接关闭后退订，共享 bus 无残留订阅（无泄漏）');
+  }
+});
+
+// ── C8-3 补：per-session 规则的 session 字段经 SSE 转发存活（终审第 1 轮
+// 测试席 note：既有 e2e 只触发全局规则 error_burst，session 字段断言仅存于
+// 纯函数层 C8-1——tick() 解构只剥 cooldownKey/tier，本用例端到端钉存活）。──
+test('C8-3 SSE: waiting_timeout（per-session 规则）session 字段经转发存活、id 形态钉', async () => {
+  wipe();
+  const t0 = Date.now();
+  buildSession(fx.conn, [{
+    id: 'we2e', title: '端到端等待', task_type: 'interactive', directory: 'F:/demo',
+    time_created: t0 - 60 * MIN, time_updated: t0 - 10 * MIN,
+  }]);
+  buildModelUsage(fx.conn, [{
+    id: 'we1', session_id: 'we2e', turn_id: 'k1', status: 'completed',
+    started_at: t0 - 11 * MIN, completed_at: t0 - 10 * MIN, duration_ms: 100,
+    query_source: 'main_turn', model_id: 'glm-5', computed_total_tokens: 10,
+  }]);
+  const app = express();
+  app.use('/api/live', live);
+  const server = await listen(app);
+  const events = { open: false };
+  const req = openSse(server.address().port, events);
+  try {
+    assert.ok(await waitFor(() => events.open, 3000), 'SSE 连接建立');
+    const engine = makeNotifyEngine({ dbq, tickMs: 1e9,
+      rules: { waiting_timeout: { enabled: true } } });
+    try {
+      engine.tick();
+      assert.ok(await waitFor(() => (events.notify || []).length >= 1, 5000),
+        'waiting_timeout notify 帧到达（真实发射路径）');
+      const p = events.notify.find(n => n.rule === 'waiting_timeout');
+      assert.ok(p, '帧为 waiting_timeout（无 error 行，error_burst 不触发）');
+      assert.equal(p.session, 'we2e', 'per-session 规则的 session 字段经 SSE 转发存活');
+      assert.ok(/^waiting_timeout:we2e:\d+$/.test(p.id), 'id=rule:session:at 形态');
+      assert.equal(p.severity, 'warn');
+    } finally { engine.stop(); }
+  } finally {
+    req.destroy();
+    server.close();
   }
 });
 

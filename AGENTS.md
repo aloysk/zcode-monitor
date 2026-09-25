@@ -42,6 +42,19 @@ npm test                   # node --test test/index.js（聚合入口）
 
 ## 当前状态（2026-09-25）
 
+- batch2 六席终审第 1 轮修复轮（feature/ecosystem-round2-batch2）：27 条逐条
+  闭环——export csvCell 公式注入字符集补 TAB/CR/LF（OWASP 建议集）；notify
+  冷却记忆有界化（NOTIFY_COOLDOWN_CAP=1000 键序逐出）+ signalsWindowMs 注入
+  传导修复（取数窗与判定窗同源）；pet ariaLabel permission 分支（读屏语义）；
+  recap 覆盖行宽窗截断措辞；renderSpeedChart 切页自弃守卫；db.js signals 分节
+  头注勘正（1237ms 旧引系裸 GROUP BY 形态，同形回退真库 1.23ms——R-32 同步
+  勘正）；C12-3 断言携带 CSV 全文（间歇红可诊断）。R-28 ③款落锤
+  （waiting_timeout 维持默认关，spec §2.2 表加偏差注）；登记 R-34～R-38
+  （间歇红未根因/recap 串行 5 SQL 观察项/SSE 6 连接贴满/路由无卸载钩子/
+  token_threshold 单 tick 上限建议）。测试 +6 处，全套两口径绿（聚合
+  60893ms exit 0；直列 39 文件 384/384）；GX-2 恰两依赖。7399 真库补拍 12
+  帧（c8-*/c6-*/batch2-v3-*，waiting 帧真实会话直拍；AI 目检 429/400 两形态
+  故障如实记录，留人工）；gates 照录 round2-batch2-gates.md。
 - R-8 决策轮（fix/r8-system-fonts，经 PR 合并）：用户拍板「系统字体为最终
   形态」——pet.html 删唯一活体 Google Fonts @import（widget.html 的 @import
   排在 :root 后本就被浏览器忽略，同删属清死码）；CSP style-src/font-src 撤销

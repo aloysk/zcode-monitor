@@ -23,8 +23,9 @@
 // （section,key,value：kpis/speed/recent_speed 逐叶子标量展开、series/by_model/
 // by_tool 每行一行 value＝行对象 JSON 序列化——脚本侧 parse value 列即得结构
 // 化值）。转义钉：含 , " \r \n 的字段双引号包裹、内部 " 加倍；行尾 \r\n；首行
-// 列名；UTF-8 无 BOM；公式注入防护——以 = + - @ 开头的字段前置 '（Excel/Sheets
-// 把 CSV 单元格按公式求值的注入面；导入约束见 How 页）。
+// 列名；UTF-8 无 BOM；公式注入防护——以 = + - @ 或 TAB/CR/LF 开头的字段
+// 前置 '（Excel/Sheets 把 CSV 单元格按公式求值的注入面；字符集＝OWASP CSV
+// Injection 建议集，终审第 1 轮安全席 note 补齐；导入约束见 How 页）。
 // 响应头：Content-Disposition 附件下载 + X-Zcode-Monitor-Export-Schema-Version
 // （JSON/CSV 双形态均带，JSON 侧是包络体的双保险）；装配在 /api 路由区（Host
 // 闸/securityHeaders 之后自动带全局头——C12-5 装配契约）。
@@ -100,13 +101,13 @@ function buildRecapDataset(q, retentionDays) {
 
 // ── CSV 序列化（RFC 4180 + 公式注入防护）──
 
-// 单元格转义：公式注入防护先行（= + - @ 开头前置 '——顺序敏感：前置后首字符
-// 不再是公式触发符；'-12.3 在 Excel 中按文本显示为 -12.3）；再按 RFC 4180 对
-// 含 , " \r \n 的字段双引号包裹、内部 " 加倍。null/undefined → 空串（recap
-// year 档 tokens=null 等未知值不伪造）。
+// 单元格转义：公式注入防护先行（= + - @ 与 TAB/CR/LF 开头前置 '——顺序敏感：
+// 前置后首字符不再是公式触发符；'-12.3 在 Excel 中按文本显示为 -12.3）；再按
+// RFC 4180 对含 , " \r \n 的字段双引号包裹、内部 " 加倍。null/undefined →
+// 空串（recap year 档 tokens=null 等未知值不伪造）。
 function csvCell(v) {
   let s = v == null ? '' : String(v);
-  if (/^[=+\-@]/.test(s)) s = "'" + s;
+  if (/^[=+\-@\t\r\n]/.test(s)) s = "'" + s;
   return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 

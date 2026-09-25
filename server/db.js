@@ -1332,8 +1332,14 @@ function contextGaugeRows(sessionId, limit = 100) {
 //     planner 为省 TEMP B-TREE 改走全索引扫（真库实测 1804.8ms/次，§1.2
 //     事实 5②；强制后本路实测毫秒级）。sqlite_master 探测 + 回退记忆复用
 //     overviewKpis 机制（conn._hasStartedModelIdx 同键同义）：缺索引的库
-//     （旧版 ZCode、外部 ZCODE_DB）回退无强制形态（真库实测 1237ms/次——
-//     「慢但可用」取舍照先例接受，C6 消费频率下频繁触发的再议降频/缓存）。
+//     （旧版 ZCode、外部 ZCODE_DB）回退＝去掉 INDEXED BY 但保留子查询
+//     ORDER BY started_at DESC LIMIT 截断的同形查询——子查询 ORDER BY 本身
+//     锚定索引方向，真库上无 INDEXED BY 同形实测 1.23ms 仍走 started_at
+//     索引（终审第 1 轮 SQL 席探针照录）；旧注「回退真库实测 1237ms」系
+//     裸 GROUP BY（无子查询包裹）形态的数字，与本回退形态不对应，勘正。
+//     真正缺索引的库上 planner 无 started_at 前导索引可用，成本无法在真库
+//     实测（不写库），按保守取向申报「慢但可用」（取舍照先例接受，C6 消费
+//     频率下频繁触发的再议降频/缓存；R-32 同步勘正）。
 //     子查询 ORDER BY started_at DESC LIMIT @cap 截断保最新侧（无 ORDER BY
 //     时 SQLite 按索引升序返回、截断保最老行，被截会话误判 idle——异常风暴
 //     窗护栏 SIGNALS_MAX_ROWS）；外层 bare-column+MAX(rowid) 取写入序最新行

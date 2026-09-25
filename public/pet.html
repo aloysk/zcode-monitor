@@ -455,6 +455,10 @@ function ariaLabel(s) {
   if (s === 'tantrum') return 'Token 桌宠：被惹恼了';
   if (s === 'gen')     return tps != null ? 'Token 桌宠：生成中，速度 ' + tps.toFixed(1) + ' t/s'
                                           : 'Token 桌宠：生成中';
+  // permission（C6 waiting_permission 接线态，2026-09-25 终审第 1 轮视觉席补）：
+  // 读屏语义与 animFor('permission')='waiting_permission' 的等待授权动画对齐，
+  // 不落 default「待命中」。
+  if (s === 'permission') return 'Token 桌宠：等待授权';
   if (s === 'sleep')   return 'Token 桌宠：睡着了';
   return 'Token 桌宠：待命中';
 }

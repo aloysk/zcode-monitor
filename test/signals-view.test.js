@@ -123,6 +123,13 @@ test('C6-4: 顶栏 waiting chip——元素在案、summary 30s 轮询、点击�
   const css = readPublic('styles.css');
   assert.ok(/\.snap-alert\[hidden\]\s*\{\s*display:\s*none;?\s*\}/.test(css),
     'styles.css 的 .snap-alert[hidden] 兜底规则在案（删兜底即挂）');
+  // fail-safe 钉（终审第 1 轮测试席 minor：spec §2.1 需求 4 明文「数据获取
+  // 失败静默隐藏（不告警）」——catch 分支此前无任何源码契约钉，删 catch 变体
+  // 无用例会红）：取数失败 → s=null → 落 chip.hidden=true 兜底分支。
+  assert.ok(segs.appLoop.includes('catch { s = null; }'),
+    'signalsLoop 取数失败的 catch 吞错形态在案（s=null 落隐藏兜底，不告警）');
+  assert.ok(/else\s*\{\s*chip\.hidden = true;/.test(segs.appLoop),
+    'waiting_count 缺失/为零共用 chip.hidden=true 兜底分支在案（fail-safe）');
 });
 
 test('C6-4: 服务端装配面——routes/signals.js 存在、index.js 挂 /api/signals', () => {

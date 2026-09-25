@@ -79,4 +79,8 @@ test('契约: 睡眠与错误态的可视接线齐备（静帧+呼吸+zzz / SSE 
   const psSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'pet-state.js'), 'utf8');
   assert.ok(psSrc.includes('已接线'), 'permission 接线说明必须留痕（pet-state.js）');
   assert.ok(psSrc.includes('waiting_permission'), 'waiting_permission 行映射齐备');
+  // a11y 面（终审第 1 轮视觉席 minor）：permission 态在 ariaLabel 有分支——
+  // 读屏读数与 waiting_permission 动画语义对齐，不落 default「待命中」。
+  assert.ok(pet.includes("if (s === 'permission') return 'Token 桌宠：等待授权';"),
+    'ariaLabel 含 permission 分支（读屏语义与动画态对齐）');
 });

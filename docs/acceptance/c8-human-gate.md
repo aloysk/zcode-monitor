@@ -7,23 +7,33 @@
 
 ## 结论
 
-**待人工评审。** 需实机截图/视觉复核的各项：
+**待人工评审（评审面已收窄——终审第 1 轮修复轮 2026-09-25 补拍 5 帧入位，见下）。** 仍需人工的项：
 
-- 三页提醒呈现双主题截图：pet 气泡（含消毒文本样例——URL 剥为 `[链接]` 后
-  的形态）、widget 副行胶囊形态（数字行下方、severity 语义色文本）、index
-  通知卡/toast（底部弹出、5s 驻留）。已备真机素材两帧：
-  `docs/acceptance/c8-pet-notify-bubble.png`（气泡回落常态）、
-  `c8-pet-notify-bubble-live.png`（notify 接管帧）——评审时可按复现步骤
-  重拍更高清/双主题版本。
-- 出厂默认形态核对：系统通知关（默认）+声音开（默认）下，alert 级提醒的
-  实际呈现＝提示音+气泡（自动化已钉降级矩阵函数行为，`notifyChannels`
-  八个矩阵点全测；真机听感/视觉形态需人工确认）。
-- 系统通知授权流人工复验一次：overview 页「提醒」卡勾选「系统通知」→
-  浏览器弹权限请求 → 授予 → 触发 alert 级通知收到系统横幅；拒绝路径的
-  开关回落与提示文案。
-- 防噪默认值表照 UI 实态核对：三开关默认态（声音✔/系统通知✘/TTS✘）与
-  spec §2.2 需求 2 服务端规则表（error_burst 开+sound / waiting_timeout
-  关（R-28 降级处置）/ token_threshold 关+quiet / inactive 关+quiet）。
+- ~~三页提醒呈现双主题截图~~：pet 气泡＝既有 `c8-pet-notify-bubble{,-live}.png`
+  两帧；widget 副行＝`c8-widget-subrow.png`（420×260，数字行下方 err 色
+  副行、胶囊窗不加宽）；index toast＝`c8-index-toast-{dark,light}.png`
+  （1280×800 双主题）；设置面板＝`c8-notify-settings-{dark,light}.png`
+  （三开关默认态双主题）。**severity 语义色/对比度/淡出时序观感仍需人眼。**
+- 出厂默认形态核对：设置帧内三开关默认态（声音✔/系统通知✘/TTS✘）已可见；
+  alert 级「提示音+气泡」的实际听感/视觉形态需人工确认（降级矩阵函数行为
+  已自动化钉死——notifyChannels 八矩阵点全测）。
+- **系统通知授权流人工复验**（开放）：overview 勾「系统通知」→ 权限弹窗 →
+  授予收横幅/拒绝回落文案——真授权弹窗交互不可自动代填。
+- **提示音听感与 TTS 播报**（开放）：WebAudio 880Hz/0.2s/gain 0.06 与
+  TTS 开启后的播报属人工听感面。
+- 防噪默认值表照 UI 实态核对：spec §2.2 需求 2 表已加终审偏差注
+  （waiting_timeout 落默认关＝R-28 ③款落锤）——设置帧与规则表口径一致。
+
+### 终审第 1 轮修复轮补拍帧（2026-09-25，7399 真库只读起服）
+
+| 帧 | 内容 | 驱动方式 |
+|---|---|---|
+| `c8-widget-subrow.png` | widget 数字行下方 severity(err) 副行（胶囊单行窗、无弹窗） | onNotify + MessageEvent（真实渲染代码路径；服务端事件以驱动样例替代——R-30 无回放边界） |
+| `c8-index-toast-{dark,light}.png` | index 底部 toast 双主题 | presentNotify 同款驱动 |
+| `c8-notify-settings-{dark,light}.png` | 「提醒」卡三开关默认态双主题 | 真实 DOM 直拍 |
+
+- AI 目检抽查未完成（两形态故障如实记录见 round2-batch2-gates.md）；帧的
+  视觉判定留人工。
 
 ## 已完成的自动化核对（T5 冒烟，7394 真实库只读）
 

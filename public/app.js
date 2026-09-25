@@ -311,6 +311,13 @@ async function signalsLoop() {
 // 服务端生成仍视为不可信输入）——本页通知面走 toast()（textContent 写入），
 // 系统通知 body 亦按字符串原样递交浏览器 API，无 innerHTML 面。
 //
+// 连接预算披露（终审第 1 轮代码席 minor，R-36 登记）：HTTP/1.1 同源 6 连接
+// 上限下，三页设计形态常开连接＝index 2（本流 + 活动视图 liveEs 同端点）+
+// widget 2（live+gen）+ pet 2（gen+notify）＝恰 6 贴满，再开第四个面板页签
+// 的 SSE 会排队（HTTP/2 不受此限，本服务为 HTTP/1.1）。本流与视图流不合并
+// 是有意的形态切分（通知面切页不断流 vs 视图流随视图生命周期），单用户本
+// 地姿态下按接受处理；复用合并的取舍与触发条件见 residuals R-36。
+//
 // 三开关（localStorage 持久化，spec §2.2 需求 4）：声音默认开、系统通知默认
 // 关、TTS 默认关。同源跨页共享（pet/widget 与本页同面板 origin，关一次全局
 // 生效）。值语义：null/缺省=默认；'1'=显式开；'0'=显式关。

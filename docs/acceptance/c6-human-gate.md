@@ -12,18 +12,28 @@
 
 ## 结论
 
-**待人工评审。** 需实机截图/视觉复核的各项：
+**待人工评审（评审面已收窄——终审第 1 轮修复轮 2026-09-25 补拍 5 帧入位，见下）。** 仍需人工的项：
 
-- sessions 列表三态徽标（working 蓝 / waiting 黄虚线 / idle 灰）与 broken
-  叠加徽标（红）双主题截图各一帧——waiting 徽标的虚线描边在两主题下的辨识
-  度、徽标不透明文本对比（§6 第 2 条 AA）。
-- waiting 置信标注 hover 文案（虚线徽标 hover 弹出的固定文案）——文案语义
-  与可读性评审（§6 适用注第 1/3 条）。
-- overview 默认首屏顶栏 waiting chip 可见帧（**waiting>0 态**——「N 等待中」
-  黄徽标形态 + hover 的最长等待格式化读数；waiting=0 态 chip 隐藏为默认形态）。
-- pet `waiting_permission` 动画真机帧（/api/signals/summary 轮询驱动）——
-  **连续 15s 以上轮询期观察记录**：hold（10s=2× 轮询周期）覆盖轮询间隙、
-  mood 无 sleep 抖动断裂（§2.1 需求 6 的 hold 判据人工面）。
+- ~~sessions waiting 徽标双主题帧~~（已拍：`batch2-v3-sessions-waiting-{dark,light}.png`，
+  真库真实 waiting 会话直拍；**双主题辨识度与 AA 对比仍需人眼判定**）。
+- waiting 置信标注 hover 文案（虚线徽标 hover 弹出的固定文案）——hover 态
+  未拍帧，文案语义与可读性评审（§6 适用注第 1/3 条）仍开放。
+- ~~顶栏 waiting chip 可见帧~~（已拍：`c6-waiting-chip.png`，56×21 真实态
+  直拍；hover 的最长等待读数帧未拍，仍开放）。
+- pet `waiting_permission` 帧已拍（`batch2-v3-pet-waiting-{dark,light}.png`）；
+  **连续 15s 以上轮询期观察记录**（hold 覆盖轮询间隙、mood 无 sleep 抖动
+  断裂）属动态观察面，静态帧不可代填，仍开放。
+
+### 终审第 1 轮修复轮补拍帧（2026-09-25，7399 真库只读起服）
+
+| 帧 | 内容 | 驱动方式 |
+|---|---|---|
+| `batch2-v3-sessions-waiting-dark.png` / `-light.png` | sessions 列表 waiting 虚线徽标（真库 2 枚真实 waiting 会话）双主题 | 真实数据直拍（/api/signals 真响应） |
+| `batch2-v3-pet-waiting-dark.png` / `-light.png` | pet waiting_permission 行（轮询驱动真实态） | 真实数据直拍 |
+| `c6-waiting-chip.png` | 顶栏「N 等待中」黄徽标（waiting>0 真实态） | 真实数据直拍（chip 56×21 元素裁切帧） |
+
+- AI 目检抽查未完成（两形态故障如实记录：终审席 429 限流、修复轮会话
+  analyze_image 400——见 round2-batch2-gates.md）；帧的视觉判定留人工。
 
 ## 复现步骤（实机评审时按序执行）
 

@@ -399,6 +399,7 @@
 
   function renderSpeedChart(recent) {
     const host = $('#ch-speed');
+    if (!host) return; // 视图已切走（loadOverview 在途）：自弃（renderKpis 守卫家族）
     charts.speed && charts.speed.destroy();
     // chronological order (oldest → newest) for a left→-right line
     const rows = [...recent].reverse().filter(r => r.tps != null);

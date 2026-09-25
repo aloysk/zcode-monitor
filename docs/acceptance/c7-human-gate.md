@@ -12,23 +12,33 @@
 
 ## 结论
 
-**待人工评审。** 实施者已交付自动化可做的全部核对，需人工目检判定的部分：
+**待人工评审（评审面已收窄——终审第 1 轮修复轮 2026-09-25 补拍 5 帧入位，见下）。** 仍需人工的项：
 
-- **双主题截图（week 与 month 两档）**：Top focus 表（目录/token/调用/会话/
-  去重活跃分钟列，tabular-nums）、日桶 sparkline（柱高＝当日活跃分钟，悬停
-  tooltip 含 token/调用/并行）、覆盖披露卡（常驻）、空态帧（无活动期次）在
-  dark/light 两主题下的可读性与 AA 对比。
-- **叙事要点文案**：「本期要点」三要点（最活跃日/token 峰值日/错误计数日）
-  的措辞是否准确传达口径（要点均由覆盖内日桶派生，文案不引入未披露口径）。
-- **year 档形态**：活动时长卡与覆盖披露卡的「会话区间并集上界口径（含挂机
-  时间）」标注；要点降级为两要点——「token 峰值日」不渲染也不留占位；Top
-  focus 区注明「年档不提供 Top focus——token 归因在官方 30 天保留窗外无数据
-  源，不伪造」；环比区注明月/年档不提供的理由。
-- **sparkline 与覆盖卡对齐**：覆盖起点之前的日期不在日桶序列（无柱、不从左邻
-  插值），柱带起止日期与覆盖披露卡的「自 X 起可读」一致。
+- ~~双主题截图（week/month/year 三档）~~：week 档＝`batch2-v2-recap-{dark,light}.png`
+  （T7 默认周档）；month/year 档＝`batch2-v3-recap-{month,year}-{dark,light}.png`
+  （本轮补拍，1265×959 全页帧）；失败兜底帧＝`batch2-v3-recap-fail-dark.png`
+  （page.route abort 驱动 failCard 真路径——含修复轮「候选集内全部行（宽窗
+  截断）」措辞真机验证）。**可读性与 AA 对比仍需人眼判定。**
+- **空态帧未拍**（开放）：真库近 7 天有活动、无自然空窗；构造需 fixture 起服
+  （种子形态参考 test/recap.test.js 空态用例），留人工或后续批次补拍。
+- **悬停 tooltip 帧未拍**（开放）：日桶柱 hover 的日期/活跃分钟/峰值并行/
+  token/调用数五要素 tooltip 属交互态。
+- **叙事要点文案**（month/year 帧内可见三要点/两要点降级形态，措辞语义评审
+  开放）与 **sparkline-覆盖卡对齐**（帧内可比对，判定开放）。
 - 已知口径边界（非缺陷）：月/年档覆盖起点受 30 天保留与 cap 治理约束
   （meta.token_coverage_from 三元 max），月初日期可能不在覆盖内——覆盖披露卡
   如实申报，柱带起点随之后移。
+
+### 终审第 1 轮修复轮补拍帧（2026-09-25，7399 真库只读起服）
+
+| 帧 | 内容 | 驱动方式 |
+|---|---|---|
+| `batch2-v3-recap-month-{dark,light}.png` | month 档全页（Top focus/sparkline/覆盖卡/环比不适用注明） | 真实数据直拍 |
+| `batch2-v3-recap-year-{dark,light}.png` | year 档全页（上界口径标注/要点降级/Top focus 不适用注明/KPI token '—'） | 真实数据直拍 |
+| `batch2-v3-recap-fail-dark.png` | 取数失败 failCard（「取数失败——稍后点「↻ 刷新」重试」） | page.route abort 驱动真实 failCard 路径 |
+
+- AI 目检抽查未完成（两形态故障如实记录见 round2-batch2-gates.md）；帧的
+  视觉判定留人工。
 
 ## 复现步骤（实机评审时按序执行）
 

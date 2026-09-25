@@ -1,7 +1,7 @@
 # 生态采纳需求规格 · 第二轮第二批（ecosystem-round2-batch2）
 
 - 日期：2026-09-25（SGT）
-- 状态：**草稿（第 1 轮 26 条 + 第 2 轮终轮 12 条评审意见均已逐条落实——第 2 轮：major 2（cap 覆盖起点 SQL 形态实测改钉 MIN+rowid 尾界/hover title「待批」自相矛盾勘正）、minor 3、note 7，含两条第 1 轮未尽职守的重申意见（C12 同源钉提取重构授权、C12 拍板授权链披露）本轮补落实；**C12 实施前置条件＝用户拍板确认（§1.1 表 ④）**；待终审）**
+- 状态：**已实施（T1-T8 全部交付；六席终审第 1 轮 27 条已逐条闭环——修复轮 2026-09-25 交付（csvCell 公式注入字符集补齐 OWASP 集/notify 冷却记忆有界化/signalsWindowMs 注入传导修复/pet ariaLabel permission 分支/recap 宽窗截断措辞/renderSpeedChart 切页守卫/R8-2 零外联契约钉/测试 +6 处/7399 真机 12 帧补拍），登记 R-34～R-38、R-28 ③款落锤（waiting_timeout 维持默认关）、R-32 勘正；终审偏差注见 §2.2 需求 2 表；C12 前置条件经实施轮编排任务骨架明示满足（§1.1 表 ④））**
 - 分支/实施位置：worktree `F:/project/zcode-monitor-plan`，分支 `feature/ecosystem-round2-batch2`（本会话 git 实测：分支已在位、工作树 clean，HEAD `2c3fd0a`——已含 R-8 销账轮 `6d979ae` 与 batch1 全部成果）；主仓库 `F:/project/zcode-monitor` 与 `C:/Users/18086/.zcode` 一律只读。
 - 上游指针：范围定义＝用户 2026-09-25 拍板（C6+C8→C7→C10/C11 后续，分析 §1.1）+ **C12 导出夹带（授权链披露见 §1.1 表 ④——三处书面拍板记录均不含 C12，实施前置条件＝用户确认）** + `docs/analysis/ecosystem-scan-round2.md` §1.2 拍板清单/§2.4 勘误/§2.5 硬红线/§3.0 统一抽象/§4 风格约束/§7 风险红线表及 C6/C7/C8/C12 各节全文（worktree `2c3fd0a`）；候选间衔接与 L1-L3 分层按同文档 §3.0。
 - 格式与深度参照：`docs/specs/ecosystem-round2-batch1.md`（Given/When/Then + `[测试]`/`[命令]`/`[评审]` 标注法、现状锚点/需求分节形态沿用）。
@@ -102,7 +102,7 @@ batch1 已交付数据基座层（C1/C2/C5/C9：窗口级聚合、上下文水�
    | 规则 | 默认开关 | 触发条件 | 冷却 | 内建强度 |
    |---|---|---|---|---|
    | error_burst 错误爆发 | **开** | 5min 窗内 error 行（model+tool）≥3 | 10min（全局） | sound（短提示音+气泡，不发系统通知） |
-   | waiting_timeout 等待超时 | **开** | interactive 会话 waiting 态持续 ≥5min（持续＝`now − waiting_since`，起点口径＝§2.1 需求 1 数据派生、无状态；消费 C6 分类器输出，引擎内直接调用分类器与查询，无 HTTP 自环；**会话域＝全库近窗活跃 interactive 域，§2.1 需求 2 场景 (b)**） | 15min（per-session） | alert（系统通知+提示音+气泡） |
+   | waiting_timeout 等待超时 | **开**（**终审偏差注（2026-09-25 六席终审第 1 轮落锤）**：实施落**默认关**——C6-8 误报超线降级处置（R-28 ③款）的约束面，判定语义照本表原文完整保留，回翻只动 `server/notify.js` RULE_DEFAULTS 的 enabled 常量） | interactive 会话 waiting 态持续 ≥5min（持续＝`now − waiting_since`，起点口径＝§2.1 需求 1 数据派生、无状态；消费 C6 分类器输出，引擎内直接调用分类器与查询，无 HTTP 自环；**会话域＝全库近窗活跃 interactive 域，§2.1 需求 2 场景 (b)**） | 15min（per-session） | alert（系统通知+提示音+气泡） |
    | token_threshold 单会话阈值 | **关** | 单会话累计 `SUM(computed_total_tokens)` ≥ 1,000,000（**累计口径＝30 天保留窗内累计**——三表 30d prune（§1.2 事实 2）下跨月历史不计、长会话阈值触发系统性延迟，属已知口径边界：气泡文案与 How/口径册如实披露「按 30 天保留窗口径」，第 1 轮评审钉） | 每会话每档位一次（1M/5M/20M 三档） | quiet（仅气泡） |
    | inactive 不活跃 | **关** | 全库无 model 行 ≥30min 且 **24h 窗内曾有活动**（「窗口内」量化＝24h——overview 缺省窗同款量级，第 1 轮评审补默认值；服务端常量可注入） | 60min | quiet |
 
