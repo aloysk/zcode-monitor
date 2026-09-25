@@ -241,6 +241,7 @@ zcode-monitor/
 │   ├── checkpoint-route.js   # /api/checkpoint 工厂（force 首部闸 + wal_active 否决）
 │   ├── health-route.js       # /api/health 工厂（连接自愈探测 + 数据新鲜度 freshness）
 │   ├── models-meta.js        # 静态模型窗口表（上下文水位的数据面，resolve 精确匹配）
+│   ├── signals.js            # C6 会话状态信号纯分类器（working/waiting/idle/broken）
 │   └── routes/
 │       ├── overview.js       # 实时监控
 │       ├── sessions.js       # 会话列表 + 详情 7 端点（+ context-gauge 水位种子）
@@ -249,7 +250,8 @@ zcode-monitor/
 │       ├── live.js           # SSE 实时推送
 │       ├── agents.js         # 子 agent 树
 │       ├── raw.js            # 原始表查看器
-│       └── usage.js          # /api/usage 三端点（turns/tools/attribution）
+│       ├── usage.js          # /api/usage 三端点（turns/tools/attribution）
+│       └── signals.js        # /api/signals/summary（C6 会话状态信号汇总）
 ├── public/
 │   ├── index.html            # 单页 shell
 │   ├── app.js                # 路由 + 辅助函数

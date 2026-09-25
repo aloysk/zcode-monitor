@@ -23,6 +23,7 @@ const transcript = require('./routes/transcript');
 const raw = require('./routes/raw');
 const agents = require('./routes/agents');
 const { makeUsageRouter } = require('./routes/usage');
+const { makeSignalsRouter } = require('./routes/signals');
 const petImport = require('./pet-import');
 
 const PORT = +process.env.PORT || 7331;
@@ -179,6 +180,9 @@ app.use('/api/agents', agents);
 // /api/usage 族三端点（turns/tools/attribution——C1/C5 窗口级聚合面，工厂
 // 形态与窗口/口径语义见 server/routes/usage.js 头注；retentionDays 缺省 30）。
 app.use('/api/usage', makeUsageRouter());
+// /api/signals（C6 会话状态信号——GET /summary 固定四字段，语义见
+// server/routes/signals.js 头注；与 /api/sessions 的 signal 行字段同基座）。
+app.use('/api/signals', makeSignalsRouter());
 
 // /pets 静态服务收紧（须挂在与下面通用的 express.static 之前，注册顺序即命中
 // 顺序；构成见 server/http-hardening.js petsStaticOptions）：非图片一律

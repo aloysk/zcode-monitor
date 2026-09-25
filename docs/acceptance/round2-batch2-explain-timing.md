@@ -27,3 +27,64 @@ R-8 销账（系统字体为最终形态）已由 `fix/r8-system-fonts` 轮（`6
 为 false（过），注入 `@import url(https://fonts.googleapis.com/…)` 样本为
 true（挂）——断言非恒过。单文件 `node --test test/frontend-contract.test.js`
 退出码 0（3 pass / 0 fail）。
+
+---
+
+## 1. T2 / C6-7：会话状态信号两路 SQL 真实库 EXPLAIN + 计时（2026-09-25）
+
+探针形态＝spec §5 模板（worktree 根 `node -e`，只读连接 + busy_timeout
+5000ms；计时为单次执行墙钟，`process.hrtime.bigint()`）。两条 SQL 与
+`server/db.js` Session signals 分节的运行时字面完全一致（在飞路＝
+`signalsInflightSessionIds`、近窗路＝`signalsRecentModelLatest` 的 INDEXED BY
+分支；参数内联）。窗口两档：15min（分类器缺省窗）与 24h（压力档）。
+
+**路②（model_usage 近窗最新行，INDEXED BY 强制 + 子查询 ORDER BY started_at
+DESC LIMIT @cap=2000 截断 + 外层 GROUP BY session_id 取 bare-column+MAX(rowid)）：**
+
+| 窗口 | 会话数 | 单次计时 | EQP（照录） |
+|---|---|---|---|
+| 15min | 10 | 0.38ms | `CO-ROUTINE (subquery-1)` \| `SEARCH model_usage USING INDEX model_usage_started_model_idx (started_at>?)` \| `SCAN (subquery-1)` \| `USE TEMP B-TREE FOR GROUP BY` |
+| 24h | 80 | 4.21ms | 同上（两档计划一致） |
+
+判据②达成：`SEARCH model_usage USING INDEX model_usage_started_model_idx`
+在案；无 `SCAN model_usage …`（翻转反例形态为
+`SCAN model_usage USING INDEX model_usage_session_turn_idx`，未出现）。
+`SCAN (subquery-1)` 是对子查询协程输出（≤cap=2000 行）的扫描、非基表扫描，
+TEMP B-TREE 为 GROUP BY 允许形态（spec §5 判据明文）。
+
+**路①（message 在飞集合，rowid 尾界 MAX(rowid)-8000 + 卫生窗 created 5min/
+updated 90s + json_extract 判 assistant/completed-NULL；本路无窗口参数——
+卫生窗锚定当下，与档位无关，单跑一档）：**
+
+| 单次计时 | 行数/去重会话 | EQP（照录） |
+|---|---|---|
+| 22.99ms | 4 行 / 4 会话 | `SEARCH message USING INTEGER PRIMARY KEY (rowid>?)` \| `SCALAR SUBQUERY 1` \| `SEARCH message` |
+
+判据①达成：`SEARCH message USING INTEGER PRIMARY KEY (rowid>?)` 在案；
+无 `SCAN message USING INDEX …`（GROUP BY/DISTINCT/子查询包裹三形态的翻转
+反例未出现——本路 SQL 无 GROUP BY/DISTINCT，去重在 JS 侧 new Set()）。
+`SCALAR SUBQUERY 1` 内的 `SEARCH message` 是 MAX(rowid) 的 O(1) 尾点寻址。
+
+fixture 前置（规格 §1.2 事实 4 连带修复）：`test/helpers/fixture-db.js` 的
+message 索引集由虚构 `idx_message_session(session_id)` 换为真库三索引镜像
+（`message_session_time_created_id_idx(session_id,time_created,id)` 先建、
+`message_session_sequence_idx(session_id,sequence,time_created,id)` 后建——
+建序照真库 rootpage 11→16286 实读；sqlite_autoindex_message_1 由 TEXT 主键
+自动产生无需手建）。同批核对 tool_usage/model_usage 索引集无同族漂移：
+model_usage 建序 started_model(66)→session_turn(67) 与 fixture 一致；
+tool_usage 两 session 前导覆盖索引真库序 session_tool_call(76)→
+session_turn(78) 与 fixture 相对序一致。EQP 机检（fixture）钉在
+`test/signals.test.js`：在飞路 `SEARCH message USING INTEGER PRIMARY KEY
+(rowid>`、近窗路 `SEARCH model_usage USING INDEX
+model_usage_started_model_idx`、无基表 SCAN，18/18 绿。
+
+2026-09-25 复验（交付会话实跑）：同探针同 SQL 重跑，两路 EQP 形态逐字
+一致（路② 两档均 `SEARCH model_usage USING INDEX
+model_usage_started_model_idx (started_at>?)`、路① `SEARCH message USING
+INTEGER PRIMARY KEY (rowid>?)`，均无基表 SCAN）；计时 0.61ms（15min，29
+会话）/ 3.18ms（24h，95 会话）/ 22.41ms（路①，13 行）——会话数与计时随
+真实库活度自然变化，量级吻合。真库 rootpage 序同轮复读：message
+autoindex(10)→time_created_id(11)→sequence(16286)、model_usage
+started_model(66)→session_turn(67)、tool_usage session_tool_call(76)→
+started_tool(77)→session_turn(78)，与上文照录一致。
+

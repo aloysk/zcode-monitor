@@ -6,6 +6,7 @@ const path = require('path');
 const os = require('os');
 const dbq = require('../db');
 const modelsMeta = require('../models-meta');
+const { idleSignal, SIGNALS_WINDOW_MS } = require('../signals');
 const { clampLimit, firstParam } = require('../http-hardening');
 
 const router = express.Router();
@@ -59,6 +60,24 @@ router.get('/', (req, res) => {
     const meta = s.latest_model.model_id != null
       ? modelsMeta.resolve(s.latest_model.model_id) : null;
     s.latest_model.context_tokens = meta ? meta.context_tokens : null;
+  }
+  // C6：signal 字段合并（additive——sessionList 返回形状不动）。分类域＝页内
+  // ids（场景 (a)）；无近窗活动的会话 idle（字段存在值为 idle，缺省形状与
+  // 分类器同源——idleSignal 单一来源）。空页跳过（省两路近窗查询）。
+  if (sessions.length) {
+    const signals = dbq.sessionsWithSignals({
+      sinceMs: Date.now() - SIGNALS_WINDOW_MS,
+      sessionIds: sessions.map(s => s.id),
+    });
+    for (const s of sessions) {
+      const sig = signals.get(s.id) || idleSignal();
+      s.signal = {
+        state: sig.state,
+        confidence: sig.confidence,
+        waiting_since: sig.waiting_since,
+        reason: sig.reason,
+      };
+    }
   }
   res.json({ sessions });
 });

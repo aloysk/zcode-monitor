@@ -185,4 +185,7 @@ function createGenWatcher(dbq, { pollMs = POLL_MS } = {}) {
   };
 }
 
-module.exports = { createGenWatcher };
+// 卫生窗常量一并导出（batch2 T2）：db.js Session signals 查询族的在飞判据与
+// 本模块同窗同义，默认参数引本导出（单一来源——字面量双份定义会 drift，改窗
+// 只改这里）。导出纯 additive，零行为变更。
+module.exports = { createGenWatcher, CREATED_WINDOW_MS, UPDATED_WINDOW_MS };

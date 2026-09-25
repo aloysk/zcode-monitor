@@ -12,6 +12,8 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const Database = require('better-sqlite3');
+const livegen = require('./livegen');           // Session signals 在飞卫生窗常量（单一来源）
+const { classifySessions } = require('./signals'); // Session signals 纯分类器
 
 const DB_PATH = process.env.ZCODE_DB
   || path.join(os.homedir(), '.zcode', 'cli', 'db', 'db.sqlite');
@@ -1308,6 +1310,111 @@ function contextGaugeRows(sessionId, limit = 100) {
   return rows.reverse().map(r => ({ ...r, started_at: ts(r.started_at) }));
 }
 
+// ───────────────────────── Session signals ─────────────────────────
+// C6 会话状态信号查询族（ecosystem-round2-batch2 §2.1 需求 2）：三路取数 +
+// 一个组装，供 classifySessions（server/signals.js 纯函数）消费。会话域两形：
+// (a) sessionIds 传数组＝页内域（/api/sessions 路由）；(b) null＝全库近窗活跃
+// 域（recentModel keys 即活跃会话集，与任何行数参数无关——/api/signals/summary
+// 与 C8 notify 域，分页域会让 waiting_count 依赖 limit、语义失真）。
+//
+// 性能契约（红线 2，规格 §1.2 事实 4/5 钉死的合规形态，真实库 EQP+计时照录
+// docs/acceptance/round2-batch2-explain-timing.md）：
+//   - 在飞集合：livegen 主查询同款（rowid 尾界 + 卫生窗 + json_extract 判
+//     assistant/completed-NULL），仅 SELECT 列换 session_id。**禁 GROUP BY/
+//     DISTINCT/子查询包裹**——三种写法真库 EQP 实测全部翻转为
+//     `SCAN message USING INDEX message_session_time_created_id_idx`（索引
+//     全扫；message 无时间前导索引，时间谓词只能靠 rowid 尾界，见 livegen.js
+//     SQL 头注）；去重在 JS 侧 new Set() 完成。合规形态
+//     `SEARCH message USING INTEGER PRIMARY KEY (rowid>?)`，行数上界＝尾界
+//     判据行 ≤8000 有界。卫生窗默认参数引 livegen 导出常量（单一来源）。
+//   - 近窗最新行：INDEXED BY model_usage_started_model_idx 强制——不强制则
+//     外层 GROUP BY session_id 匹配 model_usage_session_turn_idx 最左列，
+//     planner 为省 TEMP B-TREE 改走全索引扫（真库实测 1804.8ms/次，§1.2
+//     事实 5②；强制后本路实测毫秒级）。sqlite_master 探测 + 回退记忆复用
+//     overviewKpis 机制（conn._hasStartedModelIdx 同键同义）：缺索引的库
+//     （旧版 ZCode、外部 ZCODE_DB）回退无强制形态（真库实测 1237ms/次——
+//     「慢但可用」取舍照先例接受，C6 消费频率下频繁触发的再议降频/缓存）。
+//     子查询 ORDER BY started_at DESC LIMIT @cap 截断保最新侧（无 ORDER BY
+//     时 SQLite 按索引升序返回、截断保最老行，被截会话误判 idle——异常风暴
+//     窗护栏 SIGNALS_MAX_ROWS）；外层 bare-column+MAX(rowid) 取写入序最新行
+//     的伴随列（sessionList latestModel 同款 SQLite 特性，**非 MAX(started_at)**
+//     ——晚落库长请求行 started_at 更早、rowid 更大，后者才是写入序最新）。
+//   - task_type 补齐：session 表主键 IN 寻址（sessionList 两段模式同款），
+//     ids 有界（(a) 页内 ≤500 / (b) 近窗会话集 ≤ cap）。禁止逐会话 N+1。
+const SIGNALS_MAX_ROWS = 2000;
+
+// 在飞会话集合（livegen 在飞判据的会话维度输出——livegen state() 只有全局
+// 计数，本路补齐「哪些会话在飞」）。
+function signalsInflightSessionIds(
+  { createdWindowMs = livegen.CREATED_WINDOW_MS,
+    updatedWindowMs = livegen.UPDATED_WINDOW_MS } = {},
+) {
+  const now = Date.now();
+  const rows = db().prepare(`
+    SELECT session_id
+    FROM message
+    WHERE rowid > (SELECT MAX(rowid) FROM message) - 8000
+      AND json_extract(data, '$.role') = 'assistant'
+      AND json_extract(data, '$.time.completed') IS NULL
+      AND time_created > ?
+      AND time_updated > ?
+  `).all(now - createdWindowMs, now - updatedWindowMs);
+  return new Set(rows.map(r => r.session_id));
+}
+
+// 近窗每会话最新 model 行（写入序最新＝MAX(rowid)，含 error 判据与 waiting
+// 起点所需的伴随列；rid 透出供调试对账）。
+function signalsRecentModelLatest(sinceMs, { maxRows = SIGNALS_MAX_ROWS } = {}) {
+  const conn = db();
+  if (conn._hasStartedModelIdx === undefined) {
+    conn._hasStartedModelIdx = !!conn.prepare(
+      `SELECT 1 FROM sqlite_master WHERE type='index' AND name='model_usage_started_model_idx'`
+    ).get();
+  }
+  const idxGuard = conn._hasStartedModelIdx
+    ? 'INDEXED BY model_usage_started_model_idx' : '';
+  // schema source: zai-org/ZCode MIG 0010_usage_observability（model_usage 逐行）
+  const rows = conn.prepare(`
+    SELECT session_id, status, error_type, started_at, completed_at, MAX(rowid) AS rid
+    FROM (SELECT session_id, status, error_type, started_at, completed_at, rowid
+          FROM model_usage ${idxGuard}
+          WHERE started_at >= @since
+          ORDER BY started_at DESC
+          LIMIT @cap)
+    GROUP BY session_id
+  `).all({ since: sinceMs, cap: maxRows });
+  return new Map(rows.map(r => [r.session_id, {
+    status: r.status, error_type: r.error_type,
+    started_at: r.started_at, completed_at: r.completed_at, rid: r.rid,
+  }]));
+}
+
+// 会话域 task_type 补齐（主键 IN 寻址，两段模式第二段形态）。
+function signalsSessionTypes(ids) {
+  if (!ids.length) return new Map();
+  const ph = ids.map(() => '?').join(',');
+  // schema source: zai-org/ZCode MIG 0010_usage_observability（session 表）
+  const rows = db().prepare(
+    `SELECT id, task_type FROM session WHERE id IN (${ph})`
+  ).all(...ids);
+  return new Map(rows.map(r => [r.id, { task_type: r.task_type }]));
+}
+
+// 组装：三路取数 + 纯分类器 → Map<session_id, signal>。
+// 场景 (a) 页外活跃/在飞会话也会出现在返回 Map（分类域＝三输入键并集），
+// 其 task_type 不在寻址集内——working/broken 判定不依赖 task_type 故仍准确，
+// waiting 判定仅对寻址集内会话成立；路由按 id 合并，页外条目不外泄。
+function sessionsWithSignals({ sinceMs, sessionIds = null, windowMs } = {}) {
+  const inflightSessions = signalsInflightSessionIds();
+  const recentModel = signalsRecentModelLatest(sinceMs);
+  const ids = sessionIds != null ? sessionIds : [...recentModel.keys()];
+  const sessions = signalsSessionTypes(ids);
+  return classifySessions(
+    { inflightSessions, recentModel, sessions, now: Date.now() },
+    windowMs != null ? { windowMs } : {},
+  );
+}
+
 module.exports = {
   DB_PATH, LOG_DIR, ROLLOUT_DIR,
   db, warmDb, invalidateDb,
@@ -1325,4 +1432,6 @@ module.exports = {
   usageAttributionBySession, usageAttributionByTurn,
   USAGE_CANDIDATE_CAP_ROWS, // 规模钳制口径常量（路由 meta 注明 scope 用，slow_tools_scope 先例）
   contextGaugeRows,
+  signalsInflightSessionIds, signalsRecentModelLatest, signalsSessionTypes,
+  sessionsWithSignals, SIGNALS_MAX_ROWS,
 };
