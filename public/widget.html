@@ -173,8 +173,32 @@ body.gen .tps { animation: gen-breathe 2s ease-in-out infinite alternate; }
   z-index: 10;
 }
 
+/* C8 notify 临时副行：速度数字行下方的窗体常驻副行容器（本批新增 UI 形态，
+   非 .tip 通道复用——.tip 是 hover 400ms 悬浮卡，用户不在屏幕前时不可见，
+   而 C8 用户故事恰是「不在屏幕前时提醒才有意义」）。absolute 叠加锚数字行
+   下方空带（15px 数字行居中于 28px 窗，下带贴放 8.5px 副行，ink 不相犯），
+   初始 display:none；不弹窗、不加宽窗体（胶囊单行窗左锚定+nowrap 契约
+   不动）；severity 语义色经 Spectrum 变量映射（零硬编码色值）。文本写入
+   一律 textContent（.tip 同款渲染纪律）。出现后 8s 淡出、多条只显最新。 */
+.notify-row {
+  position: absolute;
+  left: 14px;                        /* 与 .row 同左锚（数字起点不变契约） */
+  top: 17.5px;
+  font-family: var(--font-sans);
+  font-size: 8.5px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  max-width: calc(100% - 72px);      /* 右侧 sparkline 保留区不侵占 */
+  opacity: 0;
+  transition: opacity .4s ease;
+  pointer-events: none;              /* never a hit target（.spark 同款纪律） */
+}
+.notify-row.on { opacity: 1; }
+
 @media (prefers-reduced-motion: reduce) {
   body.gen .tps { animation: none; } /* breathing is ambient, not informational */
+  .notify-row { transition: none; }  /* 淡出是氛围过渡：削减动效时直切 */
 }
 </style>
 </head>
@@ -185,6 +209,7 @@ body.gen .tps { animation: gen-breathe 2s ease-in-out infinite alternate; }
     <circle id="sparkDot" r="2"></circle>
   </svg>
   <div class="tip" id="tip" hidden></div>
+  <div class="notify-row" id="notify-row"></div>
 
 <!-- 消毒模块：气泡类展示（悬浮 tip）的文本闸门，加载失败时展示点回退原文不致崩页 -->
 <script src="/sanitize.js"></script>
@@ -328,6 +353,40 @@ async function seed() {
   }
 }
 
+// ── C8 notify 消费：数字行下方临时副行 ──────────────────────────────────
+// 挂在既有 /api/live/events 连接上（addEventListener('notify')，零新连接）。
+// 降级矩阵三页统一语义（app.js notifyChannels 注释钉）：本页通道子集＝副行
+// 恒在的底线通道、不受三开关控制——胶囊窗纯视觉（提示音/系统通知/TTS 不在
+// 本页发：声音与系统通知由面板/桌宠页承载，避免多页同开重复打扰）。幂等
+// 去重双保险（服务端冷却之外）按载荷 id 有界记忆（app.js 同款、内联同语义
+// 实现——本页不引 app.js）。
+const notifySeen = new Map();
+const NOTIFY_SEEN_CAP = 200;
+function notifyDuplicate(id) {
+  if (id == null) return false;
+  if (notifySeen.has(id)) return true;
+  notifySeen.set(id, Date.now());
+  if (notifySeen.size > NOTIFY_SEEN_CAP) notifySeen.delete(notifySeen.keys().next().value);
+  return false;
+}
+const notifyRow = $('notify-row');
+let notifyTimer = 0;
+function onNotify(e) {
+  let n; try { n = JSON.parse(e.data); } catch { return; }
+  if (!n || typeof n !== 'object' || notifyDuplicate(n.id)) return;
+  // 文本一律 textContent 写入（tip.textContent 同款渲染纪律——防注入真闸门；
+  // sanitize.js 是隐私剥除闸、非 HTML 消毒器，两闸正交缺一不可）。body 含
+  // 库内字符串（会话标题等，服务端生成仍视为不可信输入）。
+  const raw = `${n.title || n.rule}：${n.body || ''}`;
+  notifyRow.textContent = window.SanitizeSpeech ? window.SanitizeSpeech.sanitizeSpeech(raw) : raw;
+  // severity→语义色经 Spectrum 变量（err=--negative / warn=--notice / ok=--positive）
+  notifyRow.style.color = n.severity === 'err' ? 'var(--negative)'
+    : n.severity === 'warn' ? 'var(--notice)' : 'var(--positive)';
+  notifyRow.classList.add('on');
+  clearTimeout(notifyTimer); // 多条只显最新一条：覆盖文本 + 重置驻留计时
+  notifyTimer = setTimeout(() => notifyRow.classList.remove('on'), 8000);
+}
+
 let bump = null;
 try {
   const es = new EventSource('/api/live/events');
@@ -344,6 +403,10 @@ try {
     clearTimeout(bump);
     bump = setTimeout(render, 200); // coalesce bursts
   });
+  // C8 notify 帧：同一连接上的第二事件类型（服务端 notify.js 规则引擎经
+  // live.js 转发）。连接失败静默——EventSource 原生重连，速度读数有 15s
+  // re-seed 兜底，副行本就是即到即显的瞬时通道（notify 即发即失、不回放）。
+  es.addEventListener('notify', onNotify);
 } catch {}
 
 // ── generation breathing + concurrent-lane badge ──

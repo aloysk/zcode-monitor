@@ -72,11 +72,37 @@
           <div class="card tight" style="overflow-x:auto"><h3 style="padding:12px 14px 0">按模型 / 请求来源</h3><table id="tbl-model"><thead></thead><tbody></tbody></table></div>
           <div class="card tight" style="overflow-x:auto"><h3 style="padding:12px 14px 0">按工具</h3><table id="tbl-tool"><thead></thead><tbody></tbody></table></div>
         </div>
+
+        <h2>提醒 <span class="sub">本地提醒通道 · 规则强度由服务端规则引擎内建</span></h2>
+        <div class="card" id="notify-card" style="max-width:560px">
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <input type="checkbox" id="notify-sound">
+              <span>提示音</span>
+              <span class="faint" style="font-size:11px">WebAudio 短提示音（内置合成，默认开）</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <input type="checkbox" id="notify-desktop">
+              <span>系统通知</span>
+              <span class="faint" style="font-size:11px">浏览器 Notification（默认关；开启时才向浏览器请求授权）</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <input type="checkbox" id="notify-tts">
+              <span>语音播报</span>
+              <span class="faint" style="font-size:11px">Web SpeechSynthesis TTS（默认关）</span>
+            </label>
+            <div class="faint" style="font-size:11px;margin-top:2px">
+              三开关与桌宠/胶囊页同源共享（localStorage），气泡类页内提醒恒在、不受开关控制；
+              alert 级提醒在系统通知关闭时的实际呈现＝提示音+气泡。
+            </div>
+          </div>
+        </div>
       </div>
     `;
 
     $('#ov-refresh').onclick = loadOverview;
     $('#ov-window').onchange = loadOverview;
+    bindNotifySettings();
     await loadOverview();
     startLive();
     refreshSnapshot();
@@ -86,6 +112,41 @@
     // re-fetch + re-render charts when the theme flips (palette changes)
     themeHandler = async () => { await loadOverview(); };
     window.addEventListener('zc-theme-changed', themeHandler);
+  }
+
+  // ── C8 通知开关设置区（视图尾部一角）─────────────────────────────────
+  // 开关读写经 window.ZC 暴露的助手（localStorage 键名/默认值单一来源在
+  // app.js，消费侧读同一 key——app.js 的 notify 消费与此处共享状态）。
+  // 系统通知授权姿态（spec §2.2 需求 4）：requestPermission 只在用户显式
+  // 开启本开关的路径可达（默认态页面加载不请求权限）；denied 后开关如实
+  // 回落、不再重弹（permission 已 denied 时点开只如实提示，不二次请求）。
+  function bindNotifySettings() {
+    const sound = $('#notify-sound'), desktop = $('#notify-desktop'), tts = $('#notify-tts');
+    if (!sound || !desktop || !tts) return;
+    const sw = window.ZC.notifySwitches ? window.ZC.notifySwitches() : null;
+    if (sw) { sound.checked = sw.sound; desktop.checked = sw.desktop; tts.checked = sw.tts; }
+    sound.onchange = () => window.ZC.setNotifySwitch('sound', sound.checked);
+    tts.onchange = () => window.ZC.setNotifySwitch('tts', tts.checked);
+    desktop.onchange = async () => {
+      if (!desktop.checked) { window.ZC.setNotifySwitch('desktop', false); return; }
+      if (typeof Notification !== 'function') {
+        desktop.checked = false; // 环境无 Notification API：如实回落，不写开
+        window.ZC.toast('此环境不支持系统通知');
+        return;
+      }
+      let perm = Notification.permission;
+      if (perm === 'default') {
+        // 全仓唯一权限请求点：用户显式开启路径（C8-4 源码契约钉——
+        // app.js/pet/widget 的通知呈现只检查已授予态，永不请求）。
+        try { perm = await Notification.requestPermission(); } catch { perm = 'denied'; }
+      }
+      if (perm === 'granted') {
+        window.ZC.setNotifySwitch('desktop', true);
+      } else {
+        desktop.checked = false; // denied/未知：如实呈现（回落），不重弹
+        window.ZC.toast('系统通知权限已被浏览器拒绝（可在站点权限设置中恢复）');
+      }
+    };
   }
 
   // ── 快照绊线卡（语义见 server/snapshot-watch.js）─────────────────
