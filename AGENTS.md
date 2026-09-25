@@ -26,8 +26,10 @@ npm test                   # node --test test/index.js（聚合入口）
    message 全表扫描 2.4s、负 LIMIT 整表物化 8.8s——均已修复，同类模式视为回归）。
    行数参数一律经 `clampLimit`/`clampAtLeast`（server/http-hardening.js）钳界。
 3. **禁止删除文件**（文件系统删除走治理通道，不直接 rm）；本仓编辑一律在
-   feature 分支 worktree 上进行（main 分支编辑被本机 hook 拦截），
-   常驻 worktree：`../zcode-monitor-plan`（node_modules 已就位）。
+   feature 分支 worktree 上进行（main 分支编辑被本机 hook 拦截）。
+   worktree `../zcode-monitor-plan` 已于 2026-09-25 移除，需要时重建：
+   `git worktree add ../zcode-monitor-plan -b <feature> main` + node_modules
+   junction 复用主仓（`mklink /J` 建链、`rmdir` 摘链——只动链接不删目标）。
 
 ## 约定
 

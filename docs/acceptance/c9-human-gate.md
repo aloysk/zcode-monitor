@@ -23,7 +23,7 @@
 ## 复现步骤（实机评审时按序执行）
 
 ```bash
-cd "F:/project/zcode-monitor-plan"
+cd "F:/project/zcode-monitor"
 node --test test/freshness.test.js        # T1 门禁：C9-1~4 全绿
 npm test                                   # 全套（收口轮跑亦可）
 PORT=7399 OPEN_BROWSER=0 npm start         # 冒烟实例（7331 若是用户在跑的实例则勿动，直接开 7331 页面评审亦可）

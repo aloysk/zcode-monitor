@@ -38,7 +38,7 @@
 ## 复现步骤（实机评审时按序执行）
 
 ```bash
-cd "F:/project/zcode-monitor-plan"
+cd "F:/project/zcode-monitor"
 node --test test/signals-view.test.js        # T3 门禁：C6-4/C6-6 十例全绿
 PORT=7399 OPEN_BROWSER=0 HOST=127.0.0.1 npm start   # 冒烟（7331 勿动）
 # 浏览器打开 http://127.0.0.1:7399/：
