@@ -38,6 +38,8 @@ const raw = require('../server/routes/raw');
 const traceRoutes = require('../server/routes/trace');
 const sessionsRoutes = require('../server/routes/sessions');
 const transcriptRoutes = require('../server/routes/transcript');
+const agentsRoutes = require('../server/routes/agents');
+const overviewRoutes = require('../server/routes/overview');
 
 test.after(() => {
   try { require('../server/db').db().close(); } catch { /* already closed */ }
@@ -515,6 +517,62 @@ test('limit/max 负值横向钳界：?limit=-1 / ?max=-1 在全部同类端点�
     assert.equal(JSON.parse(okSess.body).sessions.length, 1);
     const okConv = await get(port, '/api/sessions/s1/conversation?max=1');
     assert.equal(JSON.parse(okConv.body).messages.length, 1);
+  } finally { server.close(); }
+});
+
+// 四席全量审查第 2/3 轮（2026-09-25，SEC-R2/SEC-R3-001）：重复/bracket/对象
+// query 形态不再 500——firstParam 归一族。usage/sessions 族在各自文件已钉
+//（usage-routes SEC-安-1 / context-gauge C2-4 附），本例收口存量路由
+//（agents/transcript/trace/overview——第 2/3 轮代码席与安全席实测 500/失真
+// 实锤）与 window/limit 首值语义。
+test('重复/bracket query 形态: agents/transcript/trace/overview 不再 500（数组取首值、深层形态同缺参）', async () => {
+  const app = express();
+  app.use('/api', loopbackHostGate);
+  app.use('/api/agents', agentsRoutes);
+  app.use('/api/trace', traceRoutes);
+  app.use('/api/transcript', transcriptRoutes);
+  app.use('/api/overview', overviewRoutes);
+  const server = await listen(app);
+  try {
+    const port = server.address().port;
+    const cases = [
+      // agents project_id：重复数组取首值；bracket 对象同缺参（null → 全树）
+      '/api/agents/tree?project_id=p1&project_id=p2',
+      '/api/agents/tree?project_id[foo]=bar',
+      // transcript types：重复数组取首值（无此会话 → found:false 200；此前
+      // 数组无 .split 抛 TypeError 500）；对象形态同缺参
+      '/api/transcript/sess_x?types=a&types=b',
+      '/api/transcript/sess_x?types[foo]=bar',
+      // trace window/kind：重复取首值；对象回退缺省档
+      '/api/trace/errors?window=7d&window=all',
+      '/api/trace/errors?kind=model&kind=tool',
+      '/api/trace/errors?window[foo]=bar&kind[foo]=baz',
+      '/api/trace/slow-tools?window=7d&window=all',
+      // overview window（第 3 轮 SEC-R3-001，main 既有收口）：重复取首值、
+      // 对象回缺省档——此前数组被原样回显进响应 window 字段（形状类型漂移）
+      '/api/overview?window=7d&window=today',
+      '/api/overview?window[foo]=bar',
+    ];
+    for (const p of cases) {
+      const r = await get(port, p);
+      assert.equal(r.status, 200, `${p} 不得 500`);
+      const j = JSON.parse(r.body);
+      assert.ok(j.error === undefined, `${p} 不得是错误体`);
+    }
+    // 首值语义钉：trace/overview window 回显首值（次值不参与）
+    const w = JSON.parse((await get(port, '/api/trace/errors?window=7d&window=all')).body);
+    assert.equal(w.window, '7d', 'trace 数组取首值');
+    const ow = JSON.parse((await get(port, '/api/overview?window=7d&window=today')).body);
+    assert.equal(ow.window, '7d', 'overview 数组取首值（不得回显数组）');
+    // transcript limit 数组取首值（第 3 轮代码席收口：此前 +['5','6']→NaN→
+    // 钳 0 静默空转录）——无此会话 found:false 不受 limit 影响，形状不破即可
+    const tl = await get(port, '/api/transcript/sess_x?limit=5&limit=6');
+    assert.equal(tl.status, 200);
+    // trace lines 下界（第 3 轮安全席观察项收口）：?lines=-5 钳 1（旧形态
+    // 负数行静默空 events）
+    const ln = await get(port, '/api/trace/logs/tail?lines=-5');
+    assert.equal(ln.status, 200);
+    assert.ok(Array.isArray(JSON.parse(ln.body).events), 'lines 负值钳 1 后形状正常');
   } finally { server.close(); }
 });
 

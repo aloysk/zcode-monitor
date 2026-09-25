@@ -40,8 +40,51 @@ npm test                   # node --test test/index.js（聚合入口）
 - 遗留项唯一登记处：`docs/acceptance/residuals.md`（新遗留入册、解决销账、不删条目）。
 - 推送目标：`origin` = fork（aloysk/zcode-monitor）；`upstream` = yiyanwannian 原仓库（只读参考）。
 
-## 当前状态（2026-09-24）
+## 当前状态（2026-09-25）
 
+- batch1 四席全量审查三轮（feature/ecosystem-round2-batch1，6a6f654→22914c6→
+  f3ab96e）：代码/SQL/测试质量/安全四席并行对抗评审 × 3 轮全量覆盖（R2 起含
+  变异测试验钉，R3 四席 READY）。R1 六 MED+11 LOW：models-meta 升级为官方
+  大小写不敏感匹配语义（zcode-builtin.json modelRules 逐条回放实证；新增
+  kimi-k3/kimi-k3[1m]/GLM-5.3-highspeed 三键，值域 200k 行+逐会话最新行双域
+  勘定）；R-26 运行时修复（invalidateDb 现在显式 close 旧连接——better-sqlite3
+  close 幂等、`.open===false` 为关闭判据；连接断开分支改即时重抛原错，防死
+  stmt 重试把 503 降级成未翻译 500）；freshness 改 MAX(rowid) 行口径；
+  firstParam 归一化助手诞生。R2：firstParam 补类型守卫（数组/对象形态不再
+  500），接线 agents/transcript/trace 遗留路由；fixture 虚构索引纠正为真实库
+  镜像。R3：fixture 索引建序对齐真实库 rootpage 序（SQLite 规划器在同效覆盖
+  索引间取后建者，建序即 EQP 保真度），overview window/transcript limit/trace
+  lines 最后三个同族缺口收口。测试 294→297 全绿（两种计数口径），EQP 机检
+  16/16 镜像，R-27 登记（live.js SSE 错误载荷 e.message 透传，main 既有）。
+  UI 复验：7399 真机库四页截图（r5-*，SSE 页须 CDP 真等待——virtual-time
+  与 EventSource 死锁），mini 水位条/水位区/时间线/顶栏健康链全渲染无 NaN。
+- 生态采纳 batch1（feature/ecosystem-round2-batch1，T1-T7 七任务 + 六席终审
+  修复两轮 25+9 条）：C9 快赢（/api/health freshness + 顶栏新鲜度 chip +
+  emptyState 共享组件）→ C1/C5 同基座 L1 查询族 + /api/usage 三端点 →
+  「回合与工具」视图（窗口级回合健康度 + 工具分档，宽窗 rowid 尾界钳制
+  scope 如实申报）→「Token 归因」火焰图（嵌套 div 零图表库，两级下钻）→
+  C2 上下文水位（models-meta 静态窗口表 + context-gauge 双端组件 + 会话
+  mini 条/Context 水位区 + widget 缓存命中副行，SSE 复用不加通道）。六席
+  终审修复：usage 取数失败兜底（failCard+先置 loading）/attribution 空窗
+  明细区改隐藏/水位 live 防重叠闸改 rowid 行序（live.js 连接水位=MAX(rowid)
+  不回放，时间闸误丢同毫秒真新行）/renderContext 代际 token 防孤儿
+  EventSource/种子失败与空态区分/截断标注收敛 meta.*（turn 层省略
+  window/since）/attrLimit ±Infinity 回落/EXPLAIN 机检补两路/README·how·
+  口径册 §12·c2-human-gate 补齐。新增 8 测试文件，residuals 增 R-20～R-24。
+  评审链：规格与计划各经三席两轮对抗审查通过后定稿（aee89a9/b27ebeb）；
+  实现三席评审 + UI 视觉验证修复一轮（ec458c1；火焰图双主题/hover/下钻
+  截图 attr-smoke-*.png 三张入 acceptance）。六席终审第 2 轮 9 条：水位
+  live 行有界累积（GAUGE_LIVE_ROWS_CAP=2× 种子上限丢最旧行、增量曲线
+  maxCols 列数截断+「+k」占位——长开标签亚像素列宽与 O(n) 重渲双收口）/
+  EXPLAIN 机检排除集显式化（session 页查询显式滤出，别名形态基表 SCAN 不
+  再静默逸出）/start-detached 占口桩 teardown 三重防护（R-21 挂死形态实机
+  复现-修复-复验销账：stubDead 后到即毁 + 先 close 停收再摧毁 +
+  closeAllConnections 双路）/context-gauge 行形状钉 rid 列（rowid 闸种子侧
+  数据依赖）/turns meta.truncated 补 canonical 读法钉+HTTP true 态例/
+  README 勘正「widget/桌宠 hover 副行」（pet.html 无此面，速度轮 H-1 同族
+  文档层重现）/R-25 登记（by_error_type_truncated 过渡字段清理）。全套
+  32 测试文件门禁绿（node --test，编排脚本统一运行）；30d 档 rowid cap
+  收窄口径补入 usage-accounting.md §8 增补段。
 - 速度生成口径轮（fix/speed-ttft-caliber）：用户感知速度读数偏低实锤——旧口径分母
   含 TTFT（GLM-5.3 首等均值 6.7-8.7s、占总时长 29-39%），24h 窗读数低四成
   （51.5 → 72.6 t/s）。分母改 ΣMAX(duration−ttft, 1ms)，ttft NULL（实测 22.1%

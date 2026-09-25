@@ -33,16 +33,42 @@ CREATE TABLE model_usage (
 -- COUNT(DISTINCT session_id) 用 INDEXED BY model_usage_started_model_idx 强制
 -- 走 started_at 索引，fixture 必须提供同名索引）。
 CREATE INDEX model_usage_started_model_idx ON model_usage(started_at, provider_id, model_id);
-CREATE INDEX idx_model_usage_session ON model_usage(session_id);
+CREATE INDEX model_usage_session_turn_idx ON model_usage(session_id, turn_id);
 CREATE TABLE tool_usage (
   id TEXT PRIMARY KEY, session_id TEXT, turn_id TEXT, trace_id TEXT,
   tool_call_id TEXT, tool_name TEXT, status TEXT, started_at INTEGER,
   completed_at INTEGER, duration_ms INTEGER, side_effect_scope TEXT,
-  read_only INTEGER, approval_status TEXT, exit_code INTEGER,
+  read_only INTEGER, destructive INTEGER, time_to_first_output_ms INTEGER,
+  approval_status TEXT, exit_code INTEGER,
   output_bytes INTEGER, stderr_bytes INTEGER,
   error_type TEXT, error_code TEXT, error_message TEXT);
-CREATE INDEX idx_tool_usage_started_at ON tool_usage(started_at);
-CREATE INDEX idx_tool_usage_session ON tool_usage(session_id);
+-- destructive / time_to_first_output_ms 是官方 schema 列（zai-org/ZCode MIG
+-- 0010_usage_observability；usage-accounting.md §1），WP0 约定 fixture 随
+-- db.js 现行查询所假设列集扩列（C1 usageToolBreakdown 的 destructive 分布）。
+-- 索引名与列序对齐真实库 sqlite_master 实读（四席全量审查轮修正，2026-09-25；
+-- 第 2 轮勘误：tool_usage session 前导索引真库是 session_turn_idx(session_id,
+-- turn_id) + UNIQUE session_tool_call_idx(session_id, tool_call_id)——第一轮误拼
+-- 的 session_tool_idx(session_id, tool_name) 真库不存在）：
+--   tool_usage_started_tool_idx(started_at, tool_name) 覆盖索引、
+--   tool_usage_session_turn_idx(session_id, turn_id)、
+--   model_usage_session_turn_idx(session_id, turn_id) 复合索引（真实库
+--   usageAttributionByTurn 的 GROUP BY turn_id 免 TEMP B-TREE 即由此提供）。
+-- 对齐动机：fixture EXPLAIN 门禁只能守护 fixture 计划形态，名字/形状双漂移时
+-- 真实库 planner 翻转（加索引/ANALYZE）CI 抓不到，复合索引带来的计划差异
+-- fixture 也复现不了。UNIQUE 镜像列 tool_call_id 允许多行 NULL（fixture 种子
+-- 行常缺该列，SQLite UNIQUE 对 NULL 互不判重）。
+-- 创建序镜像真库 rootpage 序（第 3 轮 SQL 席终审实证）：SQLite 在两个等价
+-- session 前导覆盖索引间选「创建序最晚」者——真库 rootpage 是
+-- session_tool_call_idx(76) 先、session_turn_idx(78) 后，fixture 若倒序建，
+-- sessionList toolAgg 的 EQP 会选另一个等价索引（COVERING …session_turn_idx
+-- vs …session_tool_call_idx），16 条同组 EQP 对照即漂一条。UNIQUE 镜像列
+-- tool_call_id 允许多行 NULL（fixture 种子行常缺该列，SQLite UNIQUE 对 NULL
+-- 互不判重）。
+CREATE INDEX tool_usage_started_tool_idx ON tool_usage(started_at, tool_name);
+CREATE UNIQUE INDEX tool_usage_session_tool_call_idx ON tool_usage(session_id, tool_call_id);
+CREATE INDEX tool_usage_session_turn_idx ON tool_usage(session_id, turn_id);
+-- 主键 (session_id, turn_id) 镜像真实库（usage-accounting.md §1 实测记载；
+-- 真实库 sessionTurns 的 session 寻址即走其自动索引 sqlite_autoindex_）。
 CREATE TABLE turn_usage (
   turn_id TEXT, session_id TEXT, status TEXT, trace_id TEXT, user_message_id TEXT,
   started_at INTEGER, first_token_at INTEGER, completed_at INTEGER,
@@ -52,7 +78,11 @@ CREATE TABLE turn_usage (
   input_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER,
   cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER,
   computed_total_tokens INTEGER, context_exceeded INTEGER,
-  error_type TEXT, error_code TEXT);
+  error_type TEXT, error_code TEXT,
+  PRIMARY KEY (session_id, turn_id));
+-- 真实库同名索引 turn_usage_started_idx(started_at)（usage-accounting.md §1）；
+-- 本族窗口查询（usageTurnsSummary/Timeline）在真实库即命中它。
+CREATE INDEX turn_usage_started_idx ON turn_usage(started_at);
 CREATE TABLE message (
   id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER,
   time_updated INTEGER,

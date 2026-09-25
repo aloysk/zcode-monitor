@@ -30,6 +30,13 @@
 
       <h2>一次 turn 的完整流程 <span class="sub">turn → model_request → tools → model_complete</span></h2>
       <div class="er-diagram">${TURN_FLOW}</div>
+
+      <h2>数据保留窗口 <span class="sub">为什么看不到更早的数据</span></h2>
+      <div class="card">
+        <p style="font-size:13px;margin:0 0 10px;color:var(--fg-1)">ZCode 官方对用量三表（model_usage / turn_usage / tool_usage）执行 <b>30 天保留策略</b>（<code>USAGE_RETENTION_DAYS=30</code>——每次写入后删除早于 30 天的行，见 docs/usage-accounting.md §1）。本机实测（2026-09-25）：三表最早行均 ≈2026-08-25，prune 已生效；现有 model_usage 404,782 行（约 40.5 万）、turn_usage 13,776 行（约 1.4 万）、tool_usage 547,227 行（约 54.7 万）。本面板所有窗口级读数（含「回合与工具」页的 30d 档）上限即这 30 天保留窗——更早的年尺度数据无来源。</p>
+        <p style="font-size:12.5px;margin:0;color:var(--fg-2)">口径提示：官方 <code>queryTaskUsage()</code> 的 input 是<b>会话内增量</b>口径（压缩 baseline 不回扣，详见 docs/usage-accounting.md「queryTaskUsage 增量口径（C1 增补）」小节）；本面板的窗口聚合仍以 <code>SUM(computed_total_tokens)</code> 官方预计算值为准，两者是不同口径、不可混用。</p>
+        <p style="font-size:12.5px;margin:8px 0 0;color:var(--fg-2)">窗口级读数去哪看：<b>「回合与工具」</b>页按窗口看回合健康度（完成/错误/取消分布、error_type Top5、逐回合时间线）与工具分档（成功率/耗时/审批终态）；<b>「Token 归因」</b>页回答 token 和时间都去哪了——会话层火焰图（帧宽=token 份额，可下钻回合层），帧内子条按 query_source 分解；「会话 → Context」标签顶部有<b>上下文水位区</b>（占用比/逐轮增量曲线/compaction 回落摘要，随已落库请求实时推进）。</p>
+      </div>
     </div>`;
     loadConcepts();
     loadReasonExample();
@@ -73,12 +80,12 @@
         {
           h: 'context compaction（上下文压缩）',
           p: `对话太长时（接近模型上下文窗口），ZCode 自动把历史压缩成摘要，腾出空间继续。这是为什么你能跟 agent 聊很久而不爆 token。`,
-          ex: `看「会话 → Timeline/Context」里的 ⌘ compaction 行：会显示 pre/post token 数，比如 95393 → 6035`,
+          ex: `看「会话 → Timeline/Context」里的 ⌘ compaction 行：会显示 pre/post token 数，比如 95393 → 6035；Context 标签顶部的上下文水位区也有 compaction 边界竖线与「水位回落摘要」（前后占用对比）`,
         },
         {
           h: 'prompt cache（提示缓存）',
           p: `系统提示、工具定义、历史消息会被缓存，下次请求命中缓存就不重新计费。你的缓存命中率：<b style="color:var(--sev-ok)">${pct(k.tokens.cache_read, k.tokens.input)}%</b>（输入 token 里被缓存命中的比例）。这是省成本的关键。`,
-          ex: `24h 内：输入 ${fmtNum(k.tokens.input)} token，其中 ${fmtNum(k.tokens.cache_read)} 来自缓存读取`,
+          ex: `24h 内：输入 ${fmtNum(k.tokens.input)} token，其中 ${fmtNum(k.tokens.cache_read)} 来自缓存读取；桌宠/挂件 hover 卡的「缓存命中」副行显示当日命中率（缺数据显 —）`,
         },
         {
           h: 'tool 调用（工具）',

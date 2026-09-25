@@ -285,3 +285,38 @@ test('防御分支(注入式): 工具失败扫描抛错 → 只跳过扫描不�
     watcher.stop();
   }
 });
+
+// 连接换新重备（第 2 轮 SQL 席 F-3 补钉，2026-09-25）：invalidateDb 自愈后
+// db() 重开新连接（_raw 身份变化），livegen 的语句缓存须检测到并重备——
+// 绝不复活旧（已 close 的）连接上的语句。此前该分支（conn._raw !== stmtRaw）
+// 零测试覆盖：防御分支两例的 stub _raw 恒定。
+test('连接换新(注入式): db() 返回新 _raw 身份 → 语句缓存重备（invalidateDb 自愈面）', async () => {
+  const rows = [{ inflight: 0, sessions: 0 }];
+  let prepareCount = 0;
+  const mkConn = () => ({
+    prepare: () => { prepareCount++; return { get: () => rows[0] }; },
+    _raw: {}, // 每次调用产生新身份（模拟 invalidateDb 后重开的连接）
+  });
+  let conn = mkConn();
+  const stubDbq = {
+    db: () => conn,
+    latestToolRowid: () => 0,
+    recentToolRowsAfterRowid: () => [],
+  };
+  const events = [];
+  const watcher = createGenWatcher(stubDbq, { pollMs: 20 });
+  const off = watcher.onEvent(ev => events.push(ev));
+  try {
+    await waitTicks(4);
+    const before = prepareCount;
+    assert.equal(before, 1, '前置：语句已备好且身份未变时不重复备');
+    conn = mkConn(); // invalidateDb 后 db() 重开新连接
+    rows[0] = { inflight: 1, sessions: 1 };
+    assert.ok(await waitFor(() => events.some(e => e.phase === 'start'), 3000),
+      '换连接后 tick 照常取数（重备的语句可用）');
+    assert.ok(prepareCount > before, '_raw 身份变化 → 语句重备（旧连接语句不复活）');
+  } finally {
+    off();
+    watcher.stop();
+  }
+});

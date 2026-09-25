@@ -90,6 +90,19 @@ function clampAtLeast(value, fallback, max = Infinity) {
   return Number.isFinite(n) ? Math.max(0, Math.min(n, max)) : fallback;
 }
 
+// 重复 query 参数归一（四席全量审查轮，2026-09-25）：Express qs 把 `?k=a&k=b`
+// 解析成数组、`?k[foo]=bar` 解析成对象、`?k[0][]=x` 解析成嵌套数组——非字符串
+// 标量直透给 better-sqlite3 绑定会抛错落 500（实测 GET /api/usage/attribution?
+// session_id=s1&session_id=s2 → 500 internal；第 2 轮安全席又实证 bracket/
+// 对象深层形态同 500）。归一语义＝取首值（HTML 表单重复键的常见解析语义），
+// 非字符串一律回落 ''（与缺参同语义：如 attribution 的 session_id 空 → 400
+// 引导、q/task_type 空 → 不筛选；先例 routes/raw.js 的 `typeof === 'string'`
+// 守卫）。clampLimit 数值面 `+[]`/`+{}` 的 Number 化已天然安全，不经本 helper。
+function firstParam(v) {
+  if (Array.isArray(v)) v = v.length ? v[0] : '';
+  return typeof v === 'string' ? v : '';
+}
+
 // 锁竞争/连接损伤错误翻译中间件工厂（R4 修-low，自 server/index.js 内联逻辑抽出
 // 供测试挂载，行为不变）：SQLite busy/locked → 503 database_busy（可重试），
 // 连接损伤（CORRUPT/NOTADB/IOERR）→ 503 database_unavailable，均先 invalidateDb
@@ -127,4 +140,4 @@ function makeErrorTranslator({ invalidateDb } = {}) {
 }
 
 module.exports = { LOOPBACK_HOST_RE, loopbackHostGate, CSP, securityHeaders, petsStaticOptions,
-                   makeErrorTranslator, clampLimit, clampAtLeast };
+                   makeErrorTranslator, clampLimit, clampAtLeast, firstParam };

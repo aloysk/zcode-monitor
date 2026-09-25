@@ -74,8 +74,17 @@ function openDbRetrying() {
 let _raw = null;     // the underlying better-sqlite3 Database
 let _proxy = null;   // a facade whose prepare() returns retrying statements
 
-// Drop the cached connection so the next call reopens it.
-function invalidateDb() { _raw = null; _proxy = null; }
+// Drop the cached connection so the next call reopens it. The old connection
+// is closed first (R-26): dropping the reference alone leaves an orphaned
+// better-sqlite3 handle whose release depends on V8 GC finalizer timing —
+// on Windows that kept test fixtures rmSync-EPERM ~10% of runs, and in
+// production it widens the orphan-handle window on every NOTADB self-heal.
+// close() can itself throw on a damaged connection, so it stays wrapped.
+function invalidateDb() {
+  const raw = _raw;
+  _raw = null; _proxy = null;
+  if (raw) { try { raw.close(); } catch { /* already broken */ } }
+}
 
 // A prepared-statement wrapper that retries .all()/.get() on transient locks
 // and self-heals the connection on damage. Existing call sites use
@@ -87,7 +96,15 @@ function makeRetryingStatement(rawStmt) {
       try {
         return rawStmt[method](...params);
       } catch (e) {
-        if (isConnBroken(e)) { invalidateDb(); if (i < maxAttempts - 1) continue; }
+        // Connection damage (NOTADB/CORRUPT/IOERR): drop the connection —
+        // now including close() — and rethrow the ORIGINAL error. Retrying
+        // the same statement on the dead rawStmt is meaningless (the heal
+        // happens on the caller's next db().prepare, which rebinds to the
+        // reopened connection), and once invalidateDb closes the old
+        // connection a retry here would throw an untranslated
+        // "database connection is not open" TypeError, degrading the
+        // contract 503 database_unavailable to a raw 500.
+        if (isConnBroken(e)) { invalidateDb(); throw e; }
         if (isBusyErr(e) && i < maxAttempts - 1) {
           spinMs(30 * Math.pow(2, i)); // 30, 60, 120ms
           continue;
@@ -480,15 +497,30 @@ function completedSince(sinceMs) {
 // and same token caliber as overviewSpeed: output + reasoning count as
 // generated tokens; reasoning_tokens is nullable so COALESCE to 0.
 function todayUsage() {
-  // schema source: zai-org/ZCode MIG 0010_usage_observability（速度口径，见 overviewSpeed）
+  // schema source: zai-org/ZCode MIG 0010_usage_observability（速度口径见 overviewSpeed；
+  // input/cache_read 两 SUM 与 cache_hit_rate 是 C2 widget 缓存命中副行的数据面扩展）
   const r = db().prepare(`
     SELECT SUM(output_tokens + COALESCE(reasoning_tokens, 0)) AS tokens,
-           COUNT(*)                                            AS requests
+           COUNT(*)                                            AS requests,
+           SUM(input_tokens)                   AS in_tok,
+           SUM(cache_read_input_tokens)        AS cache_read
     FROM model_usage
     WHERE status = 'completed'
       AND started_at >= @since
   `).get({ since: startOfDayMs(Date.now()) });
-  return { tokens: r.tokens || 0, requests: r.requests || 0 };
+  // cache_hit_rate = cache_read/input：分母 input_tokens 官方语义已含 cache_read
+  //（Overview 区头注），照搬「input+cache_read」作分母会 ≈2 倍虚高；当日全零行日
+  //（§2.0 勘误承认存在）input=0 → null（widget 副行显「—」），禁 NaN/Infinity。
+  // 比率在响应侧算好，widget 纯渲染。
+  const input = r.in_tok || 0;
+  const cacheRead = r.cache_read || 0;
+  return {
+    tokens: r.tokens || 0,
+    requests: r.requests || 0,
+    input_tokens: input,
+    cache_read_tokens: cacheRead,
+    cache_hit_rate: input > 0 ? +((cacheRead / input)).toFixed(4) : null,
+  };
 }
 
 // boot/connect 的 SSE 水位 init 亦是 MAX(rowid)（见 recentModelRowsAfterRowid
@@ -510,8 +542,8 @@ function sessionList({ limit = 100, offset = 0, q = '', taskType = '', status = 
   // 两段查询（R3 修-medium）：原单查询的 3 个相关聚合按「排序前的全行」逐行计算
   //（真实库 17,733 会话实测热态 949ms，冷态 4.3s——同步阻塞事件循环）；改为先取
   // 页内 ≤limit 行（排序只搬 8 个基础列，16-29ms），再对页内 id 做两条索引寻址的
-  // GROUP BY 聚合（idx model_usage_session_turn/ tool_usage_session_tool 最左
-  // session_id，合计 <15ms），口径与空值语义不变（COUNT 缺行=0、SUM 缺行=null）。
+  // GROUP BY 聚合（model_usage_session_turn_idx / tool_usage_session_turn_idx
+  // 最左 session_id，合计 <15ms），口径与空值语义不变（COUNT 缺行=0、SUM 缺行=null）。
   const page = db().prepare(`
     SELECT s.id, s.title, s.task_type, s.directory,
            s.parent_id,
@@ -532,11 +564,30 @@ function sessionList({ limit = 100, offset = 0, q = '', taskType = '', status = 
     SELECT session_id, COUNT(*) AS c
     FROM tool_usage WHERE session_id IN (${ph}) GROUP BY session_id
   `).all(...ids).map(r => [r.session_id, r]));
+  // 「最新 model 行」第三聚合（C2 mini 水位条数据面，两段先例同款页内 IN 寻址）：
+  // SQLite bare-column+MAX 特性——GROUP BY session_id 且聚合含 MAX(rowid) 时，
+  // 裸列（model_id/input_tokens）确定取自该组 MAX(rowid) 所在行（SQLite 文档
+  // lang_select.html#bareagg 的特例）。取 rowid 最大行＝写入序最新行，**非
+  // MAX(input_tokens)**——后者会选「历史最大输入」而非「最近一次请求」。
+  // schema source: zai-org/ZCode MIG 0010_usage_observability
+  const latestModel = new Map(db().prepare(`
+    SELECT session_id, model_id, input_tokens, MAX(rowid) AS rid
+    FROM model_usage WHERE session_id IN (${ph}) GROUP BY session_id
+  `).all(...ids).map(r => [r.session_id, r]));
   return page.map(r => {
     const m = modelAgg.get(r.id);
     const t = toolAgg.get(r.id);
+    const lm = latestModel.get(r.id);
     return { ...r, model_calls: m ? m.c : 0, tool_calls: t ? t.c : 0,
-             total_tokens: m ? m.s : null };
+             total_tokens: m ? m.s : null,
+             // 无 model 行会话三字段均为 null 且字段存在（C2-4 钉：字段存在值为
+             // null，非缺字段）。context_tokens 由路由层经 models-meta resolve
+             // 附带（窗口值唯一通路，本层不持模型表；此处先置 null 补全形状）。
+             latest_model: {
+               model_id: lm ? lm.model_id : null,
+               input_tokens: lm ? lm.input_tokens : null,
+               context_tokens: null,
+             } };
   });
 }
 
@@ -913,6 +964,350 @@ function agentsForest({ projectId = null } = {}) {
   return { roots, total: sessions.length };
 }
 
+// ───────────────────────── Usage attribution ─────────────────────────
+// 窗口级用量归因查询族（ecosystem-round2-batch1：C1 回合/工具统计与 C5 token
+// 归因的同基座，规格 docs/specs/ecosystem-round2-batch1.md §2.1/§2.3）。
+// 口径钉：
+//   - token 一律 SUM(computed_total_tokens)（官方预计算权威值，区头注见 Overview；
+//     不自造公式）。by_query_source 同为 token 口径（火焰宽度语义：值 = 各
+//     query_source 的 token 份额，五值域 subagent/main_turn/workflow_child/
+//     compact/session_title）。
+//   - turn 侧 avg_ttft_ms 是回合健康度的窗口视角（AVG(time_to_first_token_ms)，
+//     全 NULL → null，SQLite AVG 语义不伪造 0）；与速度口径轮 model_usage 侧的
+//     avg_ttft_ms（逐请求生成速度面）互补，不重复。
+//   - tool 侧 avg_ms 仅聚合 completed 行（计划对规格 §2.1 AVG(duration_ms) 的
+//     收紧细化：错误行时长不代表健康耗时）；max_ms 仍全行（极端值含错误行）。
+//   - approval_status 只呈现值域分布（值→计数），不赋 pending 语义——该列实测
+//     只记终态（7d 窗 160,827 行 'none' + 1 行 'denied'）。
+// 性能契约（红线 2）：窗口查询全部 WHERE started_at >= @since 命中官方 started_at
+// 索引（model_usage_started_model_idx / tool_usage_started_tool_idx /
+// turn_usage_started_idx；GROUP BY 的 TEMP B-TREE 允许）；宽窗（≥8d，见下）改走
+// rowid 尾界钳制（红线允许的另一条路径）；会话内/页内寻址走
+// session 索引（sessionList db.js 两段模式先例）；行数上限经 LIMIT @probe=limit+1
+// 探针（归因 session 层单趟化后为 JS 侧截断，同义）实现诚实截断——多 1 行/会话
+// 即置 truncated 并丢弃，免额外 COUNT。真实库 EXPLAIN/计时与 30d 档规模取舍
+// 照录 docs/acceptance/round2-batch1-explain-timing.md。
+
+// 行数防御：路由层 clampLimit 是第一道（负 LIMIT = 无上限 → SQLite 整表同步
+// 物化事故形态，见 http-hardening.js 头注）；db 层对直调（测试/未来调用方）
+// 再兜底一次负值/NaN → 1，语义不变。±Infinity → 1（F-SQL-3：better-sqlite3
+// 对非有限数绑定抛错，Math.floor(+Infinity)=Infinity 会穿透既有 max/floor
+// 防线；与 http-hardening.js clampAtLeast 的 NaN/±Infinity 语义对齐）。
+function attrLimit(limit) {
+  const n = +limit;
+  return Number.isFinite(n) ? Math.max(1, Math.floor(n) || 1) : 1;
+}
+
+// 宽窗候选集钳制（slowTools 先例的移植；启用依据＝2026-09-25 真实库只读实测，
+// 数字与取舍照录 docs/acceptance/round2-batch1-explain-timing.md）：
+//   - 窗宽 ≥8d（本族 30d 档）的 tool/attribution 聚合，30d 全窗逐行回表聚合实测
+//     热态 653-820ms（冷态至 4.5s）——超 500ms 触发线，启用 rowid 尾部候选集
+//     上界：`rowid > MAX(rowid) - cap AND started_at >= @since`（隐式 rowid 尾界
+//     寻址；NOT INDEXED 钉死计划——attr 页查询不钉时 planner 会为省 GROUP BY 的
+//     TEMP B-TREE 改走 session 索引全扫，cap 形同虚设）。
+//   - <8d 窗（本族值域 24h/7d）保持 started_at 索引精确路径（7d 实测 ≤204ms
+//     在线内）；「cap=200k 下 24h/7d 结果与不钳逐字节相等」是对拍证据（强制
+//     capped 变体 vs uncapped 的 A/B，实测钉）——8d 阈值下 24h/7d 实际不可达
+//     钳制路径，见下条。副作用如实申报是调用方义务（路由 meta 注明 scope，
+//     slow_tools_scope 先例）。
+//   - 阈值是 8d 而非 7d（评审修复）：宽窄判定在此处对 Date.now() 二次求值，
+//     而 sinceMs 由路由在更早时刻算出（T1≤T2 恒真）——阈值若取 7d，7d 请求的
+//     窗宽（7d+求值延迟）恒过线、被静默尾界收窄且路由无 scope 申报（路由按
+//     window 标签只对 30d 申报）。8d＝7d 档加 1 天余量，令 7d 恒走精确路径，
+//     与 meta 申报机制同源；DB 层直调更宽的自定义窗（如 9d/10d）仍过线钳制。
+//   - turn_usage 不钳：30d 全表仅 1.4 万行、实测 116ms 冷/12ms 热，远在线内；
+//     增长触发线——30d 行数 >5 万或单查询 >300ms 时重评钳制（与 slowTools/
+//     USAGE cap 的既有治理口径对齐，无谓复杂度不提前引入）。
+const USAGE_CANDIDATE_CAP_ROWS = 200_000;
+const USAGE_CAP_WINDOW_MS = 8 * 86400_000;
+
+// C1 turn 健康度聚合 + error_type 分布 Top5（诚实截断）。
+function usageTurnsSummary(sinceMs) {
+  // schema source: zai-org/ZCode MIG 0010_usage_observability + OBS recordTurnUsageFact
+  //（窗口聚合为本仓口径；官方 queryAppUsage 无 turn 维度的跨会话窗口聚合）
+  const t = db().prepare(`
+    SELECT COUNT(*)                                    AS turns,
+           SUM(CASE WHEN status='completed' THEN 1 END) AS completed,
+           SUM(CASE WHEN status='error' THEN 1 END)     AS errors,
+           SUM(CASE WHEN status='cancelled' THEN 1 END) AS cancelled,
+           SUM(model_request_count) AS model_requests,
+           SUM(model_retry_count)   AS retries,
+           SUM(tool_error_count)    AS tool_errors,
+           AVG(time_to_first_token_ms) AS avg_ttft,
+           SUM(CASE WHEN context_exceeded=1 THEN 1 END) AS context_exceeded
+    FROM turn_usage
+    WHERE started_at >= @since
+  `).get({ since: sinceMs });
+
+  // schema source: zai-org/ZCode MIG 0010_usage_observability
+  // 分布含 '(none)'（无 error_type 的行——completed/cancelled 常态）；LIMIT 6
+  // 探针：多出第 6 名即置 truncated 并丢弃，不静默裁剪。
+  const dist = db().prepare(`
+    SELECT COALESCE(error_type, '(none)') AS type, COUNT(*) AS n
+    FROM turn_usage
+    WHERE started_at >= @since
+    GROUP BY COALESCE(error_type, '(none)')
+    ORDER BY n DESC
+    LIMIT 6
+  `).all({ since: sinceMs });
+  const truncated = dist.length > 5;
+  if (truncated) dist.length = 5;
+
+  return {
+    totals: {
+      turns: t.turns || 0,
+      completed: t.completed || 0,
+      errors: t.errors || 0,
+      cancelled: t.cancelled || 0,
+      model_requests: t.model_requests || 0,
+      retries: t.retries || 0,
+      tool_errors: t.tool_errors || 0,
+      avg_ttft_ms: t.avg_ttft != null ? Math.round(t.avg_ttft) : null,
+      context_exceeded: t.context_exceeded || 0,
+    },
+    by_error_type: dist.map(r => ({ type: r.type, count: r.n })),
+    by_error_type_truncated: truncated,
+  };
+}
+
+// C1 逐回合时间线（新→旧）。列集为规格 §2.1 需求 1 的字面清单；ORDER BY
+// started_at DESC 走 started_at 索引逆序，limit 由路由层钳界后传入。
+function usageTurnTimeline(sinceMs, limit = 100) {
+  // schema source: zai-org/ZCode MIG 0010_usage_observability + OBS recordTurnUsageFact
+  return db().prepare(`
+    SELECT turn_id, session_id, started_at, duration_ms, time_to_first_token_ms,
+           status, model_retry_count, tool_error_count, error_type,
+           context_exceeded, computed_total_tokens
+    FROM turn_usage
+    WHERE started_at >= @since
+    ORDER BY started_at DESC
+    LIMIT @limit
+  `).all({ since: sinceMs, limit: attrLimit(limit) })
+    .map(r => ({ ...r, started_at: ts(r.started_at) }));
+}
+
+// C1 工具维度分档。tool_name 为有限枚举 → 全量分组、无 limit 参数、无整表
+// 物化风险（窗口内 GROUP BY，TEMP B-TREE 允许）。read_only/destructive 固定
+// 双键分布；NULL 行计入「未标记」侧（官方 OBS 写入侧恒置布尔，NULL 只可能
+// 出现在外部 ZCODE_DB，按未标记归类不另造第三键）。approval_status 值域开放
+// → 独立 GROUP BY 组装（SQL NULL 键归 'null'，与字符串值域可区分）。
+function usageToolBreakdown(sinceMs, { candidateCapRows = USAGE_CANDIDATE_CAP_ROWS } = {}) {
+  const wide = sinceMs <= Date.now() - USAGE_CAP_WINDOW_MS;
+  const from = wide ? 'FROM tool_usage NOT INDEXED' : 'FROM tool_usage';
+  const where = wide
+    ? 'WHERE rowid > (SELECT MAX(rowid) FROM tool_usage) - @cap AND started_at >= @since'
+    : 'WHERE started_at >= @since';
+  const params = wide ? { since: sinceMs, cap: candidateCapRows } : { since: sinceMs };
+  // schema source: zai-org/ZCode MIG 0010_usage_observability + USAGE queryAppUsage(tools)
+  //（官方同款按 tool_name 分组；三分布列为 C1 增量）
+  const rows = db().prepare(`
+    SELECT tool_name,
+           COUNT(*)                                  AS calls,
+           SUM(CASE WHEN status='error' THEN 1 END)  AS errors,
+           AVG(CASE WHEN status='completed' THEN duration_ms END) AS avg_ms,
+           MAX(duration_ms)                          AS max_ms,
+           SUM(output_bytes)                         AS out_bytes,
+           SUM(CASE WHEN read_only=1   THEN 1 END)   AS ro,
+           SUM(CASE WHEN destructive=1 THEN 1 END)   AS d1
+    ${from}
+    ${where}
+    GROUP BY tool_name
+    ORDER BY calls DESC
+  `).all(params);
+  // schema source: zai-org/ZCode MIG 0010_usage_observability
+  const approvals = db().prepare(`
+    SELECT tool_name, approval_status, COUNT(*) AS n
+    ${from}
+    ${where}
+    GROUP BY tool_name, approval_status
+  `).all(params);
+  const apprByTool = new Map();
+  for (const a of approvals) {
+    if (!apprByTool.has(a.tool_name)) apprByTool.set(a.tool_name, {});
+    apprByTool.get(a.tool_name)[String(a.approval_status)] = a.n;
+  }
+  return rows.map(r => {
+    const calls = r.calls || 0;
+    const ro = r.ro || 0;
+    const d1 = r.d1 || 0;
+    return {
+      tool_name: r.tool_name,
+      calls,
+      errors: r.errors || 0,
+      success_rate: +(1 - (r.errors || 0) / calls).toFixed(4),
+      avg_ms: r.avg_ms != null ? Math.round(r.avg_ms) : null,
+      max_ms: r.max_ms != null ? r.max_ms : null,
+      output_bytes: r.out_bytes || 0,
+      read_only: { ro, rw: calls - ro },
+      destructive: { 1: d1, 0: calls - d1 },
+      approval_status: apprByTool.get(r.tool_name) || {},
+    };
+  });
+}
+
+// C5 归因 session 层：单趟分组 + JS 归并（第二轮评审 I-SQL-4 的方案 (a)）。
+// 演进史：两段式（页查询 GROUP BY session_id LIMIT+1 探截断 → 页内 id 的
+// query_source 分解）在宽窗下双尾界扫描——真实库 30d 页 270-360ms + sources
+// 200-246ms ≈ 541-605ms，持续超 500ms 触发线；改为同趟 GROUP BY
+// session_id, query_source 一次扫描（真实库实测 30d 299.3ms 冷 / 7d 189.7ms 冷
+// 回线内，探针 zcmon-i-sql-4-merge-probe.js 留 os.tmpdir()），JS 侧归并出每会话
+// 总量/分解/排序截断（30d 5187 分组行 → 4978 会话，归并 3.2ms）。分解与总量
+// 出自同一查询（I-码-3「可对账」的彻底消解——两段式曾出现行内 cap 窗值 vs
+// 全窗分解的双口径）。会话行 ORDER BY tokens DESC 与截断移入 JS：分组行数
+// 上界=候选集行数（最坏每行一组），万级分组行的归并+排序不构成长阻塞面。
+function usageAttributionBySession(sinceMs, limit = 50, { candidateCapRows = USAGE_CANDIDATE_CAP_ROWS } = {}) {
+  const lim = attrLimit(limit);
+  // 窄窗（<8d，本族 24h/7d 档）：INDEXED BY 强制 started_at 索引（overviewKpis
+  // 同款问题+同款解法，见其头注）——缺省计划会全索引扫 session 索引求
+  // GROUP BY session_id 的序（EXPLAIN 实测 SCAN model_usage USING session
+  // 前导索引——真实库即 model_usage_session_turn_idx，40 万行同形态即 2.4s 级
+  // 事件循环阻塞；fixture 镜像同索引）；
+  // 复用 overviewKpis 的连接级 sqlite_master 探测记忆与「缺索引库回退不加
+  // INDEXED BY」取舍。
+  // 宽窗（≥8d，本族 30d 档）：NOT INDEXED + rowid 尾界 cap（见分节头注）。钉子
+  // 论据改述（F-SQL-2 勘误）：现行单趟双键 GROUP BY (session_id, query_source)
+  // 形态下，去掉 NOT INDEXED 的宽窗语句 EQP 实走 SEARCH … INTEGER PRIMARY KEY
+  // (rowid>?)——「不钉即 planner 改走 session 索引全扫」是历史两段式单键
+  // GROUP BY 形态的实测（彼时 session 索引序可省 GROUP BY 的 TEMP B-TREE，
+  // SCAN model_usage USING INDEX model_usage_session_turn_idx、30d 热态 783ms），
+  // 在现行形态不复现；但窄窗同族问题（上行 INDEXED BY 的论据）是真实现行风险
+  // （unpinned 窄窗 EQP 实为 SCAN），宽窗钉死属防御性契约——防 GROUP BY 键形
+  // 态回退时 planner 再选 session 索引序、cap 失效，非对现行计划的描述。
+  const conn = db();
+  const wide = sinceMs <= Date.now() - USAGE_CAP_WINDOW_MS;
+  let idxGuard = '';
+  if (!wide) {
+    if (conn._hasStartedModelIdx === undefined) {
+      conn._hasStartedModelIdx = !!conn.prepare(
+        `SELECT 1 FROM sqlite_master WHERE type='index' AND name='model_usage_started_model_idx'`
+      ).get();
+    }
+    idxGuard = conn._hasStartedModelIdx ? 'INDEXED BY model_usage_started_model_idx' : '';
+  }
+  // schema source: zai-org/ZCode MIG 0010_usage_observability + USAGE queryAppUsage
+  //（token=SUM(computed_total_tokens) 官方预计算权威口径；query_source 列）
+  const grp = conn.prepare(`
+    SELECT session_id, query_source,
+           SUM(computed_total_tokens) AS tokens,
+           SUM(duration_ms)           AS duration_ms_sum,
+           COUNT(*)                   AS calls
+    FROM model_usage ${wide ? 'NOT INDEXED' : idxGuard}
+    WHERE ${wide ? 'rowid > (SELECT MAX(rowid) FROM model_usage) - @cap AND ' : ''}started_at >= @since
+    GROUP BY session_id, query_source
+  `).all(wide ? { since: sinceMs, cap: candidateCapRows } : { since: sinceMs });
+  // JS 归并：(session, source) 分组行 → 会话行（总量/耗时/调用数 + 分解字典；
+  // SUM 全 NULL → null，归并侧按 0 折算防 NaN 累加）。
+  const bySess = new Map();
+  for (const g of grp) {
+    let s = bySess.get(g.session_id);
+    if (!s) {
+      s = { session_id: g.session_id, tokens: 0, duration_ms_sum: 0, calls: 0, by_query_source: {} };
+      bySess.set(g.session_id, s);
+    }
+    s.tokens += g.tokens || 0;
+    s.duration_ms_sum += g.duration_ms_sum || 0;
+    s.calls += g.calls || 0;
+    // String() 与 approvals 侧同款：query_source schema 是 NOT NULL，NULL 仅
+    // 外部 ZCODE_DB 可达——显式折叠成 'null' 键（与字符串值域可区分）而非
+    // 静默依赖 JS 对象键的隐式 coercion；'__proto__' 等原型键同理属外部库
+    // 理论形态，值域假设见本分节头注。
+    const qs = String(g.query_source);
+    s.by_query_source[qs] = (s.by_query_source[qs] || 0) + (g.tokens || 0);
+  }
+  // token 降序 + 诚实截断（会话数 > limit 即 truncated——与旧 SQL LIMIT+1 探针
+  // 同义；排序移 JS 后并列 tokens 的次序由插入序稳定决定）。
+  const all = [...bySess.values()].sort((a, b) => b.tokens - a.tokens);
+  const truncated = all.length > lim;
+  if (!all.length) return { rows: [], truncated };
+  const page = truncated ? all.slice(0, lim) : all;
+
+  // 标题补齐：session 表主键寻址；缺行会话（model 行先于 session 行落库的窗口
+  // 形态）title=null 如实呈现。
+  // schema source: zai-org/ZCode MIG 0010_usage_observability（session 表）
+  const ids = page.map(r => r.session_id);
+  const ph = ids.map(() => '?').join(',');
+  const titles = new Map(db().prepare(
+    `SELECT id, title FROM session WHERE id IN (${ph})`
+  ).all(...ids).map(r => [r.id, r.title]));
+
+  return {
+    rows: page.map(r => ({
+      session_id: r.session_id,
+      title: titles.has(r.session_id) ? titles.get(r.session_id) : null,
+      tokens: r.tokens,
+      duration_ms_sum: r.duration_ms_sum,
+      calls: r.calls,
+      by_query_source: r.by_query_source,
+    })),
+    truncated,
+  };
+}
+
+// C5 归因 turn 层：会话内逐 turn 分解（session 复合索引寻址，会话内天然小
+// 集合，无窗口参数——与 session 层窗口语义解耦，规格 §2.3 level=turn 形态）。
+// model_calls=COUNT(*)（model 行数）、tool_calls=SUM(tool_call_count)
+//（model_usage 逐行携带）。含 session_title 等 side call 行（turn_id 归属该
+// turn）——与 session 层总量可对账；turn_usage 直读反而是缺 side call 的下界
+//（见 sessionTurns 头注）。
+function usageAttributionByTurn(sessionId, limit = 50) {
+  const lim = attrLimit(limit);
+  // schema source: zai-org/ZCode MIG 0010_usage_observability + USAGE queryAppUsage
+  const page = db().prepare(`
+    SELECT turn_id,
+           SUM(computed_total_tokens) AS tokens,
+           SUM(duration_ms)           AS duration_ms_sum,
+           COUNT(*)                   AS model_calls,
+           SUM(tool_call_count)       AS tool_calls
+    FROM model_usage
+    WHERE session_id = ?
+    GROUP BY turn_id
+    ORDER BY tokens DESC
+    LIMIT ?
+  `).all(sessionId, lim + 1);
+  const truncated = page.length > lim;
+  if (truncated) page.length = lim;
+  return { rows: page, truncated };
+}
+
+// ───────────────────────── Context gauge ─────────────────────────
+// C2 上下文水位查询族（ecosystem-round2-batch1 §2.2）：会话内 token 序列。
+// 口径钉（§2.0 勘误的执行义务——db 层返回原始三列，不预判回退）：
+//   - 水位分子 = 逐行 input_tokens（官方语义 input 已含 cache_read——Overview
+//     区头注；照抄上游「input+cache_read+cache_creation 累计」会 ≈2 倍虚高）；
+//     input_tokens=0 的行（error/cancelled 全零行）回退官方 fallback
+//     cache_creation+cache_read（USAGE inputSideTokensFromNormalizedUsage）。
+//     回退计算在 T7 组件纯函数做（live 行缺列形态也由那边判空），本层只返回
+//     原始三列。
+//   - query_source='compact' 行即 compaction 边界（30d 窗实测 341 行，§9-3）；
+//     边界标记 compact_boundary 由路由层判定。
+//   - 窗口值（context_tokens）不经本层——路由层经 server/models-meta.js resolve
+//     附带（未知模型 null），前端不持有模型窗口表（窗口值唯一通路）。
+// 性能（红线 2）：WHERE session_id = ? 走 session 索引（sessionTurns 同款；
+// fixture 同名镜像 model_usage_session_turn_idx），会话内小集合 + 小排序，无整表物化
+// 风险。真实库 EXPLAIN/计时照录 docs/acceptance/round2-batch1-explain-timing.md。
+function contextGaugeRows(sessionId, limit = 100) {
+  // 方向钉（本仓首次引入会话内序列 limit）：ORDER BY started_at DESC LIMIT ?
+  // 取最新端 → JS 反转为 ASC 返回。ASC+LIMIT 直取会错取会话最旧端——长会话
+  // 超 100 行常态（真实库 model_usage 40 万行），截错端则 live 水位种子停在
+  // 远古、SSE 只推 connect 后新行、中间段永久缺失。limit 由路由层 clampLimit
+  // 钳界后传入；此处 attrLimit 兜底直调（负/NaN/±Infinity → 1，Usage
+  // attribution 区的同款防线）。
+  // rowid AS rid：水位 live 防重叠闸按行序判重的种子侧锚（F-码-3/F-败-3）——
+  // SSE model 行载荷自带 rid（live.js recentModelRowsAfterRowid 同名字段），
+  // 末种子行 rid 与流内 rid 比较，消除 started_at 时间闸的同毫秒误丢/晚落库
+  // 长请求误弃。additive 列：既有消费面按字段名取值不受影响。
+  // schema source: zai-org/ZCode MIG 0010_usage_observability（model_usage 逐行）
+  const rows = db().prepare(`
+    SELECT rowid AS rid, started_at, turn_id, model_id, query_source,
+           input_tokens, cache_read_input_tokens, cache_creation_input_tokens
+    FROM model_usage
+    WHERE session_id = ?
+    ORDER BY started_at DESC
+    LIMIT ?
+  `).all(sessionId, attrLimit(limit));
+  return rows.reverse().map(r => ({ ...r, started_at: ts(r.started_at) }));
+}
+
 module.exports = {
   DB_PATH, LOG_DIR, ROLLOUT_DIR,
   db, warmDb, invalidateDb,
@@ -926,4 +1321,8 @@ module.exports = {
   recentModelRowsAfterRowid, latestModelRowid,
   recentToolRowsAfterRowid, latestToolRowid,
   agentsForest,
+  usageTurnsSummary, usageTurnTimeline, usageToolBreakdown,
+  usageAttributionBySession, usageAttributionByTurn,
+  USAGE_CANDIDATE_CAP_ROWS, // 规模钳制口径常量（路由 meta 注明 scope 用，slow_tools_scope 先例）
+  contextGaugeRows,
 };

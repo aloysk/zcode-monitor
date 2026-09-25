@@ -25,11 +25,15 @@
 ## 特性
 
 -  **实时监控** —— 模型调用数、token（输入/输出/推理/缓存）、工具调用、错误率、活跃会话；按小时趋势图；按模型 / 请求来源 / 工具的算力分布；SSE 实时推送。
--  **会话深挖** —— 左栏会话列表（搜索 / 筛选 / 排序），右栏 7 个标签：Timeline / Context / Turns / Agents / Tasks / Usage / State。
+-  **会话深挖** —— 左栏会话列表（搜索 / 筛选 / 排序，列表项带上下文水位 mini 条），右栏 7 个标签：Timeline / Context / Turns / Agents / Tasks / Usage / State。
+-  **上下文水位** —— 会话详情 Context 标签顶部水位区：占用比水位条、逐轮增量曲线（上=增长/下=回落）、compaction 边界与回落摘要，复用既有 SSE 通道随已落库请求实时推进；窗口值来自静态整理表（UI 恒标「非官方权威」，未收录模型不显百分比）。
+-  **回合与工具** —— 窗口级（24h/7d/30d，上限 30 天保留窗）回合健康度：完成/错误/取消分布、error_type Top5、逐回合时间线（TTFT/重试/context 超限）；工具分档表（成功率/成功行耗时/最大耗时/输出字节/read_only/destructive/审批终态分布）。
+-  **Token 归因** —— 「token 和时间都去哪了」：按会话聚合的火焰图（帧宽=token 份额），点击下钻回合层，帧内子条按 query_source 分解；截断与宽窗钳制如实标注（「仅前 N 项（被裁）」/scope 申报）。
 -  **子 Agent 关系树** —— 从主会话到派生子 agent 的调用树（`parent_id` 级联）。
 - ️ **错误与链路** —— 按错误类型 / 工具汇总；失败调用列表；最慢工具 Top 30；输入 `trace_id` 还原事件瀑布图。
 -  **推理可视化** —— 思考型模型的推理链单独呈现，与最终回答分开，点击展开。
 - ️ **原始数据查看器** —— 直接查任意 SQLite 表（`where` / `order` / 降序，JSON 列可展开）。
+-  **数据新鲜度恒显** —— `/api/health` freshness 双源（数据落后毫秒数 + ZCode 运行态）：顶栏「数据落后 X」chip 常驻（ok/warn/err 分色），widget（胶囊页）hover 卡含当日缓存命中率副行（桌宠页气泡走速度轮询口径，无此副行）。
 -  **双主题** —— Dark（默认）/ Light，三种切换方式。
 - 🐾 **宠物一键导入** —— Codex 格式宠物包（`pet.json + spritesheet.webp`）一键导入，导入时校验 sheet 尺寸 / 行数 / JSON 健全性并生成 NOTICE，且**按白名单复制**（只带走 pet.json / 精灵图 / NOTICE / README·LICENSE 文本，`.html`/`.svg` 等一律跳过并告警）；许可证缺失、或自报值不在已知 SPDX/惯用写法白名单的包**缺省拒绝导入**，需显式确认（CLI `--ack-unlicensed`、图鉴页确认弹窗、API `ackUnknownLicense: true`；确认后照 NOTICE 记录自报值并放行）；CLI（`node tools/import-pet.js <包目录>`）、API（`POST /api/pets/import`）与图鉴页（`pets-preview.html`）三个入口共用同一校验模块。
 - ⚡ **fs.watch 实时增强** —— 日志目录 `fs.watch` 监听 + 字节偏移增量解析，JSONL 追加即触发、大幅降低日志尾部发现延迟；watch 失败自动降级短轮询，周期偏移对账兜底，事件不丢不重。
@@ -96,7 +100,7 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
 - **Timeline** — 事件时间线（子 agent 的 transcript.jsonl 事件流）。
   把 `turn_started → model_request → model_network_status → model_streaming → model_complete → tool.call/result → turn_complete`
   映射成 wire 风格行，按分类色编码。**推理流式输出折叠成 `◆ think` 行**，点击展开。
-- **Context** — 完整对话历史（SQLite message+part）。**推理思考(reasoning)用紫色侧边块单独呈现**，与最终回答分开，点击展开看全文。
+- **Context** — 完整对话历史（SQLite message+part）。**推理思考(reasoning)用紫色侧边块单独呈现**，与最终回答分开，点击展开看全文。顶部为**上下文水位区**（占用比水位条 / 逐轮增量曲线 / compaction 回落摘要，SSE 实时推进）。
 - **Turns** — 每个 turn 的耗时横条 + token/工具统计。
 - **Agents** — 该会话派生的子 agent（profile、token、prompt）。
 - **Tasks** — TodoWrite 写入的任务清单。
@@ -117,7 +121,15 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
 
 ### 6. 运行原理 (How It Works)
 
-用**你自己机器上的真实数据**解释 ZCode 怎么工作：数据模型 ER 图、`turn → request → tool` 的完整流程、推理（reasoning）机制、上下文压缩、prompt 缓存。
+用**你自己机器上的真实数据**解释 ZCode 怎么工作：数据模型 ER 图、`turn → request → tool` 的完整流程、推理（reasoning）机制、上下文压缩、prompt 缓存、30 天数据保留窗口。
+
+### 7. 回合与工具 (Usage)
+
+窗口级（24h / 7d / 30d，上限 30 天保留窗）的回合健康度：totals 卡（回合数 / 完成 / 错误 / 取消 / 模型请求 / 工具错误 / 平均回合首等 / context 超限）、error_type Top5（截断如实标注）、逐回合时间线（耗时横条 + TTFT/重试/工具错误副行）、工具分档表（成功率 / 成功行平均耗时 / 最大耗时 / 输出字节 / read_only / destructive / 审批终态分布）。30d 档读数受 rowid 尾界钳制时 scope 如实申报。
+
+### 8. Token 归因 (Attribution)
+
+「token 和时间都去哪了」：会话层火焰图（嵌套 div 宽度布局，零图表库）——帧宽 = 该会话 token 占窗口合计的份额，帧内子条按 `query_source`（main_turn / subagent / workflow_child / compact / session_title）分解；点击帧下钻该会话的回合层，帧下 ↗ / 明细表「打开 →」直达会话详情。明细表为帧过窄时的兜底读数面；双主题经 CSS 变量重绘。
 
 ## 数据源
 
@@ -227,15 +239,17 @@ zcode-monitor/
 │   ├── pet-import.js         # 宠物包导入共享模块（校验/白名单复制/端点中间件）
 │   ├── http-hardening.js     # 安全响应头 + /api 回环 Host 闸 + 错误翻译/行数钳界工具
 │   ├── checkpoint-route.js   # /api/checkpoint 工厂（force 首部闸 + wal_active 否决）
-│   ├── health-route.js       # /api/health 工厂（连接自愈探测）
+│   ├── health-route.js       # /api/health 工厂（连接自愈探测 + 数据新鲜度 freshness）
+│   ├── models-meta.js        # 静态模型窗口表（上下文水位的数据面，resolve 精确匹配）
 │   └── routes/
 │       ├── overview.js       # 实时监控
-│       ├── sessions.js       # 会话列表 + 详情 7 端点
+│       ├── sessions.js       # 会话列表 + 详情 7 端点（+ context-gauge 水位种子）
 │       ├── transcript.js     # 事件时间线
 │       ├── trace.js          # 错误 + trace 瀑布
 │       ├── live.js           # SSE 实时推送
 │       ├── agents.js         # 子 agent 树
-│       └── raw.js            # 原始表查看器
+│       ├── raw.js            # 原始表查看器
+│       └── usage.js          # /api/usage 三端点（turns/tools/attribution）
 ├── public/
 │   ├── index.html            # 单页 shell
 │   ├── app.js                # 路由 + 辅助函数
@@ -245,9 +259,13 @@ zcode-monitor/
 │   ├── pets-preview.html     # 宠物候选预览 + 从暂存导入面板
 │   ├── pet-state.js          # 桌宠行为纯决策模块（单测面）
 │   ├── sanitize.js           # 气泡文本消毒共享模块（双端导出）
+│   ├── empty-state.js        # 共享空态组件（双端导出）
+│   ├── context-gauge.js      # 上下文水位组件（纯函数 + 渲染，双端导出）
 │   ├── pets/                 # 宠物包目录（<id>/pet.json + spritesheet.webp）
 │   └── views/                # 各标签渲染逻辑
 │       ├── overview.js
+│       ├── usage.js          # 回合与工具（窗口级回合健康度 + 工具分档）
+│       ├── attribution.js    # Token 归因火焰图
 │       ├── sessions.js       # 7 标签
 │       ├── timeline.js       # 事件时间线（含 reasoning 折叠）
 │       ├── agents.js

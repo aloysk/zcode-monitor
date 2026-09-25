@@ -3,13 +3,15 @@
 const express = require('express');
 const dbq = require('../db');
 const log = require('../log-tail');
-const { clampLimit } = require('../http-hardening');
+const { clampLimit, firstParam } = require('../http-hardening');
 
 const router = express.Router();
 
 // GET /api/trace/errors?window=24h&kind=both&limit=200
+// window/kind 经 firstParam 归一（四席全量审查第 2 轮）：数组形态此前静默
+// 落 'all' 全窗聚合（errors 端最重路径）或空结果——不是 500 但行为失真。
 router.get('/errors', (req, res) => {
-  const window = req.query.window || '24h';
+  const window = firstParam(req.query.window) || '24h';
   let sinceMs = null;
   if (window === 'today') sinceMs = dbq.startOfDayMs();
   else if (window === '24h') sinceMs = Date.now() - 24 * 3600_000;
@@ -19,7 +21,7 @@ router.get('/errors', (req, res) => {
     window,
     summary: dbq.errorSummary(sinceMs),
     items: dbq.errorsList({
-      sinceMs, kind: req.query.kind || 'both',
+      sinceMs, kind: firstParam(req.query.kind) || 'both',
       limit: clampLimit(req.query.limit, 200, 1000),
     }),
   });
@@ -27,7 +29,7 @@ router.get('/errors', (req, res) => {
 
 // GET /api/trace/slow-tools?window=24h&limit=50
 router.get('/slow-tools', (req, res) => {
-  const window = req.query.window || '24h';
+  const window = firstParam(req.query.window) || '24h';
   let sinceMs = null;
   let meta;
   if (window === 'today') sinceMs = dbq.startOfDayMs();
@@ -51,8 +53,11 @@ router.get('/slow-tools', (req, res) => {
 });
 
 // GET /api/trace/logs/tail?lines=200
+// lines 双侧钳界（第 3 轮安全席观察项收口，clampLimit 家族语义）：旧形态
+// Math.min(+lines || 200, 2000) 无下界——?lines=-5 产出负数行静默空 events；
+// 数组/对象形态经 clampLimit 的 Number 化天然回落缺省。
 router.get('/logs/tail', async (req, res) => {
-  const lines = Math.min(+req.query.lines || 200, 2000);
+  const lines = clampLimit(req.query.lines, 200, 2000);
   const events = await log.tailLog({ lines });
   res.json({ events });
 });

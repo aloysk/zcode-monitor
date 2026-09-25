@@ -6,6 +6,32 @@
           relTime, escapeHtml, shortId, statusBadge, getJSON, toast, pct, loading, errorCard } = window.ZC;
   // resolve at call time — timeline.js may load after this module
   const TL = () => window.ZC.Timeline;
+  // resolve at call time — context-gauge.js 加载于本模块之前（index.html 引入序），
+  // 但取用点防漂移（与 TL() 同款形态）
+  const ZCg = () => window.ZC.ContextGauge;
+
+  // Context 标签水位区的 live 订阅（overview.js liveEs 同款生命周期）：
+  // 切会话/重入由 renderContext/view 入口同步幂等 close（overview.js:453 先例，
+  // 杜绝孤儿 EventSource）；离开标签后容器不在 DOM 时的事件路自愈关流见
+  // startGaugeLive 守卫（model+tool 双帧触发）。
+  let gaugeEs = null;
+  // live 行软上限（F-码-8）：种子侧有意钳 100 行（contextGaugeRows 方向钉），
+  // live 行无条件累积则长开 Context 标签数小时后序列达数千行、每条新行都触发
+  // O(n) 全量重 compute 与重写——超 2× 种子上限即丢最旧 live 行（种子行永不
+  // 丢；水位/增量口径不变：丢行后 delta 基准自动退到下一保留行/末种子行）。
+  const GAUGE_LIVE_ROWS_CAP = 200;
+  // 曲线呈现列数上限（F-码-8）：种子 100 列是既有可读设计（≈8px/列@800px 标签
+  // 面板）+20 列余量；数据面由上行 200 行界住计算，呈现面再取最近 120 列
+  // （被截段在曲线左端以「+k」占位如实标示，水位条/回落摘要不受影响）。
+  const GAUGE_CURVE_MAX_COLS = 120;
+  // 代际 token（F-码-4）：renderContext 入口自增，在途取数完成后与当前值比对
+  // ——迟到的旧实例整批自弃。防跨会话取数竞态：A 在途时切到 B，B 先占
+  // gaugeEs 单槽，A 迟到若照常 startGaugeLive 会覆写槽位成孤儿连接（其自愈
+  // 守卫按 #ctx-gauge-card 查卡，B 的新卡同 id 在 DOM，守卫永不触发）。
+  let gaugeGen = 0;
+  function closeGaugeLive() {
+    if (gaugeEs) { gaugeEs.close(); gaugeEs = null; }
+  }
 
   const TABS = [
     { id: 'timeline', label: 'Timeline' },
@@ -25,6 +51,7 @@
     // args may be [sessionId] or [sessionId, tab]
     currentId = args[0] || null;
     currentTab = args[1] && TABS.some(t => t.id === args[1]) ? args[1] : 'timeline';
+    closeGaugeLive(); // 会话视图重入（含会话内 hash 跳转）：摘掉上一实例的 live 订阅
 
     $('#root').innerHTML = `
       <div class="work">
@@ -103,6 +130,17 @@
         : tt === 'workflow_child' ? '<span class="badge purple">workflow</span>'
         : tt === 'interactive' ? '<span class="badge blue">main</span>'
         : `<span class="badge dim">${escapeHtml(tt || '?')}</span>`;
+      // C2 mini 水位条（sessionList latest_model）：无 model 行会话
+      //（latest_model.model_id===null）不渲染——空数据形状钉死（C2-4 源码契约）；
+      // 未知模型（context_tokens===null）条可渲染但不显百分比（不猜窗口，
+      // 「非官方权威」标注挂 title——miniGaugeHtml 内实现）。组件缺失（加载失败）
+      // 时静默降级为不渲染——renderList 是逐键热路径且无 try/catch，装饰性元素
+      // 不得拖垮整个会话列表。
+      const lm = s.latest_model || {};
+      const cg = ZCg();
+      const mini = cg && lm.model_id != null && lm.input_tokens != null
+        ? cg.miniGaugeHtml(lm.input_tokens, lm.context_tokens)
+        : '';
       return `<div class="listitem ${s.id===currentId?'active':''}" data-id="${escapeHtml(s.id)}">
         <div class="t">${escapeHtml(s.title || '(无标题)')}</div>
         <div class="s">
@@ -110,6 +148,7 @@
           <span>${badge}</span>
           ${s.total_tokens?`<span>${fmtNum(s.total_tokens)} tok</span>`:''}
           ${s.model_calls?`<span>${fmtInt(s.model_calls)} req</span>`:''}
+          ${mini}
         </div>
       </div>`;
     }).join('');
@@ -156,13 +195,32 @@
   // ── Context tab: full conversation from message+part ──
   // Left mini-rail (one node per turn) + right conversation body.
   // Each rail node shows: status-color dot + user question summary + tool/tok/dur.
+  // 顶部为 C2 上下文水位区（live 水位条 + 逐轮增量曲线 + compaction 边界竖线 +
+  // 水位回落摘要；种子 GET /api/sessions/:id/context-gauge，live 走既有
+  // /api/live/events 的 model 行——SSE 复用不加新通道）。
   async function renderContext(id, body) {
-    const [data, turnsData] = await Promise.all([
+    closeGaugeLive(); // 切会话/重入：先同步关掉上一实例的 live 订阅（幂等）
+    const gen = ++gaugeGen; // 本实例代际：在途取数期间被更新代际超越即自弃
+    const [data, turnsData, gaugeData] = await Promise.all([
       getJSON(`/api/sessions/${id}/conversation?max=800`),
       getJSON(`/api/sessions/${id}/turns`).catch(() => ({ turns: [] })),
+      // 水位种子取数失败不折叠成空序列（F-败-2）：一切错误（含旧 schema 缺列
+      // 的 500）都曾落进「新会话无数据」空态文案——失败与空必须可区分；failed
+      // 标记传 renderGaugeSection 渲染错误卡（live 行到达后以 live 数据为准）。
+      getJSON(`/api/sessions/${id}/context-gauge?limit=100`)
+        .catch(e => { console.warn('[sessions] 水位种子取数失败', e); return { rows: [], failed: true }; }),
     ]);
+    // 迟到的旧实例自弃（F-码-4）：不覆写新实例 DOM、不 startGaugeLive（防孤儿）。
+    if (gen !== gaugeGen) return;
     const messages = data.messages || [];
-    if (!messages.length) { body.innerHTML = '<div class="empty">无对话记录</div>'; return; }
+    const seedRows = gaugeData.rows || [];
+    const seedFailed = !!gaugeData.failed;
+    const gaugeHtml = renderGaugeSection(seedRows, [], { failed: seedFailed });
+    if (!messages.length) {
+      body.innerHTML = `${gaugeHtml}<div class="empty">无对话记录</div>`;
+      startGaugeLive(id, seedRows, seedFailed); // 无消息但可能有 model 行（水位不因会话空丢live）
+      return;
+    }
 
     // Group messages into turns. Messages with no turn_id (lifecycle events:
     // model_change / compaction) are attached to the NEXT real turn, so the
@@ -247,7 +305,7 @@
         `<div class="msg" id="msg-${i}" data-turnidx="${idx}"`);
     }).join('');
 
-    body.innerHTML = `<div class="ctx-grid">
+    body.innerHTML = `${gaugeHtml}<div class="ctx-grid">
       <aside class="ctx-rail" id="ctx-rail">
         <div class="ctx-rail-tools" id="ctx-rail-tools">
           <button type="button" class="ctx-tool-btn" data-act="expand">展开全部</button>
@@ -323,6 +381,96 @@
       }, { root: scroller, rootMargin: '0px 0px -60% 0px', threshold: [0, 0.25, 0.5, 1] });
       msgEls.forEach(el => io.observe(el));
     }
+
+    startGaugeLive(id, seedRows, seedFailed);
+  }
+
+  // ── C2 上下文水位区渲染（种子 + 已到达的 live 行；纯渲染不计算——计算面在
+  // public/context-gauge.js 纯函数）──
+  function renderGaugeSection(seedRows, liveRows = [], opts = {}) {
+    const wrap = inner => `<div id="ctx-gauge-card" style="margin-bottom:12px">${inner}</div>`;
+    // 取数失败形态（F-败-2）：错误卡而非「该会话没有模型调用行」空态——
+    // 「静默给 0=失败」的降级不诚实；live 行到达后（liveRows 非空）以 live
+    // 数据为准恢复水位区（失败卡只在没有可用数据时占位）。
+    if (opts.failed && !liveRows.length) {
+      return wrap(window.ZC.emptyState('model_usage',
+        '上下文水位取数失败——稍后重进本标签或刷新重试；服务端日志有详情（常见成因：旧版 ZCode 库缺列）。'));
+    }
+    // 会话内模型切换以最新种子行为准：SSE model 行不带窗口字段（载荷无
+    // context_tokens——窗口值唯一通路是路由层 models-meta resolve），live 行
+    // 补窗取最新种子行的 context_tokens（种子全空 → null → unknown 态不猜）。
+    let win = null;
+    for (let i = seedRows.length - 1; i >= 0; i--) {
+      if (seedRows[i].context_tokens != null) { win = seedRows[i].context_tokens; break; }
+    }
+    const rows = seedRows.concat(liveRows.map(r => ({ ...r, context_tokens: win })));
+    const CG = ZCg();
+    const series = CG.computeGaugeSeries(rows);
+    const drops = CG.compactDrops(series);
+    const lvl = CG.currentLevel(series);
+    const fbCount = series.filter(p => p.fallback).length;
+
+    // 空序列（会话无 model 行且取数成功）→ 共享空态组件（C9-3 出口钉死）
+    if (!rows.length) {
+      return wrap(window.ZC.emptyState('model_usage',
+        '该会话没有模型调用行——上下文水位无数据（新会话，或行早于 30 天保留窗）。'));
+    }
+    const sub = lvl.window
+      ? `最新请求带入 ${fmtNum(lvl.molecule)} tok / 窗口 ${fmtNum(lvl.window)} tok`
+        + (lvl.fallback ? ' · 末行为回退分子（input=0，以 cache 两列估算）' : '')
+        + (lvl.unavailable ? ' · 末行分子不可得（SSE 行缺 cache 列），水位维持上一已知读数' : '')
+      : `最新请求带入 ${fmtNum(lvl.molecule)} tok · 窗口未知（未收录模型，不猜）`
+        + (lvl.unavailable ? ' · 末行分子不可得（SSE 行缺 cache 列），水位维持上一已知读数' : '');
+    return wrap(`<div class="card">
+      <h2 style="margin-bottom:4px">上下文水位
+        <span class="caliber" title="窗口值来自静态整理表（server/models-meta.js，非官方权威）：只收录已核对官方源码常量的模型，未收录模型不猜窗口、不显百分比">非官方权威</span>
+        <span class="sub">${sub}</span>
+      </h2>
+      <div class="muted" style="font-size:11.5px;margin:2px 0 8px">水位随已落库请求推进、生成中不跳动（口径：分子=input_tokens，官方语义已含 cache_read；input=0 行回退 cache 两列估算；缺 cache 列的 live 行分子不可得、不推进水位${fbCount ? `——本段含 ${fbCount} 行回退行，曲线 hover 已逐行标注` : ''}）</div>
+      ${CG.gaugeBarHtml(lvl.ratio, { title: '上下文占用 = 分子/窗口 · 档位：<60% 正常 / ≥60% 偏高 / ≥85% 逼近上限（呈现层分档，数据不因分档改变）' })}
+      <div class="sub" style="margin:12px 0 4px">逐轮增量曲线<span class="faint">（上=增长 下=回落 · 竖线=compaction 边界 · hover 看逐行分子）</span></div>
+      ${CG.deltaCurveHtml(series, { maxCols: GAUGE_CURVE_MAX_COLS })}
+      ${drops.length ? `<div class="sub" style="margin:12px 0 0">水位回落摘要<span class="faint">（compact 前后占用对比：边界行=压缩前全部上下文，后一行=压缩后首个请求）</span></div>` : ''}
+      ${CG.dropSummaryHtml(drops)}
+    </div>`);
+  }
+
+  // 水位区 live 订阅：既有 /api/live/events 的 model 行（载荷已含 input_tokens/
+  // query_source/model_id/rid——水位增量零服务端改动，C2-5 SSE 复用不加新通道）。
+  // 行在请求完成时落库，生成中不推送（UI 口径与文案一致）。
+  function startGaugeLive(id, seedRows, seedFailed = false) {
+    const liveRows = [];
+    // 防重叠闸按行序（rowid，F-码-3/F-败-3）：以末种子行 rid 为闸（种子行带
+    // rowid AS rid，SSE model 行载荷自带同名字段）——rid 更大的行才是真增量。
+    // (种子查询, SSE 连接] 间落库的行低于 live.js 连接水位（MAX(rowid)@连接时
+    // 刻）、不入流也不在种子——已知缺口登记 residuals，此处只防种子已含的行
+    // 从流里再次到达（双计污染增量曲线）。
+    const lastSeedRid = seedRows.length ? seedRows[seedRows.length - 1].rid : 0;
+    try { gaugeEs = new EventSource('/api/live/events'); }
+    catch (e) { console.warn('[sessions] 水位 live 订阅创建失败', e); return; }
+    gaugeEs.addEventListener('model', e => {
+      try {
+        // 自愈关流：水位区容器不在 DOM（已切走标签/会话/视图）——任意 model 行
+        // 到达即关（切会话的同步 close 之外的第二道防线）。
+        const card = $('#ctx-gauge-card');
+        if (!card) { closeGaugeLive(); return; }
+        const m = JSON.parse(e.data);
+        if (m.session_id !== id) return;
+        if (!ZCg().shouldAcceptLiveRow(lastSeedRid, m)) return;
+        liveRows.push(m);
+        // 有界累积（F-码-8）：超软上限丢最旧 live 行（种子基准不丢，见常量注）。
+        if (liveRows.length > GAUGE_LIVE_ROWS_CAP) {
+          liveRows.splice(0, liveRows.length - GAUGE_LIVE_ROWS_CAP);
+        }
+        card.outerHTML = renderGaugeSection(seedRows, liveRows, { failed: seedFailed });
+      } catch (err) { console.warn('[sessions] live model 帧解析失败', err); }
+    });
+    // tool 帧自愈（F-败-4）：model 帧守卫只在下一 model 帧到达时触发——纯工具
+    // 活动时段连接滞留（服务端每 1.5s 轮询照跑）；tool 帧同款守卫把空闲窗口
+    // 收窄到无任何活动的时段（单连接、重进即清，残余接受）。
+    gaugeEs.addEventListener('tool', () => {
+      if (!$('#ctx-gauge-card')) closeGaugeLive();
+    });
   }
 
   function renderMessage(m, idx) {

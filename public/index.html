@@ -36,11 +36,18 @@
       <a data-view="sessions">会话</a>
       <a data-view="agents">子 Agent</a>
       <a data-view="errors">错误与链路</a>
+      <a data-view="usage">回合与工具</a>
+      <a data-view="attribution">Token 归因</a>
       <a data-view="raw">原始数据</a>
       <a data-view="how">运行原理</a>
     </nav>
     <div class="spacer"></div>
     <div class="meta" id="topbar-meta">—</div>
+    <!-- 数据新鲜度 chip（C9：/api/health 的 freshness 对象）：常驻显示双源中
+         落后最久的读数，档位（ok/warn/err）判定全在服务端，app.js healthLoop
+         只渲染格式化与 severity 语义色（styles.css --sev-* 变量，双主题同源）。
+         hover 注明口径（行在请求完成时落库，生成中的长请求 lag 偏大属正常）。 -->
+    <div class="meta freshness" id="freshness-chip" hidden title=""></div>
     <!-- 快照绊线告警（绊线语义见 server/snapshot-watch.js）：仅 /api/snapshot
          判定 active 时显示（app.js snapshotLoop），fail-safe——接口失败不告警。
          href="#overview" 走既有 hash 路由跳到绊线卡。 -->
@@ -85,12 +92,23 @@
 </div>
 <div id="toast" class="toast" hidden></div>
 <script src="/app.js"></script>
+<!-- empty-state.js 须在 app.js 之后（app.js 末行整体重建 window.ZC 对象字面量，
+     先加载会被覆盖掉挂载）、views/*.js 之前（视图运行期取 window.ZC.emptyState）；
+     挂载责任单点：本文件 browser 分支自挂，app.js 不含挂载赋值（C9-3 契约）。 -->
+<script src="/empty-state.js"></script>
+<!-- context-gauge.js 与 empty-state.js 同层同款引入约定：app.js 之后（末行整体
+     重建 window.ZC，先加载会被覆盖）、views/*.js 之前（sessions.js 运行期取
+     window.ZC.ContextGauge）；挂载责任单点：本文件 browser 分支自挂，
+     app.js 不含挂载赋值（C2-5 契约，C9-3 对 emptyState 的同款钉法）。 -->
+<script src="/context-gauge.js"></script>
 <script src="/views/overview.js"></script>
 <script src="/views/sessions.js"></script>
 <script src="/views/timeline.js"></script>
 <script src="/views/agents.js"></script>
 <script src="/views/errors.js"></script>
 <script src="/views/raw.js"></script>
+<script src="/views/usage.js"></script>
+<script src="/views/attribution.js"></script>
 <script src="/views/how.js"></script>
 </body>
 </html>
