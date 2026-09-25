@@ -70,4 +70,14 @@ test('壳菜单互斥（Program.cs）：开吸附摘置顶并离顶置带/开置
   // ④ docked 恢复同步菜单勾（评审发现 2：docked:false 档重启后勾选态说谎，点一次空翻）
   assert.ok(/if \(b\.TryGetProperty\("docked", out var d\)\) _docked = d\.GetBoolean\(\);\s*_dockItem\.Checked = _docked;/.test(src),
     'LoadSettings 读 docked 后须同步 _dockItem.Checked（勾选态与行为不得分叉）');
+
+  // ── 三席收尾轮·测试席 32 组变异回放的 3 存活点（互斥外围 UI 状态一致性）──
+  // ⑤ pet 模式须禁用吸附菜单（ctor 用字段 _mode、ApplyMode 用参数 mode，恰两处）：
+  // 删任一处则 pet 可勾「吸附」而 ApplyDock 对 pet 短路——勾选态说谎（④同族）
+  assert.equal((src.match(/_dockItem\.Enabled = _?mode != "pet";/g) || []).length, 2,
+    '吸附菜单须在 pet 模式禁用（ctor+ApplyMode 恰两处，缺一则 pet 态可勾选而行为短路）');
+  // ⑥ _docked 初值须与 _dockItem 初始勾(Checked=true)配对——否则无设置档的
+  // 首装态菜单说「已吸附」而行为是自由胶囊
+  assert.ok(/private bool _docked = true;/.test(src),
+    '_docked 初值 true 须与菜单初始勾配对（首装态勾选态与行为不得分叉）');
 });

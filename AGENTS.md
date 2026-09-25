@@ -44,6 +44,18 @@ npm test                   # node --test test/index.js（聚合入口）
 
 ## 当前状态（2026-09-25）
 
+- 三席收尾轮（fix/three-seat-followup）：代码/测试质量/文档口径三席并行全量
+  审查一轮，3×READY 零必修——代码席：互斥三元组全路径枚举（可达终态恰三、
+  双✓不可达、CheckOnClick 时序/句柄边界/设置半解析安全/pet 组合全过），
+  server/routes/public 与五席基线一致；测试席：shell-mode-mutex 32 组语义
+  变异 29 杀（六族核心变异含顺序/语义反转/负钉全钉死），3 低危存活点补钉
+  ——⑤pet 模式禁用吸附菜单恰两处（ctor `_mode`+ApplyMode 参数 `mode`，
+  count=2 钉）⑥`_docked` 初值 true 与菜单初始勾配对；restart-route 壳侧
+  跨语言契约复验一致。文档席：AGENTS/R-41/README/交叉引用/历史数字（18GB
+  实测 18.5GB、394 直列实跑、GX-2 两依赖）逐项核对零失实，residuals 头部
+  变更日志补壳菜单互斥轮+三席轮两条 bullet（体例缺口）。CreateParams
+  「Bake both bits」注释随 TopMost 摘除勘正（纯注释零行为变更，exe 无需
+  换发）。无新增登记。直列 40 文件 394/394 双口径绿。
 - 壳菜单互斥轮（fix/dock-topmost-mutex）：用户实锤两 bug——右键菜单「吸附
   ZCode 窗口」与「始终置顶(全局)」可同时打勾（矛盾态）；从全局切吸附后置顶
   残勾，TopMost 仍真 + BindZOrder 置顶守卫短路，widget 停在顶置带浮于别的
