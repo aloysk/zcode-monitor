@@ -408,3 +408,47 @@ dashboard 与窗口级视图（overview /「回合与工具」/ token 归因）�
    AVG(duration_ms) 的收紧细化；组内无完成行 → null，不伪造 0）；`max_ms`
    全行（极端值含错误行）。测试：test/usage-queries.test.js C1-3 钉
    （Read 组错误行 50ms 进 max、avg 为 null）。
+
+
+## 13. recap 口径（C7 增补）
+
+> 任务来源：docs/specs/ecosystem-round2-batch2.md §2.3（验收 C7-1~C7-9，T6/T7）。
+> 实施位：server/db.js `── Recap dates ──` 分节 + server/routes/recap.js
+>（buildRecapPayload）+ public/views/recap.js；测试钉 test/recap.test.js（查询
+> 族/口径/路由/EQP）与 test/recap-view.test.js（视图源码契约）。How 页口径段
+> 见 public/views/how.js「active hours（活跃时长）怎么算」。
+
+1. **本地日界**：recap 日桶按服务器本地时区自然日 00:00 切分——SQL 侧
+   `(started_at + @tzMs)/86400000` 整除分桶，tz 由路由层取服务器本地偏移注入
+   （`startOfDayMs` db.js 先例；**对齐官方 queryAppUsage 的 dayIndex/
+   tzOffsetMs 维度**）。响应 meta.tz_offset_minutes 随载荷披露。
+2. **activeHours 去重口径（双档，§2.0 拍板 5）**：week/month＝事件级——
+   model_usage 行（一次模型请求＝一次活动事件）投 5 分钟桶
+   `(started_at+@tzMs)/300000`，activeMinutes＝有活动的桶数，**跨会话去重
+   （并行会话同桶只计一次）**；「N× parallel」＝桶内并行会话数的 max/avg
+   （parallel_max/parallel_avg）。事件源不用 message 表（无时间前导索引，
+   spec §1.2 事实 4）。year＝会话区间上界——session 表
+   `time_created→time_updated` 区间并集（interval union，跨 30 天窗可用），
+   **span 含挂机时间，是上界口径**（activity.caliber 字段披露档别：
+   event_5min_buckets / session_span_union）。
+3. **token 口径**：日桶与 Top focus 一律 `SUM(computed_total_tokens)`（§2
+   分支 A 官方预计算权威值）；Top focus 为行级 (session_id × 5min 桶) 聚合 +
+   JS 归并（directory 级去重桶数与 recapActivityBuckets 同口径），Top N 截断
+   只在 directory 级归并完成后。
+4. **30d 覆盖与 cap 治理**：meta.token_coverage_from＝**max(period_start,
+   now−retentionDays, cap 覆盖起点)** 三元 max 唯一诚实公式——cap 生效时月初
+   日桶先被 cap 截断而非 30d prune，「自 30 天前可读」的宣称会被 cap 先证伪；
+   cap 覆盖起点＝rowid 尾部候选集最早行 started_at（`MIN(started_at)` +
+   `rowid > MAX(rowid)−cap` 尾界形态；OFFSET 形态实机 EQP＝SCAN 是反例）。
+   month/year 档宽窗（≥USAGE_CAP_WINDOW_MS=8d）rowid cap + NOT INDEXED 钉计划
+   + meta.scope 申报，与 usage 族同治（§8 增补段 / R-22 重测触发线）。
+5. **日桶生成边界**：日桶序列自 token_coverage_from 对齐的本地自然日起生成
+   ——**coverage 之前的 period 内日期不产出桶行**（数据不可读≠零活动，不伪造
+   0 桶）；**coverage 之内无活动的日期产出真 0 桶**（tokens=0/calls=0——
+   「已知零」与「未知不伪造」的区分）。视图 sparkline 只渲染该序列、不从左邻
+   插值，与覆盖披露卡对齐。
+6. **year 档 token 类字段 null**：30d prune 外无数据源，token 类（日桶
+   tokens / top_focus / comparison）为 null 或字段不存在，不伪造 0（C9-5
+   未知值原则）；**环比仅 week 档**（§2.0 拍板 6——month/year 前一周期完整
+   数据在 30 天保留下不可保证：月末请求时上一周期必缺、月初请求时仅部分仍在
+   窗内）。
