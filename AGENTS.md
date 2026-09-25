@@ -44,6 +44,21 @@ npm test                   # node --test test/index.js（聚合入口）
 
 ## 当前状态（2026-09-25）
 
+- 壳菜单互斥轮（fix/dock-topmost-mutex）：用户实锤两 bug——右键菜单「吸附
+  ZCode 窗口」与「始终置顶(全局)」可同时打勾（矛盾态）；从全局切吸附后置顶
+  残勾，TopMost 仍真 + BindZOrder 置顶守卫短路，widget 停在顶置带浮于别的
+  应用、ZCode 转后台不消失。修复：两 Click handler 互斥化（对侧摘勾＋z 带
+  同步，吸附分支先离顶置带再 BindZOrder——顺序即行为）；新增 SetTopmostBand
+  直调 SetWindowPos(HWND_TOPMOST/HWND_NOTOPMOST)，绕开 WinForms TopMost 属性
+  （WebView2 句柄重建后属性与实窗样式漂移，等值短路会静默吞掉「离顶置带」）；
+  ctor 遗物 `TopMost = true` 摘除（与 CreateParams 注释/菜单默认态对齐）；
+  watch tick 置顶态 500ms 重断言（句柄重建掉 WS_EX_TOPMOST）；topmost 持久化
+  键（旧档缺键向后兼容）+ docked 恢复同步菜单勾。契约钉
+  test/shell-mode-mutex.test.js（源码正则形态，restart-route 壳侧先例）；
+  代码席六角度对抗核验（Win32 语义/首显回归/tick 重断言/互斥不变量遍历/
+  设置兼容/测试脆性）+ 变异测试三存活点补钉后全绿（直列 40 文件 394/394）。
+  R-41 入册：实机点选复验 human-gate + 自由 pill 一次性 z 绑无自愈（main
+  既有观察项）。
 - 五席全量审查两轮（fix/batch2-five-seat，基于 4909a97）：代码/SQL/测试/安全/
   前端视觉+文档口径五席并行 × 2 轮全量覆盖（R2 含双席独立变异复验）。R1
   2 major + 4 minor——notify 冷却「过期再发」分支变异存活（测试席实锤：改

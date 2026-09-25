@@ -6,7 +6,8 @@
 // Switching forms: right-click menu (radio items 胶囊/迷你宠物/正常桌宠) or
 // scrolling the wheel anywhere on the widget (pill → mini → pet → pill).
 // The menu also carries: next pet pack (下一只宠物 — or double-click the
-// pet), docking, global topmost, dashboard, exit. Served by the repo's node
+// pet), docking, global topmost (mutually exclusive display modes —
+// covered-together-with-ZCode vs floating above everything), dashboard, exit. Served by the repo's node
 // server on 127.0.0.1:7331. Same host pattern as ELaserFocus OperatorHost:
 // WinForms + WebView2.
 //
@@ -333,7 +334,6 @@ internal sealed class WidgetForm : Form
     {
         Program.Log("form ctor start");
         FormBorderStyle = FormBorderStyle.None;
-        TopMost = true;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
         AutoScaleMode = AutoScaleMode.None; // sizes stay in physical px (200% desktop: WebView2 renders CSS at 2x)
@@ -352,12 +352,40 @@ internal sealed class WidgetForm : Form
         _web.DefaultBackgroundColor = Color.Transparent;
         Controls.Add(_web);
 
+        // 吸附/置顶互斥（2026-09-25 实锤）：两项都是 CheckOnClick 只翻自己，
+        // 同时打勾 = 停在顶置带里跟着 ZCode 锚点跑——widget 浮在别的应用
+        // 之上，「随 ZCode 一起被盖住」的吸附语义失效（从全局切吸附后置顶
+        // 残勾即此形态）。点开任一侧都摘除对侧并同步实窗 z 带；z 带切换一律
+        // 走 SetTopmostBand 直调（WinForms TopMost 属性会因句柄重建漂移而
+        // 等值短路，静默吞掉「离开顶置带」）。
         _topMostItem.Click += (s, e) =>
         {
-            TopMost = _topMostItem.Checked;
-            if (!_topMostItem.Checked) BindZOrder();
+            if (_topMostItem.Checked)
+            {
+                _dockItem.Checked = false;
+                _docked = false; // 全局悬浮保留原位，不跟随 ZCode 锚点
+                SetTopmostBand(true);
+            }
+            else
+            {
+                SetTopmostBand(false);
+                BindZOrder();
+            }
+            SaveSettings();
         };
-        _dockItem.Click += (s, e) => { _docked = _dockItem.Checked; if (_docked) ApplyDock(); };
+        _dockItem.Click += (s, e) =>
+        {
+            if (_dockItem.Checked)
+            {
+                _topMostItem.Checked = false;
+                SetTopmostBand(false); // 先离开顶置带，否则 BindZOrder 守卫直接短路
+                _docked = true;
+                ApplyDock();
+                BindZOrder();
+            }
+            else _docked = false;
+            SaveSettings();
+        };
         // radio semantics: each click selects one form and clears the others;
         // CheckOnClick already flipped the clicked item before Click runs
         _pillFormItem.Click += (s, e) => ApplyMode("pill");
@@ -428,8 +456,11 @@ internal sealed class WidgetForm : Form
             }
             // pet forms (mini + normal) z-bind too (covered with ZCode, never
             // floats over unrelated apps); pill only while docked — a freed
-            // pill floats in its own band until global topmost is toggled on
-            if (_docked || _mode != "pill") BindZOrder();
+            // pill floats in its own band until global topmost is toggled on.
+            // topmost re-assert every tick: WebView2 window churn drops
+            // WS_EX_TOPMOST from the live handle even with the menu checked.
+            if (_topMostItem.Checked) SetTopmostBand(true);
+            else if (_docked || _mode != "pill") BindZOrder();
             // bound to ZCode's visibility too: no widget floating over the
             // desktop or other apps while ZCode is away or minimized
             bool zcodeUp = !IsIconic(_zcodeHwnd);
@@ -1082,6 +1113,19 @@ internal sealed class WidgetForm : Form
         _ = SetWindowPos(Handle, aboveZcode, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
     }
 
+    // z-band switch for the mutually-exclusive 吸附/置顶 mode pair. Direct
+    // SetWindowPos instead of the WinForms TopMost property: WebView2 handle
+    // churn drops the real window style while the property keeps reporting its
+    // old value, and the property setter's equality guard then silently
+    // swallows the transition — a swallowed HWND_NOTOPMOST is exactly the
+    // "menu says docked but the widget still floats over other apps" state.
+    private void SetTopmostBand(bool topmost)
+    {
+        const int SWP_NOSIZE = 0x0001, SWP_NOMOVE = 0x0002, SWP_NOACTIVATE = 0x0010;
+        _ = SetWindowPos(Handle, topmost ? new IntPtr(-1) /*HWND_TOPMOST*/ : new IntPtr(-2) /*HWND_NOTOPMOST*/,
+            0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+    }
+
     private void ApplyDock()
     {
         if (!_docked || _mode == "pet") return; // docking is a companion-form concept (pill + mini)
@@ -1163,6 +1207,7 @@ internal sealed class WidgetForm : Form
                 var b = doc.RootElement;
                 _pillLoc = new Point(b.GetProperty("x").GetInt32(), b.GetProperty("y").GetInt32());
                 if (b.TryGetProperty("docked", out var d)) _docked = d.GetBoolean();
+                _dockItem.Checked = _docked; // 菜单勾须与恢复的 _docked 同步，否则勾选态说谎（点一次只翻转不生效）
                 if (b.TryGetProperty("dx", out var dx)) _dx = dx.GetInt32();
                 if (b.TryGetProperty("dy", out var dy)) _dy = dy.GetInt32();
                 // migrate the two-window era: petVisible meant a separate pet
@@ -1177,6 +1222,14 @@ internal sealed class WidgetForm : Form
                     _petLoc = new Point(px.GetInt32(), py.GetInt32());
                 if (b.TryGetProperty("miniX", out var mx) && b.TryGetProperty("miniY", out var my))
                     _miniLoc = new Point(mx.GetInt32(), my.GetInt32());
+                // 全局置顶持久态（互斥的另一侧）：接管吸附；旧档无此键 → 维持
+                // docked 字段语义（吸附/自由），启动后由 watch tick 落 z 带
+                if (b.TryGetProperty("topmost", out var tm) && tm.GetBoolean())
+                {
+                    _topMostItem.Checked = true;
+                    _dockItem.Checked = false;
+                    _docked = false;
+                }
                 return;
             }
         }
@@ -1208,7 +1261,7 @@ internal sealed class WidgetForm : Form
             Point pet = _mode == "pet" ? Location : _petLoc ?? DefaultPetLocation();
             File.WriteAllText(_settingsPath, JsonSerializer.Serialize(
                 new { x = pill.X, y = pill.Y, docked = _docked, dx = _dx, dy = _dy,
-                      mode = _mode,
+                      mode = _mode, topmost = _topMostItem.Checked,
                       miniX = mini.X, miniY = mini.Y, petX = pet.X, petY = pet.Y }));
         }
         catch { /* position persistence is best-effort */ }
