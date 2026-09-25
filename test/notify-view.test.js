@@ -228,6 +228,12 @@ test('C8-5: pet 气泡与 widget 副行文本写入点均为 textContent；无 i
   // app.js 通知面走 toast()（textContent 写入，app.js:90-94 既有形态）
   assert.ok(segs.app.includes('toast(`${n.title || n.rule}：${n.body || \'\'}`'),
     'index 通知面 toast() 基底在案');
+  // app.js（index 页）三出口共用的入口单次消毒闸（五席第 1 轮补：三页隐私
+  // 姿态对称，pet/widget 已过闸）+ index.html 引入 sanitize.js（模块可达）。
+  assert.ok(segs.app.includes('window.SanitizeSpeech ? window.SanitizeSpeech.sanitizeSpeech'),
+    'index 通知面 body 入口消毒闸在案（presentNotify 单次过闸）');
+  assert.ok(readPublic('index.html').includes('<script src="/sanitize.js"></script>'),
+    'index.html 引入 sanitize.js（消毒模块在 index 页可达）');
 });
 
 // ── C8-5：幂等去重双保险（服务端冷却之外，三页同款有界记忆）───────────────

@@ -182,6 +182,16 @@ test('C6-1 注入面: windowMs 小值生效；waiting_since 的 NULL 边界（co
     { windowMs: 5 * MIN },
   );
   assert.equal(out.get('sG').state, 'idle', 'SIGNALS_WINDOW_MS 可注入小值可测');
+  // 窗龄恰等 windowMs 判在窗内（fresh 的 <= 语义钉，五席第 1 轮恰等边界补：
+  // 6min 行+5min 窗与 2min 行+15min 缺省窗均不触及等值点）
+  const outEq = classifySessions(
+    mkIn({ recentModel: new Map([['sEq', {
+      status: 'error', error_type: 'x',
+      started_at: N - 5 * MIN, completed_at: null, rid: 3 }]]),
+      sessions: new Map([['sEq', { task_type: 'interactive' }]]) }),
+    { windowMs: 5 * MIN },
+  );
+  assert.equal(outEq.get('sEq').state, 'broken', '窗龄恰等 windowMs 仍判新鲜（error → broken）');
   // NULL 边界：completed 行 completed_at=NULL → waiting_since=null（不参与聚合）
   const out2 = classifySessions(mkIn({
     recentModel: new Map([['sH', {
@@ -535,4 +545,28 @@ test('fixture 索引镜像契约: message 三索引与真实库 sqlite_master �
   assert.deepEqual(seq.map(r => r.name),
     ['message_session_time_created_id_idx', 'message_session_sequence_idx'],
     '创建序照真库 rootpage 序');
+});
+
+// ── signalsSessionTypes 变长 IN 分块（五席第 1 轮 note：场景 (b) 全库近窗域
+// ≤SIGNALS_MAX_ROWS=2000，不分块时单语句可 >500 占位——notify.js
+// sessionTitles 同款分块纪律镜像）。置于文件尾：本用例新增 1200 个 session 行，
+// 早段的 /api/sessions 精确计数断言（恰 10 行）须先跑。 ──────────────────────
+test('C6-2 signalsSessionTypes 分块: >500 id 跨块寻址全量返回（IN_CHUNK=500）', () => {
+  const ids = Array.from({ length: 1200 }, (_, i) => 'chunk' + i);
+  // 种子包事务：1200 行逐条自动提交的 fsync 代价 ~6s、包裹后毫秒级
+  //（zcode-runtime.test.js 的 BEGIN/COMMIT 直用先例；本钉对象是分块读取，
+  // 写入路径不属断言面）。
+  fx.conn.exec('BEGIN');
+  try {
+    buildSession(fx.conn, ids.map((id) => ({
+      id, title: id, task_type: 'interactive', directory: 'F:/demo',
+      time_created: T(30), time_updated: T(1),
+    })));
+  } finally { fx.conn.exec('COMMIT'); }
+  const m = dbq.signalsSessionTypes(ids);
+  assert.equal(m.size, 1200, '1200 id 跨 3 块全量返回');
+  assert.equal(m.get('chunk0').task_type, 'interactive', '首块首行');
+  assert.equal(m.get('chunk499').task_type, 'interactive', '首块尾行（块边界内一侧）');
+  assert.equal(m.get('chunk500').task_type, 'interactive', '第二块首行（块边界外一侧）');
+  assert.equal(m.get('chunk1199').task_type, 'interactive', '末块尾行');
 });

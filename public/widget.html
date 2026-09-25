@@ -378,7 +378,10 @@ function onNotify(e) {
   // sanitize.js 是隐私剥除闸、非 HTML 消毒器，两闸正交缺一不可）。body 含
   // 库内字符串（会话标题等，服务端生成仍视为不可信输入）。
   const raw = `${n.title || n.rule}：${n.body || ''}`;
-  notifyRow.textContent = window.SanitizeSpeech ? window.SanitizeSpeech.sanitizeSpeech(raw) : raw;
+  const clean = window.SanitizeSpeech ? window.SanitizeSpeech.sanitizeSpeech(raw) : raw;
+  // 80 字符省略号截断（与 pet.html 气泡同款——服务端已钳标题，这里收口合成行；
+  // CSS overflow:hidden 只能硬切无省略号，可读性残缺口）。
+  notifyRow.textContent = clean.length > 80 ? clean.slice(0, 79) + '…' : clean;
   // severity→语义色经 Spectrum 变量（err=--negative / warn=--notice / ok=--positive）
   notifyRow.style.color = n.severity === 'err' ? 'var(--negative)'
     : n.severity === 'warn' ? 'var(--notice)' : 'var(--positive)';

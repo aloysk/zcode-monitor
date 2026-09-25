@@ -75,3 +75,29 @@ test('契约: batch2 前端文件零外联资源（R8-2——recap/sessions 并�
     assert.ok(!/https?:\/\/(?!127\.0\.0\.1|localhost)/.test(src), `${f} 不得含非回环 http(s) 链接`);
   }
 });
+
+// 5) R-40（五席审查第 1 轮修复）：syncThemeIcon 的 SVG 显隐必须走 content
+//    attribute 翻转——hidden IDL 属性仅在 HTMLElement 反射，SVGElement 上
+//    裸赋值只写 expando，CSS [hidden] 永不命中（月亮双主题常显事故形态）。
+//    源码契约钉四分支 attribute 形态 + 禁 IDL 赋值。
+test('契约: app.js syncThemeIcon 用 content attribute 翻转 SVG 显隐（R-40）', () => {
+  const src = readPublic('app.js');
+  const m = /function syncThemeIcon\(theme\) \{[\s\S]*?\n\}/.exec(src);
+  assert.ok(m !== null, 'syncThemeIcon 函数须在案');
+  const body = m[0];
+  assert.ok(body.includes("moon.removeAttribute('hidden')"), '月亮显示分支须 removeAttribute');
+  assert.ok(body.includes("moon.setAttribute('hidden', '')"), '月亮隐藏分支须 setAttribute');
+  assert.ok(body.includes("sun.setAttribute('hidden', '')"), '太阳隐藏分支须 setAttribute');
+  assert.ok(body.includes("sun.removeAttribute('hidden')"), '太阳显示分支须 removeAttribute');
+  assert.ok(!/\.hidden\s*=/.test(body), 'SVG 显隐禁用 IDL 赋值（SVGElement 上不反射 content attribute，R-40 事故形态）');
+});
+
+// 6) R-40 同族（五席第 2 轮代码席 F-1）：checkpoint 按钮 busy 态的 iconSvg
+//    是 SVGElement，显隐同样必须 attribute 翻转；busy 是 span（HTMLElement）
+//    不受限。
+test('契约: app.js checkpoint busy 态 SVG 显隐走 attribute（R-40 同族）', () => {
+  const src = readPublic('app.js');
+  assert.ok(src.includes("iconSvg.setAttribute('hidden', '')"), 'busy 进入分支须 setAttribute');
+  assert.ok(src.includes("iconSvg.removeAttribute('hidden')"), 'busy 退出分支须 removeAttribute');
+  assert.ok(!/iconSvg\.hidden\s*=/.test(src), 'iconSvg（SVG）禁用 IDL 赋值（R-40 同族事故形态）');
+});

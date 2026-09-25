@@ -102,6 +102,10 @@
   <main id="root"></main>
 </div>
 <div id="toast" class="toast" hidden></div>
+<!-- sanitize.js：通知 body 消毒闸（app.js presentNotify 入口单次过闸，三页
+     隐私姿态与 pet/widget 对称）。经典脚本自挂 window.SanitizeSpeech 全局
+     （不碰 window.ZC，无 app.js 末行重建对象的加载序约束）。 -->
+<script src="/sanitize.js"></script>
 <script src="/app.js"></script>
 <!-- empty-state.js 须在 app.js 之后（app.js 末行整体重建 window.ZC 对象字面量，
      先加载会被覆盖掉挂载）、views/*.js 之前（视图运行期取 window.ZC.emptyState）；

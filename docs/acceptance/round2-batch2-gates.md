@@ -21,7 +21,8 @@
 
 ## 7399 冒烟与取证
 
-- 终审修复轮 UI 复验：`PORT=7399 OPEN_BROWSER=0 HOST=127.0.0.1 node server/index.js` 起服（真库只读；起服前后 netstat 双检净），补拍 12 帧入本目录（c8-widget-subrow、c8-index-toast-{dark,light}、c8-notify-settings-{dark,light}、c6-waiting-chip、batch2-v3-sessions-waiting-{dark,light}、batch2-v3-recap-{month,year}-{dark,light}、batch2-v3-recap-fail-dark；其中 waiting 帧用真库真实 waiting 会话直拍）；复验收官后停服并复查端口净（`netstat -ano | grep 7399` 0 命中）。
+- 终审修复轮 UI 复验：`PORT=7399 OPEN_BROWSER=0 HOST=127.0.0.1 node server/index.js` 起服（真库只读；起服前后 netstat 双检净），补拍 13 帧入本目录（c8-widget-subrow、c8-index-toast-{dark,light}、c8-notify-settings-{dark,light}、c6-waiting-chip、batch2-v3-sessions-waiting-{dark,light}、batch2-v3-recap-{month,year}-{dark,light}、batch2-v3-recap-fail-dark；其中 waiting 帧用真库真实 waiting 会话直拍）；复验收官后停服并复查端口净（`netstat -ano | grep 7399` 0 命中）。原记「12 帧」系计数笔误（枚举即 13 个文件名，2026-09-25 五席一轮勘正）。
+- 五席审查第 1 轮视觉重拍/补拍（2026-09-25，同款 7399 起服 + CDP 纪律）：`c8-index-toast-{dark,light}-v2.png` 重拍入位（原两帧主题错位——light 帧实拍于深色态、dark 帧缺 toast；根因与本轮方法见 c8-human-gate.md 勘误注，旧帧已 mv 隔离至 Desktop 清理目录）；新增 `batch2-v3-recap-month-coverage-light.png`（1440×1400 加高视口，覆盖披露卡入镜——R-39 C7-9 复核面补强）。
 - 拍摄方法披露：widget 副行/toast/设置面板帧经 onNotify/presentNotify + MessageEvent 驱动（真实渲染代码路径，服务端事件源以驱动样例替代——R-30 无回放边界的测试面等价物）；recap 失败帧经 page.route abort 驱动 failCard 真路径；数据帧（sessions/recap month/year）全真实。
 - 早期实施轮冒烟端口 7393/7396 的偏差注记见 round2-batch2-explain-timing.md §T8 头注。
-- AI 目检（analyze_image 抽查）两形态故障如实记录：终审席会话 429 限流；修复轮会话 400（Read 上传链路把绝对路径嵌入 URL，4_5v 解析失败）——目检未完成，留人工看图（c6/c7/c8-human-gate.md 各自留痕）。
+- AI 目检（analyze_image 抽查）两形态故障如实记录：终审席会话 429 限流；修复轮会话 400（Read 上传链路把绝对路径嵌入 URL，4_5v 解析失败）——上轮目检未完成，留人工看图（c6/c7/c8-human-gate.md 各自留痕）。五席一轮（2026-09-25）目检已走通：429 限流经等待重试后全过，v2 toast 双帧 + recap 覆盖帧共 3 帧读图核验（主题/文案/配色/无乱码 NaN）完成，结论入 c8-human-gate.md 勘误注与本目录各帧。

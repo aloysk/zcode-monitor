@@ -1395,15 +1395,23 @@ function signalsRecentModelLatest(sinceMs, { maxRows = SIGNALS_MAX_ROWS } = {}) 
   }]));
 }
 
-// 会话域 task_type 补齐（主键 IN 寻址，两段模式第二段形态）。
+// 会话域 task_type 补齐（主键 IN 寻址，两段模式第二段形态）。变长 IN 按
+// SIGNALS_IN_CHUNK=500 分块（notify.js sessionTokenSums/sessionTitles 同款
+// 循环与注释纪律——场景 (b) 全库近窗域 ≤SIGNALS_MAX_ROWS=2000 → ≤4 块，防
+// 超长语句形态；场景 (a) 页内 ≤500 恒单块）。
+const SIGNALS_IN_CHUNK = 500;
 function signalsSessionTypes(ids) {
-  if (!ids.length) return new Map();
-  const ph = ids.map(() => '?').join(',');
-  // schema source: zai-org/ZCode MIG 0010_usage_observability（session 表）
-  const rows = db().prepare(
-    `SELECT id, task_type FROM session WHERE id IN (${ph})`
-  ).all(...ids);
-  return new Map(rows.map(r => [r.id, { task_type: r.task_type }]));
+  const out = new Map();
+  for (let i = 0; i < ids.length; i += SIGNALS_IN_CHUNK) {
+    const chunk = ids.slice(i, i + SIGNALS_IN_CHUNK);
+    const ph = chunk.map(() => '?').join(',');
+    // schema source: zai-org/ZCode MIG 0010_usage_observability（session 表）
+    const rows = db().prepare(
+      `SELECT id, task_type FROM session WHERE id IN (${ph})`
+    ).all(...chunk);
+    for (const r of rows) out.set(r.id, { task_type: r.task_type });
+  }
+  return out;
 }
 
 // 组装：三路取数 + 纯分类器 → Map<session_id, signal>。

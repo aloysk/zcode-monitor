@@ -96,6 +96,7 @@ test('C8-1 waiting_timeout: 持续=now−waiting_since ≥5min 触发、不足�
   assert.equal(fire[0].severity, 'warn');
   assert.equal(fire[0].intensity, 'alert');
   assert.equal(mk(N - 4 * MIN).length, 0, '4min 不足 5min 不触发');
+  assert.equal(mk(N - 5 * MIN).length, 1, '5min 恰等边界触发（durMs >= timeoutMs 语义钉）');
   // waiting_since=null 边界：不参与时长判定（NaN 防护，数据层滤后纯函数侧再守）
   assert.equal(evaluateRules({
     waitingSessions: [{ session_id: 'w2', waiting_since: null }], now: N,
@@ -142,6 +143,37 @@ test('C8-1 inactive: 无新行 ≥30min 且 24h 窗曾有活动触发；其余�
   assert.equal(mk(N - 40 * MIN, false).length, 0, '24h 窗无活动（如空库/静默库）不触发');
   assert.equal(mk(N - 20 * MIN, true).length, 0, '20min 不足 30min 不触发');
   assert.equal(mk(null, true).length, 0, '空表（无 model 行）不触发');
+});
+
+// titleOf 会话标题钳 80（五席第 1 轮 note：pet.html:642 气泡 80 字符防御的
+// 服务端单点收口——超长标题在载荷源头截断，三消费页拿到的已是钳后文本）。
+test('C8-1 titleOf 钳 80: 会话标题超长截断为 79 字符+省略号', () => {
+  const long = '长'.repeat(120);
+  const on = { rules: { ...RULE_DEFAULTS,
+    waiting_timeout: { ...RULE_DEFAULTS.waiting_timeout, enabled: true } } };
+  const fire = evaluateRules({
+    waitingSessions: [{ session_id: 'w1', waiting_since: N - 6 * MIN }],
+    titles: new Map([['w1', long]]),
+    now: N,
+  }, on);
+  assert.equal(fire.length, 1);
+  assert.ok(fire[0].body.includes('长'.repeat(79) + '…'), '截断为 79 字符+省略号');
+  assert.ok(!fire[0].body.includes(long), '完整超长标题不上线');
+});
+
+// 五席第 2 轮 N-3：恰 80 边界——`> 80` 才截，恰等保原长（杀 `>=` 变异）。
+test('C8-1 titleOf 恰 80 不截断: 边界值保原长', () => {
+  const exact = '长'.repeat(80);
+  const on = { rules: { ...RULE_DEFAULTS,
+    waiting_timeout: { ...RULE_DEFAULTS.waiting_timeout, enabled: true } } };
+  const fire = evaluateRules({
+    waitingSessions: [{ session_id: 'w1', waiting_since: N - 6 * MIN }],
+    titles: new Map([['w1', exact]]),
+    now: N,
+  }, on);
+  assert.equal(fire.length, 1);
+  assert.ok(fire[0].body.includes(exact), '恰 80 保原长');
+  assert.ok(!fire[0].body.includes('…'), '恰 80 不得加省略号');
 });
 
 test('C8-1 无状态钉: 注入两次相同输入，条件评估结果一致', () => {
@@ -256,6 +288,66 @@ test('C8-2 error_burst 全局冷却: 同条件第二次 tick 不再发', () => {
     assert.equal(sent.filter(p => p.rule === 'error_burst').length, 1);
     engine.tick(); // 同数据二次评估：条件仍成立，冷却拦发送
     assert.equal(sent.filter(p => p.rule === 'error_burst').length, 1, '10min 全局冷却窗内不重发');
+  } finally { engine.stop(); }
+});
+
+// 冷却「过期再发」分支（五席第 1 轮变异实锤：把冷却改成「发送过即永续」全套
+// 绿——既有用例只钉「窗内拦发」，过期路径零覆盖）。nowFn 拨针确定性驱动：
+// 首 tick 发送 → 时钟前进恰 cooldownMs（t−last < cooldownMs 为假的最锐边界）
+// → 同条件重发 → 重发即重置冷却（下一 tick 再拦）。windowMs 注入 30min 使
+// 两次 tick 的窗都含种子行（冷却语义是本钉对象，窗参数正交放大以简化种子）。
+test('C8-2 error_burst 冷却过期: 注入时钟前进恰 cooldownMs 后同条件重发', () => {
+  wipe();
+  const t0 = Date.now();
+  buildModelUsage(fx.conn, Array.from({ length: 3 }, (_, i) => ({
+    id: 'cx' + i, session_id: 'cx1', turn_id: 'e' + i, status: 'error',
+    started_at: t0 - 60e3, completed_at: t0 - 59e3, duration_ms: 1000,
+    query_source: 'main_turn', model_id: 'glm-5', error_type: 'api_error',
+  })));
+  const bus = new EventEmitter();
+  const sent = [];
+  bus.on('notify', p => sent.push(p));
+  let clock = t0;
+  const engine = makeNotifyEngine({ dbq, bus, tickMs: 1e9, nowFn: () => clock,
+    rules: { error_burst: { windowMs: 30 * MIN } } });
+  try {
+    engine.tick();
+    assert.equal(sent.length, 1, '首 tick 发送');
+    clock += 10 * MIN;
+    engine.tick();
+    assert.equal(sent.length, 2, '冷却窗耗尽后同条件重发（发送过 ≠ 永续冷却）');
+    engine.tick();
+    assert.equal(sent.length, 2, '重发即重置冷却（紧随 tick 再拦）');
+  } finally { engine.stop(); }
+});
+
+// waiting_timeout 的 per-session 冷却过期一路（同族分支的对称覆盖）：
+// signalsWindowMs 放大至 60min，使推进 15min 后种子行仍在取数窗与判定窗内。
+test('C8-2 waiting_timeout 冷却过期: per-session 冷却（15min）耗尽后重发', () => {
+  wipe();
+  const t0 = Date.now();
+  buildSession(fx.conn, [{
+    id: 'wr', title: '冷却重发', task_type: 'interactive', directory: 'F:/demo',
+    time_created: t0 - 60 * MIN, time_updated: t0 - 6 * MIN,
+  }]);
+  buildModelUsage(fx.conn, [{
+    id: 'wrm', session_id: 'wr', turn_id: 'k1', status: 'completed',
+    started_at: t0 - 6.5 * MIN, completed_at: t0 - 6 * MIN, duration_ms: 30e3,
+    query_source: 'main_turn', model_id: 'glm-5', computed_total_tokens: 10,
+  }]);
+  const bus = new EventEmitter();
+  const sent = [];
+  bus.on('notify', p => sent.push(p));
+  let clock = t0;
+  const engine = makeNotifyEngine({ dbq, bus, tickMs: 1e9, nowFn: () => clock,
+    signalsWindowMs: 60 * MIN,
+    rules: { error_burst: { enabled: false }, waiting_timeout: { enabled: true } } });
+  try {
+    engine.tick();
+    assert.equal(sent.length, 1, '首 tick 发送（等待 6min ≥ 5min）');
+    clock += 15 * MIN;
+    engine.tick();
+    assert.equal(sent.length, 2, '15min per-session 冷却耗尽后重发');
   } finally { engine.stop(); }
 });
 
@@ -500,6 +592,13 @@ test('C8-3 SSE: notify 帧载荷契约 + close 退订无泄漏', async () => {
   }
 });
 
+// ── C8-3 补：共享总线 listener 上限（五席第 1 轮 note：每 SSE 连接挂 1 个
+// notify listener，Node 缺省 10 会在第 11 个客户端连接时告警）──────────────
+test('C8-3 共享总线: notify listener 上限放宽至 50', () => {
+  assert.equal(sharedNotifyBus().getMaxListeners(), 50,
+    '多标签/多页同开形态的上限（缺省 10 会打 MaxListenersExceededWarning）');
+});
+
 // ── C8-3 补：per-session 规则的 session 字段经 SSE 转发存活（终审第 1 轮
 // 测试席 note：既有 e2e 只触发全局规则 error_burst，session 字段断言仅存于
 // 纯函数层 C8-1——tick() 解构只剥 cooldownKey/tier，本用例端到端钉存活）。──
@@ -572,6 +671,30 @@ test('C8-3 源码契约: text/event-stream 写头点仍 2 处；live.js 无评�
   }
   assert.ok(!/require\('(http|https|node:fetch)'|fetch\(/.test(notifySrc),
     '无外呼通道代码（webhook 明确不做——模块仅 events/signals 两个 require）');
+});
+
+// ── 性能契约钉（五席第 1 轮 minor：取数面「按需装配、disabled 规则零查询」
+// 此前只有间接证据——EQP 用例全规则开启，无缺省引擎的 SQL 计数钉）───────────
+test('性能契约: 默认引擎（仅 error_burst 开）一次 evaluate() 业务 SQL 恰 2 条', () => {
+  const proxy = dbq.db();
+  const orig = proxy.prepare;
+  const seen = [];
+  proxy.prepare = (sql) => { seen.push(sql); return orig.call(proxy, sql); };
+  let engine;
+  try {
+    engine = makeNotifyEngine({ dbq, tickMs: 1e9 }); // 缺省规则集：仅 error_burst 开
+    engine.evaluate();
+  } finally {
+    proxy.prepare = orig;
+    if (engine) engine.stop();
+  }
+  // 滤除 sqlite_master 探测（防御性：连接级索引探测记忆不在此路径，但同缝
+  // 共享——signals.test.js EQP 捕获同款滤法）。
+  const biz = seen.filter(s => !s.includes('sqlite_master'));
+  assert.equal(biz.length, 2,
+    `disabled 规则零取数（waiting/token/inactive 三路 SQL 不出现），实得 ${biz.length} 条`);
+  assert.ok(biz.every(s => s.includes("status = 'error'")),
+    '仅 error 窗计数两路（model+tool）');
 });
 
 // ── EQP 机检（fixture 计划形态守护，signals.test.js 捕获缝同款）───────────────

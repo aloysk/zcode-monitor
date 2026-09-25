@@ -256,8 +256,10 @@ EXPLAIN 不适用——C12 同源钉（export 消费源端点相同查询函数�
 （#1/#2/#5）、会话内 SUM 走 `model_usage_session_turn_idx`（#3，spec 钉）
 、rowid 尾点寻址（#4）。
 
-**单次评估 tick 总耗时**（全四规则开启的最重形态——默认形态仅
-error_burst+waiting_timeout 两规则开启，取数更少）：经
+**单次评估 tick 总耗时**（全四规则开启的最重形态——默认仅 error_burst
+开启（R-28③：waiting_timeout 落默认关），每 tick 恰 2 条取数 SQL（上表
+#1/#2），此处照录为全规则上界；原文「默认形态仅 error_burst+waiting_timeout
+两规则开启」系口径笔误，2026-09-25 五席一轮勘正）：经
 `ZCODE_DB=<真库> node -e` 起 makeNotifyEngine 后计时 `evaluate()`＝
 **warm 35.1ms / second 15.7ms**（含 sessionsWithSignals 三路 + 窗计数两路
 + IN SUM + 标题补齐 + inactive 两路）——30s tick 节奏下事件循环占用可忽略
