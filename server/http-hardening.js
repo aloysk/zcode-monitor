@@ -30,18 +30,17 @@ function loopbackHostGate(req, res, next) {
 
 // CSP 把页面的可执行面钉死在自身来源。本仓前端为无构建器的内联形态，
 // script/style 需 'unsafe-inline'（无 nonce 基建，务实取舍）；Chart.js 已本地化
-// （public/assets/chart.umd.js），script 无任何外联；仅剩的外联是 pet/widget 两页
-// 的字体 CSS（fonts.googleapis.com + 字体文件 fonts.gstatic.com，本地化的取舍见
-// docs/acceptance/residuals.md R-8）；SSE/fetch 全部同源。form-action/
+// （public/assets/chart.umd.js），页面零外联（字体走系统栈，R-8 已销账：系统
+// 字体为最终形态）；SSE/fetch 全部同源。form-action/
 // frame-ancestors 收窄导航与嵌入面；注意 CSP 管不到顶层导航，「钉死外传面」的
 // 说法不成立（数据外传由 connect-src 限制，导航型外传需用户参与）。
 const CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline'",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "connect-src 'self'",
-  "font-src 'self' https://fonts.gstatic.com",
+  "font-src 'self'",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",

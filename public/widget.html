@@ -43,7 +43,8 @@
   --notice: light-dark(#b35600, #e06400);
   --positive: light-dark(#05834e, #068850);
 }
-@import url('https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&display=swap');
+/* 字体走 --font-sans 系统栈，零外联（R-8 已决：系统字体为最终形态；
+   原 @import 排在 :root 之后本就无效，删除后语义不变） */
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { height: 100%; overflow: hidden; }

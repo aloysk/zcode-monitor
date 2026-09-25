@@ -42,6 +42,13 @@ npm test                   # node --test test/index.js（聚合入口）
 
 ## 当前状态（2026-09-25）
 
+- R-8 决策轮（fix/r8-system-fonts，经 PR 合并）：用户拍板「系统字体为最终
+  形态」——pet.html 删唯一活体 Google Fonts @import（widget.html 的 @import
+  排在 :root 后本就被浏览器忽略，同删属清死码）；CSP style-src/font-src 撤销
+  fonts.googleapis/gstatic 白名单，**面板至此零外联域**；字体家族名保留为本地
+  可选。回归钉 frontend-contract.test.js 零外联字体契约；R-8 销账。同轮拍板：
+  C3 仅批本地基座（远程配额链路未批）、C15 不做；后续批次优先序 C6+C8→C7→
+  C10/C11（分析文档 §1.1）。
 - batch1 四席全量审查三轮（feature/ecosystem-round2-batch1，6a6f654→22914c6→
   f3ab96e）：代码/SQL/测试质量/安全四席并行对抗评审 × 3 轮全量覆盖（R2 起含
   变异测试验钉，R3 四席 READY）。R1 六 MED+11 LOW：models-meta 升级为官方
