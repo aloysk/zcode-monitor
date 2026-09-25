@@ -1,7 +1,7 @@
 # 生态采纳需求规格 · 第二轮第一批（ecosystem-round2-batch1）
 
 - 日期：2026-09-25（SGT）
-- 状态：**待实施**。本 Spec 把上游分析的第一批范围转化为可验收需求；实施计划（How/步骤/骨架）另行编写。
+- 状态：**已实施**（2026-09-25，分支 `feature/ecosystem-round2-batch1` T1-T7 交付 + 三席评审/评审修复轮 + 六席终审修复两轮；实施 HEAD 以合并 commit 为准）。本 Spec 把上游分析的第一批范围转化为可验收需求；实施计划（How/步骤/骨架）另行编写。
 - 分支/实施位置：worktree `F:/project/zcode-monitor-plan`，分支 `feature/ecosystem-round2-batch1`（本会话核实：分支已在位、工作树 clean，HEAD `c000375`）；主仓库 `F:/project/zcode-monitor` 与 `C:/Users/18086/.zcode` 一律只读。
 - 上游指针：范围定义＝`docs/analysis/ecosystem-scan-round2.md` §1.1 第一批（数据基座层+快赢：C1→C2，C5 搭 C1 顺风车，C9 快赢随时插入）；候选完整描述/评审修正/风格约束/红线表/未核实项＝同文档 §3/§4/§7/§9（worktree commit `c000375`）。
 - 格式与深度参照：`docs/specs/ecosystem-adoption-v1.md`（第一轮 Spec；Given/When/Then + `[测试]`/`[命令]`/`[评审]` 标注法沿用）。
@@ -93,6 +93,7 @@
    - `level=session`（默认）：按 session 聚合——tokens（`SUM(computed_total_tokens)` 官方口径）/耗时（`SUM(duration_ms)`）/calls/`by_query_source` 分解（五值域见 §1 事实 2），携 session 标题（session 表 join 或页内补齐），按 tokens 降序，行数 `clampLimit`（默认 50、上限 200），截断须在 `meta.truncated` 如实标注（诚实原则）。
    - `level=turn&session_id=`：该会话内逐 turn 分解（token/耗时/model_calls/tool_calls），走 session 复合索引（会话内天然小）；行数 `clampLimit` 同 session 档（**默认 50、上限 200**），截断 `meta.truncated` 同款如实标注。
    - 响应含 `window`/`since`/`meta.retention_days`（共享 helper 装配，口径标注义务不因端点多而豁免）；空窗口 → 空数组 + meta（不抛错）。
+     > **终审偏差注（2026-09-25 六席终审 F-码-5，§2.0 勘误同款形态）**：本条按 session 层字面实施；`level=turn` 的响应**不带 `window`/`since`**——下钻层是会话内全量分解、无窗口语义（窗口选择器只治理会话层），携带窗口字段对下钻层是误导；`meta.retention_days` 仍适用（保留期是库级事实）。实施语义见 server/routes/usage.js 分节注释，偏差记录见 AGENTS.md 当前状态条目与 residuals 变更日志。
 3. **新视图 `public/views/attribution.js`「Token 归因」**：SVG/div 火焰图=**嵌套宽度布局，零图表库**（火焰图本质是嵌套 div 宽度布局，分析 C5 原文；本仓 Chart.js 仅 overview 既有使用，本视图不引）；色带经 `--chart-*` 变量由 `cssVar` 读取（app.js:109-133 既有通道）、主题切换经 `zc-theme-changed` 事件重绘（rethemeCharts 既有形态）；hover 显示 token/耗时/占比；点击 session 层帧下钻 `#sessions/<id>`（turn 层帧 → `#sessions/<id>/turns`）。
 4. **窗口档与规模钳制义务**：默认 24h；7d/30d 提供但**必须真实库只读实测计时**（30d 窗 model_usage ≈40 万行的 GROUP BY 聚合，量级为 24h 的 ~18 倍——overviewKpis 的 24h 窗实测 32.9ms / 39.7–50.5ms 可作参照基线，usage-accounting.md §6:231-232 原始区间照录）；实测超事件循环安全量级（历史事故锚点：message 全表扫 2.4s；负 LIMIT 整表物化 8.8s——AGENTS.md 红线 2）则必须加规模钳制（rowid 尾界 cap，slowTools db.js:771-794 先例）或收窄档位，取舍照录入验收记录。
 

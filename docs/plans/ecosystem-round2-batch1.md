@@ -1,6 +1,6 @@
 # 生态采纳第二轮第一批实施计划（ecosystem-round2-batch1）
 
-> **状态：待实施**（2026-09-25 起草）。本计划把 `docs/specs/ecosystem-round2-batch1.md`（31 条验收）拆成 7 个有序任务；每任务一个 commit（**由编排脚本统一提交，实施者不运行 git**），回滚单位即 commit。
+> **状态：已实施**（2026-09-25 起草，同日 T1-T7 全部交付——各任务完成判据均满足；后续三席评审/评审修复轮 + 六席终审修复两轮叠加，实施 HEAD 以合并 commit 为准）。本计划把 `docs/specs/ecosystem-round2-batch1.md`（31 条验收）拆成 7 个有序任务；每任务一个 commit（**由编排脚本统一提交，实施者不运行 git**），回滚单位即 commit。
 >
 > **For agentic workers:** 按本文 T1→T7 顺序逐任务执行，每任务完成其「完成判据」后即停，由脚本提交。步骤用 checkbox（`- [ ]`）跟踪。**实施者不运行 git commit/push、不删除文件、不改任务外文件。**
 

@@ -298,6 +298,29 @@ footer 仅统计该表可见的最近 ≤50 行，非全窗口——速度卡三
 分解；权威实现注见 `server/db.js` Token speed 区头注。`overviewSpeed` 并列返回
 `gen_seconds`（生成秒）与 `avg_ttft_ms`（平均首等，仅 ttft 非 NULL 行参与）。
 
+2026-09-25 增补（生态采纳 batch1，「回合与工具」/「Token 归因」30d 档窗口
+口径）：官方对用量三表执行 30 天保留（§1 `USAGE_RETENTION_DAYS=30`），本批
+窗口级视图的 30d 档读数上限即该保留窗——更早数据无来源（How 页「数据保留
+窗口」卡同申明；三表最早行均 ≈2026-08-25，prune 已生效）。性能红线下的
+收窄口径：宽窗（≥8d，本族值域即 30d 档）tool/attribution 查询走 rowid
+尾部候选集钳制（`USAGE_CANDIDATE_CAP_ROWS=200_000`，slowTools 先例同款；
+宽窄阈值 `USAGE_CAP_WINDOW_MS=8d` 而非 7d——宽窄判定在 db 层对 `Date.now()`
+二次求值、晚于路由算 `sinceMs`，取 7d 会使 7d 请求恒被判宽窗遭静默收窄且
+路由无申报，8d 令 7d 恒走 started_at 窄窗精确路径）。真实库收窄量化：
+tool_usage 30d 550,352 行 → 200,000（最早保留行年龄 8.53 天）、model_usage
+407,161 → 200,000（12.05 天）——即 30d 档读数实际是「最近约 8.5/12 天」，
+路由 `meta.scope` 如实申报（`slow_tools_scope` 先例，不静默）；窄窗 24h/7d
+的 capped 与 uncapped 结果逐字节相等（不变形实证）。turn_usage 不钳（30d
+全表 13,886 行、冷态 116ms，无超线面）。归因页 `by_query_source` 分解与页
+查询同趟同尾界（单趟双键 `GROUP BY session_id, query_source`，JS 侧归并），
+保证帧内子条份额与该行窗口总量可对账。重测触发线：tool/attribution 族
+任一 7d 函数级 warm 计时 >450ms，或 7d 档窗内行数 >180k（tools）/>150k
+（model_usage）——满足其一即重评 cap 上调/加列覆盖面并重基线。计时与计划
+照录、取舍全案见 `docs/acceptance/round2-batch1-explain-timing.md`
+（§1.2 决策/§1.3 六席终审复测余量 6-20%/§2 归因单趟化）；边界登记
+residuals R-22。官方 `queryTaskUsage()` 的会话内 input 增量基线口径与本仓
+窗口聚合口径的边界声明见 §11（C1 增补小节）。
+
 ## 9. db.js 注释出处约定（A2-5）
 
 `server/db.js` Overview 段头注释定义缩写，逐查询以
@@ -361,3 +384,27 @@ dashboard 与窗口级视图（overview /「回合与工具」/ token 归因）�
 【对 db.js 的影响】无。纯口径文档增补，零查询改动；本仓不实现增量基线，
 既有对账/速度/归因口径均不受影响。
 
+
+## 12. C1/C2 呈现层口径增补（ecosystem-round2-batch1）
+
+> 任务来源：六席终审修复轮 F-档-3——本批三项新口径此前只在 db.js /
+> context-gauge.js 注释，未入本口径册（唯一登记处），补记如下。实施位与
+> 测试钉见各条。
+
+1. **widget 当日缓存命中率 `cache_hit_rate`**（C2-6，`db.js todayUsage`）：
+   `cache_read_input_tokens / input_tokens`，响应侧算好（前端纯渲染）；
+   零分母（当日全零行/无行）→ **null**，禁 NaN/Infinity（`Math.round` 不接触
+   null——前端 null→`—`）。测试：test/context-gauge.test.js C2-6 两例。
+2. **C2 水位分子回退**（§2.0 勘误的执行口径，`public/context-gauge.js
+   moleculeOf`）：分子 = 逐行 `input_tokens`（官方语义已含 cache_read）；
+   `input_tokens=0` 的行（error/cancelled 全零行）回退官方 fallback
+   `cache_creation_input_tokens + cache_read_input_tokens`（USAGE
+   `inputSideTokensFromNormalizedUsage`），回退行标 `fallback:true`、UI 如实
+   标注；cache 两列均缺（SSE live 行载荷形态）→ 分子 null——缺列即未知，
+   绝不按 0 计（不推进水位、不参与增量）。测试：test/context-view.test.js
+   C2-3 纯函数用例。
+3. **tool 分档耗时双口径**（C1，`db.js usageToolBreakdown`）：`avg_ms` 仅聚合
+   `status='completed'` 行（错误行时长不代表健康耗时——对规格 §2.1
+   AVG(duration_ms) 的收紧细化；组内无完成行 → null，不伪造 0）；`max_ms`
+   全行（极端值含错误行）。测试：test/usage-queries.test.js C1-3 钉
+   （Read 组错误行 50ms 进 max、avg 为 null）。

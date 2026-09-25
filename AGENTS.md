@@ -40,8 +40,35 @@ npm test                   # node --test test/index.js（聚合入口）
 - 遗留项唯一登记处：`docs/acceptance/residuals.md`（新遗留入册、解决销账、不删条目）。
 - 推送目标：`origin` = fork（aloysk/zcode-monitor）；`upstream` = yiyanwannian 原仓库（只读参考）。
 
-## 当前状态（2026-09-24）
+## 当前状态（2026-09-25）
 
+- 生态采纳 batch1（feature/ecosystem-round2-batch1，T1-T7 七任务 + 六席终审
+  修复两轮 25+9 条）：C9 快赢（/api/health freshness + 顶栏新鲜度 chip +
+  emptyState 共享组件）→ C1/C5 同基座 L1 查询族 + /api/usage 三端点 →
+  「回合与工具」视图（窗口级回合健康度 + 工具分档，宽窗 rowid 尾界钳制
+  scope 如实申报）→「Token 归因」火焰图（嵌套 div 零图表库，两级下钻）→
+  C2 上下文水位（models-meta 静态窗口表 + context-gauge 双端组件 + 会话
+  mini 条/Context 水位区 + widget 缓存命中副行，SSE 复用不加通道）。六席
+  终审修复：usage 取数失败兜底（failCard+先置 loading）/attribution 空窗
+  明细区改隐藏/水位 live 防重叠闸改 rowid 行序（live.js 连接水位=MAX(rowid)
+  不回放，时间闸误丢同毫秒真新行）/renderContext 代际 token 防孤儿
+  EventSource/种子失败与空态区分/截断标注收敛 meta.*（turn 层省略
+  window/since）/attrLimit ±Infinity 回落/EXPLAIN 机检补两路/README·how·
+  口径册 §12·c2-human-gate 补齐。新增 8 测试文件，residuals 增 R-20～R-24。
+  评审链：规格与计划各经三席两轮对抗审查通过后定稿（aee89a9/b27ebeb）；
+  实现三席评审 + UI 视觉验证修复一轮（ec458c1；火焰图双主题/hover/下钻
+  截图 attr-smoke-*.png 三张入 acceptance）。六席终审第 2 轮 9 条：水位
+  live 行有界累积（GAUGE_LIVE_ROWS_CAP=2× 种子上限丢最旧行、增量曲线
+  maxCols 列数截断+「+k」占位——长开标签亚像素列宽与 O(n) 重渲双收口）/
+  EXPLAIN 机检排除集显式化（session 页查询显式滤出，别名形态基表 SCAN 不
+  再静默逸出）/start-detached 占口桩 teardown 三重防护（R-21 挂死形态实机
+  复现-修复-复验销账：stubDead 后到即毁 + 先 close 停收再摧毁 +
+  closeAllConnections 双路）/context-gauge 行形状钉 rid 列（rowid 闸种子侧
+  数据依赖）/turns meta.truncated 补 canonical 读法钉+HTTP true 态例/
+  README 勘正「widget/桌宠 hover 副行」（pet.html 无此面，速度轮 H-1 同族
+  文档层重现）/R-25 登记（by_error_type_truncated 过渡字段清理）。全套
+  32 测试文件门禁绿（node --test，编排脚本统一运行）；30d 档 rowid cap
+  收窄口径补入 usage-accounting.md §8 增补段。
 - 速度生成口径轮（fix/speed-ttft-caliber）：用户感知速度读数偏低实锤——旧口径分母
   含 TTFT（GLM-5.3 首等均值 6.7-8.7s、占总时长 29-39%），24h 窗读数低四成
   （51.5 → 72.6 t/s）。分母改 ΣMAX(duration−ttft, 1ms)，ttft NULL（实测 22.1%
