@@ -88,3 +88,40 @@ autoindex(10)→time_created_id(11)→sequence(16286)、model_usage
 started_model(66)→session_turn(67)、tool_usage session_tool_call(76)→
 started_tool(77)→session_turn(78)，与上文照录一致。
 
+---
+
+## 2. T6 / C7-7：recap 查询族真实库 EXPLAIN + 计时（2026-09-25）
+
+探针脚本留 `os.tmpdir()`（`zcmon-c7-7-probe.js`，只读连接）；SQL 与
+`server/db.js` Recap dates 分节运行时形态逐字一致（tz=本机本地偏移
+28800000=UTC+8 内联；cap=200000=USAGE_CANDIDATE_CAP_ROWS）。计时＝预热后
+单次执行墙钟（附第二次值防冷页误读；spec §5 模板口径）。
+
+| # | 查询（档） | 行数 | 计时（预热/二次，ms） | EQP（照录） |
+|---|---|---|---|---|
+| 1 | 日桶（week 窄窗精确） | 8 | 227.5 / 221.1 | `SEARCH model_usage USING INDEX model_usage_started_model_idx (started_at>?)` \| `USE TEMP B-TREE FOR GROUP BY` \| `USE TEMP B-TREE FOR count(Distinct)` |
+| 2 | 5min 活动桶（week 窄窗） | 1706 | 221.8 / 258.7 | 同上 |
+| 3 | top-focus 分组（week 窄窗，INDEXED BY 强制） | 12905 | 304.0 / 313.6 | `SEARCH … model_usage_started_model_idx (started_at>?)` \| `USE TEMP B-TREE FOR GROUP BY` |
+| 4 | 日桶（month 宽窗，NOT INDEXED + rowid cap） | 13 | 404.3 / 346.3 | `SEARCH model_usage USING INTEGER PRIMARY KEY (rowid>?)` \| `SCALAR SUBQUERY 1` \| `SEARCH model_usage` \| `USE TEMP B-TREE FOR GROUP BY` \| `USE TEMP B-TREE FOR count(Distinct)` |
+| 5 | 5min 活动桶（month 宽窗） | 2810 | 337.6 / 317.9 | 同上 |
+| 6 | top-focus 分组（month 宽窗） | 20481 | 384.0 / 338.5 | `SEARCH … INTEGER PRIMARY KEY (rowid>?)` \| `SCALAR SUBQUERY 1` \| `SEARCH model_usage` \| `USE TEMP B-TREE FOR GROUP BY` |
+| 7 | session 区间拉取（spans，A2-3 例外） | 18793 | 9.0 / 8.0 | `SCAN session`（基表全扫——出路条款管辖，显式滤出并计时照录） |
+| 8 | cap 覆盖起点（MIN+rowid 尾界） | 1 | 7.2 / 6.6 | `SEARCH model_usage USING COVERING INDEX model_usage_started_model_idx` \| `SCALAR SUBQUERY 1` \| `SEARCH model_usage` |
+
+判据逐条：
+
+- **无基表 SCAN**（session 基表 SCAN 为 #7 的 A2-3 例外，显式滤出、计时 8-9ms
+  照录）；TEMP B-TREE 分组允许（判据明文）。`SCALAR SUBQUERY 1` 内的
+  `SEARCH model_usage` 是 MAX(rowid) 的 O(1) 尾点寻址，非独立扫描。
+- **窄窗 INDEXED BY 强制**（#3）：`SEARCH … model_usage_started_model_idx`
+  在案；翻转反例形态（`SCAN … model_usage_session_turn_idx`）未出现。
+- **宽窗 NOT INDEXED + rowid 尾界**（#4-6）：`SEARCH … INTEGER PRIMARY KEY
+  (rowid>?)` 在案——cap 生效的形态前提（不钉时 planner 会为省 GROUP BY 的
+  TEMP B-TREE 改走 session 索引全扫，cap 形同虚设）。
+- **cap 覆盖起点为 MIN+rowid 尾界形态**（#8）：`SEARCH … COVERING INDEX
+  model_usage_started_model_idx`、7.2ms——OFFSET 反例形态（EQP=`SCAN
+  model_usage` 133.6ms）未复现，规格 §2.3 需求 2 第 2 轮改钉达成。
+- **month 档聚合 >500ms 触发线**：未触发（实测最高 404.3ms，#4）——无需
+  「cap 保留/放宽」取舍变更，R-22 cap 治理维持现状；week 窄窗最高 313.6ms
+  （#3）同在线内。margin 偏窄（month 档 ~80% 线位），列入 R-22 复测观察面
+  （既有「7d warm >450ms 或行数 model >150k 重测」触发线继续生效）。

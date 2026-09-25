@@ -251,7 +251,8 @@ zcode-monitor/
 │       ├── agents.js         # 子 agent 树
 │       ├── raw.js            # 原始表查看器
 │       ├── usage.js          # /api/usage 三端点（turns/tools/attribution）
-│       └── signals.js        # /api/signals/summary（C6 会话状态信号汇总）
+│       ├── signals.js        # /api/signals/summary（C6 会话状态信号汇总）
+│       └── recap.js          # /api/recap 周/月/年回顾（C7 active hours 去重口径）
 ├── public/
 │   ├── index.html            # 单页 shell
 │   ├── app.js                # 路由 + 辅助函数

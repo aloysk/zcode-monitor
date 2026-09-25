@@ -24,6 +24,7 @@ const raw = require('./routes/raw');
 const agents = require('./routes/agents');
 const { makeUsageRouter } = require('./routes/usage');
 const { makeSignalsRouter } = require('./routes/signals');
+const { makeRecapRouter } = require('./routes/recap');
 const petImport = require('./pet-import');
 
 const PORT = +process.env.PORT || 7331;
@@ -183,6 +184,10 @@ app.use('/api/usage', makeUsageRouter());
 // /api/signals（C6 会话状态信号——GET /summary 固定四字段，语义见
 // server/routes/signals.js 头注；与 /api/sessions 的 signal 行字段同基座）。
 app.use('/api/signals', makeSignalsRouter());
+// /api/recap（C7 周/月/年回顾——GET /?period=week|month|year；本地日界/5min
+// 桶跨会话去重/覆盖披露三元 max 的口径与装配见 server/routes/recap.js 头注；
+// buildRecapPayload 为模块级导出，T8 /api/export 的 recap 数据集同源消费）。
+app.use('/api/recap', makeRecapRouter());
 
 // /pets 静态服务收紧（须挂在与下面通用的 express.static 之前，注册顺序即命中
 // 顺序；构成见 server/http-hardening.js petsStaticOptions）：非图片一律
