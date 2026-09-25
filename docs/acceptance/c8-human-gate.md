@@ -83,7 +83,7 @@
 ## 复现步骤（实机评审时按序执行）
 
 ```bash
-cd "F:/project/zcode-monitor-plan"
+cd "F:/project/zcode-monitor"
 node --test test/notify-view.test.js        # T5 门禁：C8-4/5/6 十一例全绿
 PORT=7399 OPEN_BROWSER=0 HOST=127.0.0.1 npm start   # 冒烟（7331 勿动）
 # 触发提醒的三种途径（真实 notify 事件由服务端规则引擎 30s tick 评估——

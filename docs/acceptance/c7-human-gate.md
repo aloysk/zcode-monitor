@@ -43,7 +43,7 @@
 ## 复现步骤（实机评审时按序执行）
 
 ```bash
-cd "F:/project/zcode-monitor-plan"
+cd "F:/project/zcode-monitor"
 node --test test/recap-view.test.js test/recap.test.js
                                              # T7/T6 门禁：C7-6/C7-8 与 C7-1~C7-5 全绿
 PORT=7399 OPEN_BROWSER=0 HOST=127.0.0.1 npm start   # 冒烟实例（7331 是用户生产实例勿动）

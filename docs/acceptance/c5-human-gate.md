@@ -22,7 +22,7 @@
 
 自动化/机检面（命令与输出照录）：
 
-1. **测试**：`cd F:/project/zcode-monitor-plan && node --test
+1. **测试**：`cd F:/project/zcode-monitor && node --test
    test/attribution-view.test.js` → 7 pass / 0 fail（C5-3/C5-4 源码契约）。
 2. **C1-7 终验**：`grep -n "30 天" public/views/usage.js
    public/views/attribution.js public/views/how.js` → 三文件均命中（usage.js
@@ -57,7 +57,7 @@
 ## 复现步骤（实机评审时按序执行）
 
 ```bash
-cd "F:/project/zcode-monitor-plan"
+cd "F:/project/zcode-monitor"
 node --test test/attribution-view.test.js    # T5 门禁：C5-3/C5-4 契约全绿
 npm test                                     # 全套（收口轮跑亦可）
 PORT=7399 OPEN_BROWSER=0 npm start           # 冒烟实例（7331 若是用户在跑的实例则勿动）

@@ -28,7 +28,7 @@
 ## 复现步骤（实机评审时按序执行）
 
 ```bash
-cd "F:/project/zcode-monitor-plan"
+cd "F:/project/zcode-monitor"
 node --test test/context-gauge.test.js test/context-view.test.js test/models-meta.test.js
                                              # T6/T7 门禁：C2-1~C2-8 全绿
 npm test                                     # 全套（收口轮跑亦可）
