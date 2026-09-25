@@ -408,3 +408,149 @@ dashboard 与窗口级视图（overview /「回合与工具」/ token 归因）�
    AVG(duration_ms) 的收紧细化；组内无完成行 → null，不伪造 0）；`max_ms`
    全行（极端值含错误行）。测试：test/usage-queries.test.js C1-3 钉
    （Read 组错误行 50ms 进 max、avg 为 null）。
+
+
+## 13. recap 口径（C7 增补）
+
+> 任务来源：docs/specs/ecosystem-round2-batch2.md §2.3（验收 C7-1~C7-9，T6/T7）。
+> 实施位：server/db.js `── Recap dates ──` 分节 + server/routes/recap.js
+>（buildRecapPayload）+ public/views/recap.js；测试钉 test/recap.test.js（查询
+> 族/口径/路由/EQP）与 test/recap-view.test.js（视图源码契约）。How 页口径段
+> 见 public/views/how.js「active hours（活跃时长）怎么算」。
+
+1. **本地日界**：recap 日桶按服务器本地时区自然日 00:00 切分——SQL 侧
+   `(started_at + @tzMs)/86400000` 整除分桶，tz 由路由层取服务器本地偏移注入
+   （`startOfDayMs` db.js 先例；**对齐官方 queryAppUsage 的 dayIndex/
+   tzOffsetMs 维度**）。响应 meta.tz_offset_minutes 随载荷披露。
+2. **activeHours 去重口径（双档，§2.0 拍板 5）**：week/month＝事件级——
+   model_usage 行（一次模型请求＝一次活动事件）投 5 分钟桶
+   `(started_at+@tzMs)/300000`，activeMinutes＝有活动的桶数，**跨会话去重
+   （并行会话同桶只计一次）**；「N× parallel」＝桶内并行会话数的 max/avg
+   （parallel_max/parallel_avg）。事件源不用 message 表（无时间前导索引，
+   spec §1.2 事实 4）。year＝会话区间上界——session 表
+   `time_created→time_updated` 区间并集（interval union，跨 30 天窗可用），
+   **span 含挂机时间，是上界口径**（activity.caliber 字段披露档别：
+   event_5min_buckets / session_span_union）。
+3. **token 口径**：日桶与 Top focus 一律 `SUM(computed_total_tokens)`（§2
+   分支 A 官方预计算权威值）；Top focus 为行级 (session_id × 5min 桶) 聚合 +
+   JS 归并（directory 级去重桶数与 recapActivityBuckets 同口径），Top N 截断
+   只在 directory 级归并完成后。
+4. **30d 覆盖与 cap 治理**：meta.token_coverage_from＝**max(period_start,
+   now−retentionDays, cap 覆盖起点)** 三元 max 唯一诚实公式——cap 生效时月初
+   日桶先被 cap 截断而非 30d prune，「自 30 天前可读」的宣称会被 cap 先证伪；
+   cap 覆盖起点＝rowid 尾部候选集最早行 started_at（`MIN(started_at)` +
+   `rowid > MAX(rowid)−cap` 尾界形态；OFFSET 形态实机 EQP＝SCAN 是反例）。
+   month/year 档宽窗（≥USAGE_CAP_WINDOW_MS=8d）rowid cap + NOT INDEXED 钉计划
+   + meta.scope 申报，与 usage 族同治（§8 增补段 / R-22 重测触发线）。
+5. **日桶生成边界**：日桶序列自 token_coverage_from 对齐的本地自然日起生成
+   ——**coverage 之前的 period 内日期不产出桶行**（数据不可读≠零活动，不伪造
+   0 桶）；**coverage 之内无活动的日期产出真 0 桶**（tokens=0/calls=0——
+   「已知零」与「未知不伪造」的区分）。视图 sparkline 只渲染该序列、不从左邻
+   插值，与覆盖披露卡对齐。
+6. **year 档 token 类字段 null**：30d prune 外无数据源，token 类（日桶
+   tokens / top_focus / comparison）为 null 或字段不存在，不伪造 0（C9-5
+   未知值原则）；**环比仅 week 档**（§2.0 拍板 6——month/year 前一周期完整
+   数据在 30 天保留下不可保证：月末请求时上一周期必缺、月初请求时仅部分仍在
+   窗内）。
+
+
+## 14. 会话状态信号口径（C6 增补）
+
+> 任务来源：docs/specs/ecosystem-round2-batch2.md §2.1（验收 C6-1~C6-9，
+> T2/T3）。实施位：server/signals.js（纯函数分类器，零 IO 零依赖）+
+> db.js `── Session signals ──` 分节 + server/routes/signals.js；测试钉
+> test/signals.test.js（分类器/查询族/EQP）与 test/signals-view.test.js
+>（前端源码契约与降级态）。
+
+1. **四态与判定序**：`working > broken > waiting > idle`（`server/signals.js`
+   头注钉）。working＝卫生窗内存在未收尾的 assistant 请求行（livegen 同源
+   判据的会话维度）——在飞压过近窗 error（属既往回合）与 waiting 启发式；
+   broken＝近窗每会话最新 model 行 `status='error'`（bare-column+MAX(rowid)
+   取写入序最新；新鲜度用 `started_at` 判、不用值域未实测的 completed_at）；
+   waiting＝interactive 会话最新行 completed 且当前无在飞（时间启发式）；
+   其余 idle（confidence 与 waiting_since 均 null——字段存在值为 null）。
+2. **waiting 是时间启发式，confidence='low'**：数据面无权限等待信号源
+   （approval_status 只记终态，分析 §9-4 两轮实测）——waiting 候选限
+   `task_type='interactive'`（后台会话的完成不构成「等用户」，误报风暴主源
+   入口过滤）；`waiting_since`＝最新 completed 行的 `completed_at`（数据派生
+   无状态）；completed_at 为 NULL → waiting_since=null 且该会话不参与
+   oldest_waiting_ms 聚合（防 Math.max 混入 null 得 NaN）。
+3. **判定窗 15min**（SIGNALS_WINDOW_MS，可注入）；数据面双端点：
+   `GET /api/signals/summary` 固定四字段 {waiting_count, broken_count,
+   oldest_waiting_ms, generated_at}（全库近窗域，无行数参数，空库全零）；
+   `/api/sessions` 行内 signal 字段 additive 同基座。
+4. **误报边界与降级（R-28）**：真库 48h 回放抽样（286 时刻/576 样本）误报
+   39.8% > spec 20% 线，收窗 8min 重测反升 47.8%——按 spec §2.1 需求 7 落
+   降级：needs-attention 置顶分组摘除、C8 waiting_timeout 提醒默认关（徽标/
+   置信标注/顶栏 chip 等常驻显示面保留）。回翻条件：真实触发一次权限批准流
+   后 tool_usage.approval_status 尾部出现非终态值（真信号源）即可替换时间
+   启发式重测。照录：round2-batch2-explain-timing.md §1.5。
+5. **性能契约（R-32）**：在飞判定 rowid 尾界、近窗 INDEXED BY 强制 +
+   ORDER BY DESC 截断（SIGNALS_MAX_ROWS=2000 有界）；缺
+   `model_usage_started_model_idx` 的外部/旧库回退为无 INDEXED BY 同形查询
+   （真库同形 1.23ms 仍走 started_at 索引；「真缺索引」库按保守口径申报
+   慢但可用——R-9 先例同延）。
+
+
+## 15. 本地提醒口径（C8 增补）
+
+> 任务来源：docs/specs/ecosystem-round2-batch2.md §2.2（验收 C8-1~C8-8，
+> T4/T5）。实施位：server/notify.js（规则引擎，30s unref'd tick、不在任何
+> 请求路径）+ live.js notify 帧转发（复用既有 SSE 通道）+ app.js/overview.js/
+> widget.html/pet.html 三页消费面；测试钉 test/notify.test.js（规则/冷却/
+> tick）与 test/notify-view.test.js（前端契约）。规则默认值权威＝
+> server/notify.js `RULE_DEFAULTS`（测试对表钉）。
+
+1. **四规则与默认值（防噪默认）**：error_burst＝**开**（5min 窗 error 行
+   model+tool 合计 ≥3，冷却 10min 全局，intensity sound，severity err）；
+   waiting_timeout＝**默认关**（R-28 降级处置——interactive waiting 持续
+   ≥5min，冷却 15min per-session，alert，warn；判定语义照 spec 原文保留，
+   回翻只动 enabled 常量）；token_threshold＝关（单会话 **30d 保留窗**累计
+   SUM(computed_total_tokens) ≥1M/5M/20M 三档，每会话每档位一次，quiet，
+   warn）；inactive＝关（全库无 model 行 ≥30min 且 24h 窗内曾有活动，冷却
+   60min，quiet，ok）。
+2. **冷却只拦发送、不改条件评估**（C8-1 条件评估无状态与 C8-2 冷却是两个
+   断言面）；冷却记忆有界（NOTIFY_COOLDOWN_CAP=1000 键序逐出，与前端
+   notifySeen CAP=200 对称——超界丢最旧，该会话/档位可能在下一 tick 重发
+   一次）。token_threshold 的 cooldownMs=Infinity 即「每会话每档位一次」。
+3. **token 累计窗＝30 天保留窗**（三表 30d prune 口径边界：跨月历史不计，
+   长会话阈值触发系统性延迟——气泡文案与 How 页披露「按 30 天保留窗口径」）。
+4. **无回放（R-30）**：notify 是即发即失 SSE 事件，连接建立前/断线重连间隙
+   触发的提醒永久错过；可见性兜底＝顶栏 waiting chip 轮询 + sessions 页
+   刷新（常驻轮询，不依赖 SSE 在线）。
+5. **severity 与 intensity 正交两轴**：severity 管视觉色（--sev-* 变量）、
+   intensity 管通道（sound/alert/quiet），映射钉死在服务端 RULE_DEFAULTS
+   （前端降级矩阵 notifyChannels 消费，不复制表）。前端三开关出厂默认
+   {声音✔ / 系统通知✘ / TTS✘}；toast 5s 驻留；提示音 WebAudio 合成
+   （880Hz/0.2s/gain 0.06，零音频资源）。
+
+
+## 16. 导出口径（C12 增补）
+
+> 任务来源：docs/specs/ecosystem-round2-batch2.md §2.4（验收 C12-1~C12-7，
+> T8）。实施位：server/routes/export.js；测试钉 test/export-routes.test.js。
+> 用户面口径见 How 页「数据导出」段（public/views/how.js）。
+
+1. **白名单从严**：`GET /api/export/:dataset?format=json|csv`，dataset ∈
+   {overview, usage, recap}、format ∈ {json, csv}（缺省 json）——白名单外
+   一律 400 可读错误码、不静默回退（机器可读面从严，与窗口参数「未知回退」
+   先例有意不同）。窗口参数值域与源端点一致：overview 24h|7d|today、
+   usage 24h|7d|30d（resolveWindow，usage-window.js 唯一落点）、recap
+   period week|month|year。
+2. **同源钉（零新 SQL）**：与源端点同一查询/装配函数——overview＝/api/
+   overview 装配面同清单、usage＝**固定绑定 /api/usage/turns 响应原形**
+   （tools/attribution 两端点数据不导出，值域裁剪登记 R-29）、recap＝
+   buildRecapPayload（T6 模块级导出）。usage 数据集随源携带顶层
+   by_error_type_truncated 过渡字段（清理随 R-25 一并，两端口径逐字段一致）。
+3. **JSON 包络**：顶层 {schema_version:1, generated_at, dataset, format,
+   meta, data}，data＝源端点载荷原形；meta 继承源端点口径标注（usage/recap
+   的 retention_days/scope/truncated 等），overview 例外补装
+   {retention_days, window, since}（源端点无 meta；保留期是库级事实）。
+4. **CSV（RFC 4180）**：每数据集固定一张矩形主表——usage＝turn 时间线 11
+   列（C1 timeline 行字段）、recap＝日桶六列（date/tokens/calls/sessions/
+   active_minutes/parallel_max；days[].errors 不入表）、overview＝section/
+   key/value 三列长表（kpis/speed/recent_speed 逐叶子标量展开，series/
+   by_model/by_tool 每行 value＝行对象 JSON 序列化）。转义：含 , " CR LF
+   的字段双引号包裹、内部 " 加倍，行尾 CRLF，UTF-8 无 BOM；公式注入防护
+   ——以 = + - @ 或 TAB/CR/LF 开头的字段前置 '（OWASP CSV Injection 建议
+   集；Excel/Sheets 导入时这些单元格按文本处理，数字不受影响）。

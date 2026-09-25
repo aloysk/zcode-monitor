@@ -91,7 +91,23 @@ CREATE TABLE message (
 -- id, session_id, time_created, time_updated, data, sequence），缺了它
 -- livegen 每个 tick 抛 "no such column" 提前返回，下游边事件全灭。
 -- 同理该查询的 rowid 尾界（MAX(rowid)-8000）是隐式 rowid，非本 TEXT 主键。
-CREATE INDEX idx_message_session ON message(session_id);
+-- 索引集镜像真库三索引（batch2 T2，规格 §1.2 事实 4：2026-09-25 只读实测
+-- 真库 sqlite_master）：sqlite_autoindex_message_1 由「id TEXT PRIMARY KEY」
+-- 自动产生（rootpage 10）无需手建；两个二级索引的 time_created 均为非前导
+-- 第二列，时间谓词单独不可索引寻址——C6 在飞判据必须走 rowid 尾界的红线性
+-- 即由此而来。建序照真库 rootpage 序：time_created_id_idx(11) 先、
+-- sequence_idx(16286) 后（SQLite 在等价 session 前导覆盖索引间选「创建序
+-- 最晚」者——tool_usage 三索引同族教训，fixture-db.js:60-66 注释）；本批
+-- message 新查询全走 rowid 尾界不依赖该选择，镜像保真度照 batch1 R3 惯例
+-- 钉死（sessionConversation 等 session 寻址查询的 EQP 守护面随真库对齐）。
+-- 原虚构索引 idx_message_session(session_id)（真库无此名）随本镜像移除，
+-- 仓内无其他引用（grep 实证）。同批核对 tool_usage/model_usage 索引集无同族
+-- 漂移：model_usage 建序 started_model(66)→session_turn(67)、fixture :35-36
+-- 一致；tool_usage 两 session 前导覆盖索引真库序 session_tool_call(76)→
+-- session_turn(78)、fixture 相对序一致（started_tool 位于两者之间/之前的
+-- 位置差不参与等价索引选择，无漂移面）。
+CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
+CREATE INDEX message_session_sequence_idx ON message(session_id, sequence, time_created, id);
 CREATE TABLE part (
   id TEXT PRIMARY KEY, message_id TEXT, sequence INTEGER,
   time_created INTEGER, data TEXT);

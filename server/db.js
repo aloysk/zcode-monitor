@@ -12,6 +12,8 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const Database = require('better-sqlite3');
+const livegen = require('./livegen');           // Session signals 在飞卫生窗常量（单一来源）
+const { classifySessions } = require('./signals'); // Session signals 纯分类器
 
 const DB_PATH = process.env.ZCODE_DB
   || path.join(os.homedir(), '.zcode', 'cli', 'db', 'db.sqlite');
@@ -1308,6 +1310,313 @@ function contextGaugeRows(sessionId, limit = 100) {
   return rows.reverse().map(r => ({ ...r, started_at: ts(r.started_at) }));
 }
 
+// ───────────────────────── Session signals ─────────────────────────
+// C6 会话状态信号查询族（ecosystem-round2-batch2 §2.1 需求 2）：三路取数 +
+// 一个组装，供 classifySessions（server/signals.js 纯函数）消费。会话域两形：
+// (a) sessionIds 传数组＝页内域（/api/sessions 路由）；(b) null＝全库近窗活跃
+// 域（recentModel keys 即活跃会话集，与任何行数参数无关——/api/signals/summary
+// 与 C8 notify 域，分页域会让 waiting_count 依赖 limit、语义失真）。
+//
+// 性能契约（红线 2，规格 §1.2 事实 4/5 钉死的合规形态，真实库 EQP+计时照录
+// docs/acceptance/round2-batch2-explain-timing.md）：
+//   - 在飞集合：livegen 主查询同款（rowid 尾界 + 卫生窗 + json_extract 判
+//     assistant/completed-NULL），仅 SELECT 列换 session_id。**禁 GROUP BY/
+//     DISTINCT/子查询包裹**——三种写法真库 EQP 实测全部翻转为
+//     `SCAN message USING INDEX message_session_time_created_id_idx`（索引
+//     全扫；message 无时间前导索引，时间谓词只能靠 rowid 尾界，见 livegen.js
+//     SQL 头注）；去重在 JS 侧 new Set() 完成。合规形态
+//     `SEARCH message USING INTEGER PRIMARY KEY (rowid>?)`，行数上界＝尾界
+//     判据行 ≤8000 有界。卫生窗默认参数引 livegen 导出常量（单一来源）。
+//   - 近窗最新行：INDEXED BY model_usage_started_model_idx 强制——不强制则
+//     外层 GROUP BY session_id 匹配 model_usage_session_turn_idx 最左列，
+//     planner 为省 TEMP B-TREE 改走全索引扫（真库实测 1804.8ms/次，§1.2
+//     事实 5②；强制后本路实测毫秒级）。sqlite_master 探测 + 回退记忆复用
+//     overviewKpis 机制（conn._hasStartedModelIdx 同键同义）：缺索引的库
+//     （旧版 ZCode、外部 ZCODE_DB）回退＝去掉 INDEXED BY 但保留子查询
+//     ORDER BY started_at DESC LIMIT 截断的同形查询——子查询 ORDER BY 本身
+//     锚定索引方向，真库上无 INDEXED BY 同形实测 1.23ms 仍走 started_at
+//     索引（终审第 1 轮 SQL 席探针照录）；旧注「回退真库实测 1237ms」系
+//     裸 GROUP BY（无子查询包裹）形态的数字，与本回退形态不对应，勘正。
+//     真正缺索引的库上 planner 无 started_at 前导索引可用，成本无法在真库
+//     实测（不写库），按保守取向申报「慢但可用」（取舍照先例接受，C6 消费
+//     频率下频繁触发的再议降频/缓存；R-32 同步勘正）。
+//     子查询 ORDER BY started_at DESC LIMIT @cap 截断保最新侧（无 ORDER BY
+//     时 SQLite 按索引升序返回、截断保最老行，被截会话误判 idle——异常风暴
+//     窗护栏 SIGNALS_MAX_ROWS）；外层 bare-column+MAX(rowid) 取写入序最新行
+//     的伴随列（sessionList latestModel 同款 SQLite 特性，**非 MAX(started_at)**
+//     ——晚落库长请求行 started_at 更早、rowid 更大，后者才是写入序最新）。
+//   - task_type 补齐：session 表主键 IN 寻址（sessionList 两段模式同款），
+//     ids 有界（(a) 页内 ≤500 / (b) 近窗会话集 ≤ cap）。禁止逐会话 N+1。
+const SIGNALS_MAX_ROWS = 2000;
+
+// 在飞会话集合（livegen 在飞判据的会话维度输出——livegen state() 只有全局
+// 计数，本路补齐「哪些会话在飞」）。
+function signalsInflightSessionIds(
+  { createdWindowMs = livegen.CREATED_WINDOW_MS,
+    updatedWindowMs = livegen.UPDATED_WINDOW_MS } = {},
+) {
+  const now = Date.now();
+  const rows = db().prepare(`
+    SELECT session_id
+    FROM message
+    WHERE rowid > (SELECT MAX(rowid) FROM message) - ${livegen.INFLIGHT_TAIL_ROWS}
+      AND json_extract(data, '$.role') = 'assistant'
+      AND json_extract(data, '$.time.completed') IS NULL
+      AND time_created > ?
+      AND time_updated > ?
+  `).all(now - createdWindowMs, now - updatedWindowMs);
+  return new Set(rows.map(r => r.session_id));
+}
+
+// 近窗每会话最新 model 行（写入序最新＝MAX(rowid)，含 error 判据与 waiting
+// 起点所需的伴随列；rid 透出供调试对账）。
+function signalsRecentModelLatest(sinceMs, { maxRows = SIGNALS_MAX_ROWS } = {}) {
+  const conn = db();
+  if (conn._hasStartedModelIdx === undefined) {
+    conn._hasStartedModelIdx = !!conn.prepare(
+      `SELECT 1 FROM sqlite_master WHERE type='index' AND name='model_usage_started_model_idx'`
+    ).get();
+  }
+  const idxGuard = conn._hasStartedModelIdx
+    ? 'INDEXED BY model_usage_started_model_idx' : '';
+  // schema source: zai-org/ZCode MIG 0010_usage_observability（model_usage 逐行）
+  const rows = conn.prepare(`
+    SELECT session_id, status, error_type, started_at, completed_at, MAX(rowid) AS rid
+    FROM (SELECT session_id, status, error_type, started_at, completed_at, rowid
+          FROM model_usage ${idxGuard}
+          WHERE started_at >= @since
+          ORDER BY started_at DESC
+          LIMIT @cap)
+    GROUP BY session_id
+  `).all({ since: sinceMs, cap: maxRows });
+  return new Map(rows.map(r => [r.session_id, {
+    status: r.status, error_type: r.error_type,
+    started_at: r.started_at, completed_at: r.completed_at, rid: r.rid,
+  }]));
+}
+
+// 会话域 task_type 补齐（主键 IN 寻址，两段模式第二段形态）。
+function signalsSessionTypes(ids) {
+  if (!ids.length) return new Map();
+  const ph = ids.map(() => '?').join(',');
+  // schema source: zai-org/ZCode MIG 0010_usage_observability（session 表）
+  const rows = db().prepare(
+    `SELECT id, task_type FROM session WHERE id IN (${ph})`
+  ).all(...ids);
+  return new Map(rows.map(r => [r.id, { task_type: r.task_type }]));
+}
+
+// 组装：三路取数 + 纯分类器 → Map<session_id, signal>。
+// 场景 (a) 页外活跃/在飞会话也会出现在返回 Map（分类域＝三输入键并集），
+// 其 task_type 不在寻址集内——working/broken 判定不依赖 task_type 故仍准确，
+// waiting 判定仅对寻址集内会话成立；路由按 id 合并，页外条目不外泄。
+function sessionsWithSignals({ sinceMs, sessionIds = null, windowMs } = {}) {
+  const inflightSessions = signalsInflightSessionIds();
+  const recentModel = signalsRecentModelLatest(sinceMs);
+  const ids = sessionIds != null ? sessionIds : [...recentModel.keys()];
+  const sessions = signalsSessionTypes(ids);
+  return classifySessions(
+    { inflightSessions, recentModel, sessions, now: Date.now() },
+    windowMs != null ? { windowMs } : {},
+  );
+}
+
+// ───────────────────────── Recap dates ─────────────────────────
+// C7 周/月回顾查询族（ecosystem-round2-batch2 §2.3 需求 1）：本地日界日桶、
+// 5min 活动桶（跨会话去重）、Top focus 行级桶聚合 + JS 归并、会话区间拉取、
+// cap 覆盖起点。口径钉：token 一律 SUM(computed_total_tokens)（官方预计算权威
+// 值，Overview 区头注，不自造公式）；本地日界对齐官方 queryAppUsage 的
+// dayIndex/tzOffsetMs 维度（§2.0 拍板 4）——tzMs 由路由层取服务器本地偏移注入，
+// 分桶表达式 (started_at + @tz)/N 的整除商即「本地墙钟桶序」，测试注入固定 tz
+// 后与宿主机时区无关（R2 跨午夜用例先例）。
+// 性能契约（红线 2；真实库 EQP+计时照录 docs/acceptance/round2-batch2-explain-
+// timing.md C7-7）：
+//   - 窄窗（week 档，窗宽 <8d）：started_at 索引精确窗。日桶/活动桶的分桶表达式
+//     GROUP BY 不匹配任何索引最左列、恒走 started_at SEARCH + TEMP B-TREE（安全
+//     形态照录——防改列式分桶引入 session 前导列诱发 planner 翻转，§1.2 事实 5
+//     机理）；top-focus 的 GROUP BY session_id 匹配 model_usage_session_turn_idx
+//     最左列，必须 INDEXED BY model_usage_started_model_idx 强制（无强制真库实测
+//     翻转全索引扫 1250ms、强制后 167.8ms；sqlite_master 探测 + 回退记忆复用
+//     overviewKpis 机制）。
+//   - 宽窗（month/year 档，窗宽 ≥ USAGE_CAP_WINDOW_MS=8d）：NOT INDEXED 钉死计划
+//     + rowid 尾部候选集钳制（USAGE_CANDIDATE_CAP_ROWS 同治——不钉时 planner 会
+//     为省 GROUP BY 的 TEMP B-TREE 改走 session 索引全扫、cap 形同虚设，Usage
+//     attribution 分节头注形态照抄）。INDEXED BY 强制只用于窄窗，禁止在 ≥8d 宽窗
+//     照抄强制形态。
+//   - recapSessionSpans：session 基表 SCAN（A2-3 出路条款管辖——1.84 万行小表，
+//     计时照录、机检显式滤出）。
+
+// 窄/宽窗形态装配（本分节三查询共享）：返回 FROM/WHERE 片段与 cap 参数基座。
+// pinIdx 仅 top-focus 窄窗需要（见分节头注）；日桶/活动桶窄窗不强制（分桶表达式
+// 安全形态）。nowMs 可注入（缺省 Date.now()）：路由层 buildRecapPayload 把同一
+// 注入时钟传下来，meta.scope 申报与实际查询形态共用一个时钟源（两源在 8d 阈值
+// 毫秒邻域内可分叉——评审第 1 轮 minor；缺省回退保持既有独立调用面不变）。
+function recapModelWindow(sinceMs, capRows, pinIdx, nowMs = Date.now()) {
+  const wide = sinceMs <= nowMs - USAGE_CAP_WINDOW_MS;
+  if (wide) {
+    return {
+      from: 'FROM model_usage NOT INDEXED',
+      where: 'WHERE rowid > (SELECT MAX(rowid) FROM model_usage) - @cap AND started_at >= @since',
+      params: { cap: capRows },
+    };
+  }
+  let guard = '';
+  if (pinIdx) {
+    const conn = db();
+    if (conn._hasStartedModelIdx === undefined) {
+      conn._hasStartedModelIdx = !!conn.prepare(
+        `SELECT 1 FROM sqlite_master WHERE type='index' AND name='model_usage_started_model_idx'`
+      ).get();
+    }
+    guard = conn._hasStartedModelIdx ? 'INDEXED BY model_usage_started_model_idx' : '';
+  }
+  return { from: `FROM model_usage ${guard}`, where: 'WHERE started_at >= @since', params: {} };
+}
+
+// 日桶聚合（本地自然日）：day＝本地墙钟日序（(started_at+@tz)/86400000 整除商，
+// 路由层按注入 tz 换算日期串）。untilMs 供环比的上一窗切片（开区间上界；主窗
+// 调用不传）。errors 列为 C7「错误计数日」要点的数据面。
+// CAST 钉：better-sqlite3 把 JS number 一律绑定为 REAL（本会话实测 typeof(@tz)
+// ='real'，与既有代码只用 SQL 整型字面量做除法不冲突的盲区）——real 除法会让
+// 桶键碎片化（每行一桶），CAST(@tz AS INTEGER) 恢复「INTEGER 列 + 整型字面量」
+// 的整除语义（timeseries 的 started_at/3600000 同族）。
+function recapDailyUsage(sinceMs, { tzMs = 0, untilMs = null,
+                                   capRows = USAGE_CANDIDATE_CAP_ROWS,
+                                   nowMs } = {}) {
+  const w = recapModelWindow(sinceMs, capRows, false, nowMs);
+  const params = { ...w.params, since: sinceMs, tz: tzMs };
+  let until = '';
+  if (untilMs != null) { until = ' AND started_at < @until'; params.until = untilMs; }
+  // schema source: zai-org/ZCode MIG 0010_usage_observability + USAGE queryAppUsage
+  //（tokens=SUM(computed_total_tokens) 官方口径）
+  const rows = db().prepare(`
+    SELECT (started_at + CAST(@tz AS INTEGER)) / 86400000 AS day,
+           COUNT(*)                                   AS calls,
+           COUNT(DISTINCT session_id)                 AS sessions,
+           SUM(computed_total_tokens)                 AS tokens,
+           SUM(CASE WHEN status='error' THEN 1 END)   AS errors
+    ${w.from}
+    ${w.where}${until}
+    GROUP BY day
+    ORDER BY day ASC
+  `).all(params);
+  return rows.map(r => ({ ...r, tokens: r.tokens || 0, errors: r.errors || 0 }));
+}
+
+// 5min 活动桶（activeHours 口径，§2.0 拍板 5 事件级）：每桶 COUNT(DISTINCT
+// session_id)——activeMinutes＝有活动的桶数（同桶跨会话只计一次，即并行去重）、
+// 「N× parallel」＝桶内会话数的 max/avg（路由层从桶级分布派生）。事件源不用
+// message 表（无时间前导索引，§1.2 事实 4）。
+function recapActivityBuckets(sinceMs, { tzMs = 0, untilMs = null,
+                                        capRows = USAGE_CANDIDATE_CAP_ROWS,
+                                        nowMs } = {}) {
+  const w = recapModelWindow(sinceMs, capRows, false, nowMs);
+  const params = { ...w.params, since: sinceMs, tz: tzMs };
+  let until = '';
+  if (untilMs != null) { until = ' AND started_at < @until'; params.until = untilMs; }
+  // schema source: zai-org/ZCode MIG 0010_usage_observability（model_usage 逐行）
+  return db().prepare(`
+    SELECT (started_at + CAST(@tz AS INTEGER)) / 300000 AS bucket,
+           COUNT(DISTINCT session_id)   AS sessions
+    ${w.from}
+    ${w.where}${until}
+    GROUP BY bucket
+    ORDER BY bucket ASC
+  `).all(params);
+}
+
+// Top focus（by-directory 归并）：行级 (session_id × 5min 桶) 聚合 + JS 归并。
+// 「先截会话 Top N 再归并」会让 directory 级 tokens/calls 被会话截断污染，且
+// GROUP BY session_id 单段聚合产不出 directory 级跨会话去重的 activeMinutes——
+// 故对全部窗口行涉及的 session ids 归并（ids 有界＝窗口行集去重会话数，directory
+// 数远小于会话数），Top N 截断只在 directory 级归并完成后（截断不污染聚合计数）。
+// session IN 寻址按 IN_CHUNK 分块（notify.js sessionTokenSums 同款纪律）：ids
+// 上界＝7d 全窗去重会话数，去重会话数超 SQLite 变量上限 32766 时单条 IN 抛
+// too many SQL variables → /api/recap 500（评审第 1 轮实锤形态）；分块后每段
+// ≤500 参数恒在限内，块数＝⌈ids/500⌉（真库 7d 域千级会话 → 个位数段）。
+const RECAP_IN_CHUNK = 500;
+function recapTopFocus(sinceMs, { tzMs = 0, limit = 10,
+                                  capRows = USAGE_CANDIDATE_CAP_ROWS,
+                                  nowMs, inChunk = RECAP_IN_CHUNK } = {}) {
+  const w = recapModelWindow(sinceMs, capRows, true, nowMs);
+  // schema source: zai-org/ZCode MIG 0010_usage_observability + USAGE queryAppUsage
+  //（token 口径官方权威值）
+  const grp = db().prepare(`
+    SELECT session_id, (started_at + CAST(@tz AS INTEGER)) / 300000 AS bucket,
+           COUNT(*) AS calls, SUM(computed_total_tokens) AS tokens
+    ${w.from}
+    ${w.where}
+    GROUP BY session_id, bucket
+  `).all({ ...w.params, since: sinceMs, tz: tzMs });
+  if (!grp.length) return [];
+  // session→directory 分块寻址（sessionList 两段模式第二段形态；缺行会话
+  // directory=null 如实呈现）
+  const ids = [...new Set(grp.map(r => r.session_id))];
+  const dirOf = new Map();
+  for (let i = 0; i < ids.length; i += inChunk) {
+    const chunk = ids.slice(i, i + inChunk);
+    const ph = chunk.map(() => '?').join(',');
+    // schema source: zai-org/ZCode MIG 0010_usage_observability（session 表）
+    for (const r of db().prepare(
+      `SELECT id, directory FROM session WHERE id IN (${ph})`
+    ).all(...chunk)) dirOf.set(r.id, r.directory);
+  }
+  const byDir = new Map();
+  for (const g of grp) {
+    const dir = dirOf.has(g.session_id) ? dirOf.get(g.session_id) : null;
+    let d = byDir.get(dir);
+    if (!d) {
+      d = { directory: dir, tokens: 0, calls: 0, sessions: new Set(), buckets: new Set() };
+      byDir.set(dir, d);
+    }
+    d.tokens += g.tokens || 0;
+    d.calls += g.calls || 0;
+    d.sessions.add(g.session_id);
+    d.buckets.add(g.bucket); // directory 级跨会话去重（同桶两会话只计一次）
+  }
+  return [...byDir.values()]
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, attrLimit(limit))
+    .map(d => ({ directory: d.directory, tokens: d.tokens, calls: d.calls,
+                 sessions: d.sessions.size, active_minutes: d.buckets.size }));
+}
+
+// 会话区间拉取（year 档活动上界口径，§2.0 拍板 5）：session 基表 SCAN（A2-3
+// 出路条款管辖，1.84 万行小表）→ JS 侧区间并集（排序 + 线性合并；NULL 行跳过、
+// time_created>time_updated 的脏行按 [min,max] 收敛）。返回合并后的 [start,end]
+// 区间数组（升序、互不重叠），窗口裁剪由调用方做。
+function recapSessionSpans() {
+  // schema source: zai-org/ZCode MIG 0010_usage_observability（session 表）
+  const rows = db().prepare('SELECT time_created, time_updated FROM session').all();
+  const ivs = rows
+    .filter(r => r.time_created != null && r.time_updated != null)
+    .map(r => [Math.min(r.time_created, r.time_updated),
+               Math.max(r.time_created, r.time_updated)])
+    .sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const [s, e] of ivs) {
+    const last = merged[merged.length - 1];
+    if (last && s <= last[1]) { if (e > last[1]) last[1] = e; }
+    else merged.push([s, e]);
+  }
+  return merged;
+}
+
+// cap 覆盖起点：rowid 尾部候选集的最早行 started_at（MIN+rowid 尾界形态钉死——
+// OFFSET 形态实机 EQP=SCAN model_usage 133.6ms 且「rowid 序第 N 行的 started_at
+// ≠候选集最小 started_at」存在晚落库长请求行的近似失真；MIN 形态
+// SEARCH … COVERING INDEX 15.2ms、MIN 语义即候选集最早行零近似，规格 §2.3
+// 需求 2 第 2 轮改形态。真实库实测 15.2ms，无需按 tick 缓存）。空集 → null
+// （调用方跳过三元 max 的该项）。
+function recapCapCoverageStart({ capRows = USAGE_CANDIDATE_CAP_ROWS } = {}) {
+  // schema source: zai-org/ZCode MIG 0010_usage_observability（model_usage）
+  return db().prepare(`
+    SELECT MIN(started_at) AS m
+    FROM model_usage
+    WHERE rowid > (SELECT MAX(rowid) FROM model_usage) - @cap
+  `).get({ cap: capRows }).m;
+}
+
 module.exports = {
   DB_PATH, LOG_DIR, ROLLOUT_DIR,
   db, warmDb, invalidateDb,
@@ -1325,4 +1634,9 @@ module.exports = {
   usageAttributionBySession, usageAttributionByTurn,
   USAGE_CANDIDATE_CAP_ROWS, // 规模钳制口径常量（路由 meta 注明 scope 用，slow_tools_scope 先例）
   contextGaugeRows,
+  signalsInflightSessionIds, signalsRecentModelLatest, signalsSessionTypes,
+  sessionsWithSignals, SIGNALS_MAX_ROWS,
+  recapDailyUsage, recapActivityBuckets, recapTopFocus,
+  recapSessionSpans, recapCapCoverageStart,
+  USAGE_CAP_WINDOW_MS, // 宽窗判定阈值（recap 路由的 coverage/scope 装配消费）
 };

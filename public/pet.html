@@ -217,6 +217,11 @@ const IN_WEBVIEW = !!(window.chrome && window.chrome.webview);
 const PS = window.PetState;
 const { SLEEP_AFTER_MS, ERROR_HOLD_MS, COMBO_HOLD_MS, GESTURE_WINDOW_MS } = PS;
 const GEN_STALE  = 10 * 60 * 1000; // see staleness guard in poll()
+// C6 waiting hold：/api/signals/summary 见 waiting_count>0 时推进 permHoldUntil
+// 的 hold 时长。钉 ≥2× 轮询周期（poll 5s）——hold 短于两个周期则两次 poll 之间
+// 失效、mood 落 sleep，动画每 5s 抖动断裂一次（ERROR_HOLD_MS=4s 形态因此拒收，
+// spec §2.1 需求 6）。页面侧常量，可调整。
+const WAITING_HOLD_MS = 10 * 1000;
 
 const $ = id => document.getElementById(id);
 const petEl = $('pet'), bubbleEl = $('bubble'), bnumEl = $('bnum'), bunitEl = $('bunit'), blanesEl = $('blanes');
@@ -450,6 +455,10 @@ function ariaLabel(s) {
   if (s === 'tantrum') return 'Token 桌宠：被惹恼了';
   if (s === 'gen')     return tps != null ? 'Token 桌宠：生成中，速度 ' + tps.toFixed(1) + ' t/s'
                                           : 'Token 桌宠：生成中';
+  // permission（C6 waiting_permission 接线态，2026-09-25 终审第 1 轮视觉席补）：
+  // 读屏语义与 animFor('permission')='waiting_permission' 的等待授权动画对齐，
+  // 不落 default「待命中」。
+  if (s === 'permission') return 'Token 桌宠：等待授权';
   if (s === 'sleep')   return 'Token 桌宠：睡着了';
   return 'Token 桌宠：待命中';
 }
@@ -464,6 +473,20 @@ function render() {
   }
   pending = animFor(mood); // queued; the loop applies it at the cycle boundary
   if (reduceMQ.matches && sheetOk) draw(pending, 0); // static face, no loop
+  // C8 notify 接管期（hold 未过期且文本在）：通知文本优先于速度读数——颜色
+  // 经 severity 派生的 Spectrum 变量（内联 style 覆盖 .bubble 的 --tier），
+  // unit/lanes 让位；hold 过期自动回落下方常规路径（每次 poll 的 render
+  // 都会重估，无需独立回落定时器）。渲染出口 textContent（防注入真闸门）。
+  if (notifyText && Date.now() < notifyHoldUntil) {
+    bnumEl.textContent = notifyText;
+    bnumEl.style.color = notifyColor === 'err' ? 'var(--negative)'
+      : notifyColor === 'warn' ? 'var(--notice)' : 'var(--positive)';
+    bunitEl.style.display = 'none';
+    blanesEl.hidden = true;
+    bubbleEl.classList.add('on');
+    return;
+  }
+  bnumEl.style.color = ''; // 常规路径回落 tier 色（.bubble color: var(--tier)）
   // the bubble is the pet's only speed readout (mini form has nothing else),
   // so it stays up permanently: live number + unit, or "…" until one exists.
   // 消毒契约（既定决策）：本气泡默认不展示 agent 原始文本，只显示数值
@@ -513,6 +536,18 @@ async function poll() {
   // the cat run forever. 10 min without any gen event demotes to cruise —
   // long enough that a real marathon generation isn't visually cut short.
   if (st.gen && Date.now() - genLastAt > GEN_STALE) { st.gen = false; st.lanes = 0; }
+  // C6 waiting 行：随 poll 通道另起一条 summary fetch（5s 周期，pet.html poll
+  // 先例形态——/api/widget/recent 是数组响应无法附带摘要）。waiting_count>0
+  // 时推进 permHoldUntil（hold=2× 轮询周期，见 WAITING_HOLD_MS 头注），mood 落
+  // waiting_permission（位次＝gen 之后，纯决策在 pet-state.js）；失败静默——
+  // hold 自然过期回落，不猜不告警。
+  try {
+    const r2 = await fetch('/api/signals/summary', { cache: 'no-store' });
+    if (r2.ok) {
+      const sum = await r2.json();
+      if (sum && sum.waiting_count > 0) st.permHoldUntil = Date.now() + WAITING_HOLD_MS;
+    }
+  } catch { /* silent: dead server keeps the last known mood */ }
   // idle demotion is time-based, so it must run even when the fetch failed
   render();
 }
@@ -543,9 +578,90 @@ function openSSE() {
   } catch { /* EventSource unavailable: pet lives on poll data alone */ }
 }
 
+// ── C8 notify 消费：气泡 + 提示音（受声音开关）────────────────────────────
+// 新开一条 /api/live/events 订阅（pet 原只订 /api/gen/events；widget.html 的
+// /api/live/events 订阅同款先例）——只听 notify 帧，连接失败静默（速度读数与
+// waiting 态由 poll 数据面兜底，不依赖此流）。降级矩阵三页统一语义（app.js
+// notifyChannels 注释钉）：本页通道子集＝气泡（恒在底线通道，不受开关控制，
+// alert/warn 级当然包含）+ 提示音（sound/alert 强度 × 声音开关）；系统通知与
+// TTS 由面板页独有（多页同开不重复打扰）。
+// 声音开关与面板同源共享（localStorage 同面板 origin）：键名/值语义与
+// app.js NOTIFY_KEYS 钉死同款（zc-notify-sound；null=默认开、'0'=显式关）。
+const NOTIFY_SOUND_KEY = 'zc-notify-sound';
+function notifySoundOn() {
+  try { return localStorage.getItem(NOTIFY_SOUND_KEY) !== '0'; } catch { return true; }
+}
+// 幂等去重双保险（服务端冷却之外）：按载荷 id 有界记忆（app.js 同款、内联同
+// 语义实现——本页不引 app.js）。Map 插入序≈时间序（id 含 at 时间戳），超界
+// 丢最旧，防长开标签无界增长。
+const notifySeen = new Map();
+const NOTIFY_SEEN_CAP = 200;
+function notifyDuplicate(id) {
+  if (id == null) return false;
+  if (notifySeen.has(id)) return true;
+  notifySeen.set(id, Date.now());
+  if (notifySeen.size > NOTIFY_SEEN_CAP) notifySeen.delete(notifySeen.keys().next().value);
+  return false;
+}
+// WebAudio 短提示音：oscillator 内置合成（零外联、零音频资源文件）；音量克制
+// （峰值 gain 0.06）、时长 0.2s——与 app.js notifyChime 同语义（自动播放策略
+// 下 resume() 尽力而为，失败静默：气泡通道仍在）。
+let notifyAudio = null;
+function notifyChime() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!notifyAudio) notifyAudio = new AC();
+    if (notifyAudio.state === 'suspended') notifyAudio.resume().catch(() => {});
+    const t0 = notifyAudio.currentTime;
+    const osc = notifyAudio.createOscillator();
+    const gain = notifyAudio.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(0.06, t0 + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18);
+    osc.connect(gain); gain.connect(notifyAudio.destination);
+    osc.start(t0); osc.stop(t0 + 0.2);
+  } catch { /* 音频栈不可用：静默降级（气泡恒在） */ }
+}
+// 气泡通知 hold：notify 文本临时接管气泡（速度读数是常驻内容、poll 5s 的
+// render() 会重写——hold 期间 render() 尊让，过期回落）。8s 与 widget 副行
+// 淡出同拍（跨页一致的提醒驻留时长，页面侧常量，可调整）。
+const NOTIFY_HOLD_MS = 8 * 1000;
+let notifyHoldUntil = 0, notifyText = '', notifyColor = '';
+
+function onNotify(e) {
+  let n; try { n = JSON.parse(e.data); } catch { return; }
+  if (!n || typeof n !== 'object') return;
+  if (notifyDuplicate(n.id)) return;
+  // 气泡文本一律过消毒闸（sanitize.js 隐私剥除）+ textContent 渲染出口（防
+  // 注入真闸门——两闸正交缺一不可）；80 字符防御截断（气泡 nowrap，超长溢出
+  // mini 窗的裁切比截断更难读；服务端文案均为短句，此为形态护栏，截断以
+  // 省略号明示）。
+  const full = `${n.title || n.rule}：${n.body || ''}`;
+  const raw = full.length > 80 ? full.slice(0, 79) + '…' : full;
+  notifyText = window.SanitizeSpeech ? window.SanitizeSpeech.sanitizeSpeech(raw) : raw;
+  notifyColor = n.severity === 'err' ? 'err' : n.severity === 'warn' ? 'warn' : 'ok';
+  notifyHoldUntil = Date.now() + NOTIFY_HOLD_MS;
+  const intensity = n.intensity || 'quiet';
+  if ((intensity === 'sound' || intensity === 'alert') && notifySoundOn()) notifyChime();
+  render();
+}
+
+function openNotifyStream() {
+  try {
+    const notifyEs = new EventSource('/api/live/events');
+    notifyEs.addEventListener('notify', onNotify);
+    // 与 openSSE 不同，不做 60s 重试节流：此流只承载通知面（即发即失、错过
+    // 不补），原生 ~3s 重连的空转代价可忽略；失败静默。
+  } catch { /* EventSource 不可用：气泡通知停用，桌宠其余功能不受影响 */ }
+}
+
 poll();
 setInterval(poll, 5000);
 openSSE();
+openNotifyStream();
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) { poll(); lastTs = 0; } // resync frame pacing after rAF pause
 });

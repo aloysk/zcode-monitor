@@ -38,8 +38,8 @@ test('契约: sessions.js 的 stdout/stderr 渲染点在 escapeHtml( 内', () =>
     'exec 输出不得以 ${out.stdout}/${out.stderr} 直插 <pre>');
 });
 
-// 3) R-8 已决：系统字体为最终形态，页面零外联——widget/pet 两页不得再引入
-//    远程字体 @import，CSP 不得再放行 fonts.googleapis/gstatic 域（曾是被
+// 3) R-8 已决：系统字体为最终形态，页面零外联——widget/pet 两页与 styles.css
+//    不得再引入远程字体 @import，CSP 不得再放行 fonts.googleapis/gstatic 域（曾是被
 //    「CSP 仅存外联域」钉住的状态，重新引入即回归）。styles.css 的 Geist/
 //    JetBrains Mono 与两页的 Source Sans 3/Noto Sans SC 家族名保留为本地
 //    可选（本机装了就用、没装走系统栈），属预期形态不算外联。
@@ -51,7 +51,27 @@ test('契约: 零外联字体——widget/pet 无远程 @import，CSP 无字体�
   }
   const styles = readPublic('styles.css');
   assert.ok(!/fonts\.(googleapis|gstatic)\.com/.test(styles), 'styles.css 不得引用 Google Fonts 域');
+  // T1 补钉：styles.css 此前只钉 Google Fonts 域，未钉 @import 形态本身——
+  // 不得再出现任何外联 @import。本地 `@import "foo.css"` 形态本仓不存在，
+  // 若未来引入本地拆分文件则需同步修此断言。
+  assert.ok(!/@import\s+url\(/i.test(styles), 'styles.css 不得有 @import url(（外联样式零引入）');
   const csp = fs.readFileSync(path.join(__dirname, '..', 'server', 'http-hardening.js'), 'utf8');
   assert.ok(!/fonts\.(googleapis|gstatic)\.com/.test(csp),
     'CSP 常量不得再放行字体域（style-src/font-src 均应只含 self + unsafe-inline）');
+});
+
+// 4) R8-2（batch2 终审第 1 轮补钉）：batch2 新增/新改前端文件零外联资源——
+//    views/recap.js 是本批唯一全新前端视图、views/sessions.js 与 app.js/
+//    views/overview.js 携带 notify/waiting 新增段；app.js/overview.js 的
+//    http 外链面由 notify-view.test.js 的 C8-6 断言覆盖，本钉补齐 recap/
+//    sessions 两文件并把四文件的外联样式/字体形态一并钉死（CSP default-src
+//    'self' 是运行时兜底，本钉防源码层回归先于 CSP 拦截）。
+test('契约: batch2 前端文件零外联资源（R8-2——recap/sessions 并入零外联守护面）', () => {
+  for (const f of ['views/recap.js', 'views/sessions.js', 'app.js', 'views/overview.js']) {
+    const src = readPublic(f);
+    assert.ok(!/@import\s+url\(/i.test(src), `${f} 不得有外联 @import url(`);
+    assert.ok(!/url\(\s*['"]?https?:/i.test(src), `${f} 不得引用远程 url() 资源`);
+    assert.ok(!/fonts\.(googleapis|gstatic)\.com/.test(src), `${f} 不得引用 Google Fonts 域`);
+    assert.ok(!/https?:\/\/(?!127\.0\.0\.1|localhost)/.test(src), `${f} 不得含非回环 http(s) 链接`);
+  }
 });

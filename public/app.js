@@ -87,10 +87,10 @@ async function getJSON(url, opts = {}) {
   }
 }
 
-function toast(msg) {
+function toast(msg, ms = 2400) {
   const t = $('#toast');
   t.textContent = msg; t.hidden = false;
-  clearTimeout(toast._t); toast._t = setTimeout(() => t.hidden = true, 2400);
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.hidden = true, ms);
 }
 
 function pct(part, whole) { return whole ? Math.min(100, Math.round(part / whole * 100)) : 0; }
@@ -277,11 +277,169 @@ async function snapshotLoop() {
   setTimeout(snapshotLoop, 30 * 1000);
 }
 
+// C6 顶栏 waiting chip：/api/signals/summary 轮询（周期 30s——waiting 是分钟级
+// 信号，chip 降频足够；healthLoop 实测 5s 周期，不作先例，spec §2.1 需求 4
+// 第 2 轮勘正口径）。waiting_count>0 显示 + 点击跳会话页（waiting 徽标在那；
+// 置顶分组已按 C6-8 处置摘除），为 0 隐藏；获取失败静默隐藏（fail-safe，
+// 不告警——freshness-chip/snapshot-alert 同款纪律）。oldest_waiting_ms 经
+// fmtFreshnessLag 显示格式化（60s/1h 只是显示阈值，与任何分档判定无关）。
+async function signalsLoop() {
+  let s = null;
+  try { s = await getJSON('/api/signals/summary', { retries: 1 }); }
+  catch { s = null; } // fail-safe：chip 停在隐藏态，不告警不猜
+  const chip = $('#waiting-chip');
+  if (chip) {
+    if (s && s.waiting_count > 0) {
+      chip.hidden = false;
+      chip.textContent = s.waiting_count + ' 等待中';
+      chip.title = 'interactive 会话时间启发式判定为等待用户（低置信，可能误报）'
+        + `——最长等待 ${fmtFreshnessLag(s.oldest_waiting_ms || 0)}`
+        + '\n点击到会话页查看 waiting 徽标';
+    } else {
+      chip.hidden = true;
+    }
+  }
+  setTimeout(signalsLoop, 30 * 1000);
+}
+
+// ── C8 notify 消费（全局层：切页不断流——通知是全局面非视图面）──────────────
+// app.js 层订阅 /api/live/events 的 notify 帧（server/notify.js 规则引擎经
+// live.js 转发；views/overview.js:456 的 liveEs 只听 model/tool，notify 帧无
+// 监听被浏览器忽略，不构成双呈现）。载荷 {id, rule, title, body, severity,
+// intensity, at, session?}——intensity 是服务端下发的强度轴（rule→intensity
+// 映射单一来源在服务端，前端不复制表）。body 含库内字符串（会话标题等，
+// 服务端生成仍视为不可信输入）——本页通知面走 toast()（textContent 写入），
+// 系统通知 body 亦按字符串原样递交浏览器 API，无 innerHTML 面。
+//
+// 连接预算披露（终审第 1 轮代码席 minor，R-36 登记）：HTTP/1.1 同源 6 连接
+// 上限下，三页设计形态常开连接＝index 2（本流 + 活动视图 liveEs 同端点）+
+// widget 2（live+gen）+ pet 2（gen+notify）＝恰 6 贴满，再开第四个面板页签
+// 的 SSE 会排队（HTTP/2 不受此限，本服务为 HTTP/1.1）。本流与视图流不合并
+// 是有意的形态切分（通知面切页不断流 vs 视图流随视图生命周期），单用户本
+// 地姿态下按接受处理；复用合并的取舍与触发条件见 residuals R-36。
+//
+// 三开关（localStorage 持久化，spec §2.2 需求 4）：声音默认开、系统通知默认
+// 关、TTS 默认关。同源跨页共享（pet/widget 与本页同面板 origin，关一次全局
+// 生效）。值语义：null/缺省=默认；'1'=显式开；'0'=显式关。
+const NOTIFY_KEYS = { sound: 'zc-notify-sound', desktop: 'zc-notify-desktop', tts: 'zc-notify-tts' };
+function notifySwitches() {
+  const read = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+  return {
+    sound: read(NOTIFY_KEYS.sound) !== '0',     // 默认开：仅显式 '0' 关
+    desktop: read(NOTIFY_KEYS.desktop) === '1', // 默认关：仅显式 '1' 开
+    tts: read(NOTIFY_KEYS.tts) === '1',         // 默认关：仅显式 '1' 开
+  };
+}
+function setNotifySwitch(key, on) {
+  try { localStorage.setItem(NOTIFY_KEYS[key], on ? '1' : '0'); }
+  catch { /* localStorage 不可用（隐私模式）：仅记忆失联，页面功能不崩 */ }
+}
+
+// 降级矩阵（三页统一语义——pet/widget 各自内联同款实现，两页不引 app.js；
+// 语义钉靠本注释+test/notify-view.test.js 源码契约对齐）：实际呈现＝内建
+// 强度（intensity）∩ 已开启通道。quiet → 仅气泡；sound → 气泡+提示音（声音
+// 开）；alert → 气泡+提示音+系统通知（各自开关）。气泡是三页恒在的底线通道
+// （页内信息面、非打扰通道，不受开关控制——spec §2.2 需求 4 第 1 轮评审钉：
+// 出厂默认形态＝系统通知关+声音开，alert 级实际呈现=提示音+气泡）。
+function notifyChannels(intensity, sw) {
+  const audible = intensity === 'sound' || intensity === 'alert';
+  return {
+    bubble: true,                                  // 底线通道恒在
+    sound: audible && sw.sound,                    // sound/alert 强度 × 声音开关
+    desktop: intensity === 'alert' && sw.desktop,  // alert 强度 × 系统通知开关
+  };
+}
+
+// 幂等去重双保险（服务端冷却之外的兜底——SSE 重连/多页同开时同一 id 不二次
+// 打扰）：按载荷 id 有界记忆，Map 插入序≈时间序（id 含 at 时间戳），超界丢
+// 最旧，防长开标签无界增长。三页同款（pet/widget 内联同语义实现）。
+const notifySeen = new Map();
+const NOTIFY_SEEN_CAP = 200;
+function notifyDuplicate(id) {
+  if (id == null) return false;
+  if (notifySeen.has(id)) return true;
+  notifySeen.set(id, Date.now());
+  if (notifySeen.size > NOTIFY_SEEN_CAP) notifySeen.delete(notifySeen.keys().next().value);
+  return false;
+}
+
+// WebAudio 短提示音：oscillator 内置合成（零外联、零音频资源文件）。音量克制
+// （峰值 gain 0.06——0.05-0.1 量级）、时长 0.2s（<0.3s）。自动播放策略：非
+// 用户手势路径创建的 AudioContext 处于 suspended 态，resume() 尽力而为——
+// 失败静默（气泡通道仍在，不因音频降级丢提醒）。
+let notifyAudio = null;
+function notifyChime() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!notifyAudio) notifyAudio = new AC();
+    if (notifyAudio.state === 'suspended') notifyAudio.resume().catch(() => {});
+    const t0 = notifyAudio.currentTime;
+    const osc = notifyAudio.createOscillator();
+    const gain = notifyAudio.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(0.06, t0 + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18);
+    osc.connect(gain); gain.connect(notifyAudio.destination);
+    osc.start(t0); osc.stop(t0 + 0.2);
+  } catch { /* 音频栈不可用：静默降级（气泡恒在） */ }
+}
+
+// index 通知面：toast() 为基底（5s 驻留——通知文本含 body 比 2.4s 的操作
+// 反馈更长；toast 保持中性样式，severity 视觉色轴由 pet 气泡/widget 副行经
+// 各页 CSS 变量承载）。
+function presentNotify(n) {
+  if (!n || typeof n !== 'object') return;
+  if (notifyDuplicate(n.id)) return;
+  const sw = notifySwitches();
+  const ch = notifyChannels(n.intensity || 'quiet', sw);
+  if (ch.bubble) toast(`${n.title || n.rule}：${n.body || ''}`, 5000);
+  if (ch.sound) notifyChime();
+  // 呈现即授予态检查——权限请求只发生在 overview 设置区的显式开启路径
+  //（overview.js bindNotifySettings，C8-4 源码契约钉）。
+  if (ch.desktop && typeof Notification === 'function' && Notification.permission === 'granted') {
+    try {
+      new Notification(`zcode-monitor · ${n.title || n.rule}`, {
+        body: String(n.body || ''), tag: n.id,
+      });
+    } catch { /* 个别环境 new Notification 抛错：静默（其余通道已呈现） */ }
+  }
+  // TTS（Web SpeechSynthesis 内置，默认关；独立开关，强度轴与提示音一致——
+  // quiet 级页内信息不值得语音打扰）。无 TTS 引擎/network 资源引用。
+  if (sw.tts && (n.intensity === 'sound' || n.intensity === 'alert')
+      && 'speechSynthesis' in window) {
+    try {
+      const u = new SpeechSynthesisUtterance(`${n.title || n.rule}。${n.body || ''}`);
+      u.lang = 'zh-CN';
+      speechSynthesis.speak(u);
+    } catch { /* 语音栈不可用：静默降级 */ }
+  }
+}
+
+function startNotifyStream() {
+  try {
+    const es = new EventSource('/api/live/events');
+    es.addEventListener('notify', (e) => {
+      let n; try { n = JSON.parse(e.data); } catch { return; }
+      presentNotify(n);
+    });
+    // 连接失败由 EventSource 原生重连兜底；此流只承载通知面，页内其余功能
+    // 零依赖（挂了 onerror 反而会把传输抖动放大成 UI 噪音）。
+  } catch { /* EventSource 不可用：通知面停用 */ }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   // sync theme icon with the (already-applied) attribute
   syncThemeIcon(currentTheme());
   const toggle = $('#theme-toggle');
   if (toggle) toggle.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); toggleTheme(); });
+
+  // C6 waiting chip 跳转：与 nav 拦截器同款形态（preventDefault + hash 赋值），
+  // 点击落到会话页（waiting 徽标随行内渲染）。
+  const wchip = $('#waiting-chip');
+  if (wchip) wchip.addEventListener('click', (e) => { e.preventDefault(); location.hash = 'sessions'; });
 
   // Checkpoint button: fold WAL into main db so history survives ZCode exit.
   const ckpt = $('#checkpoint-btn');
@@ -324,6 +482,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   healthLoop();
   snapshotLoop();
+  signalsLoop();
+  startNotifyStream();
   // If a ?theme= override was used to open the page, persist it so subsequent
   // visits (and the toggle button) start from that choice.
   const q = new URLSearchParams(location.search).get('theme');
@@ -339,4 +499,5 @@ document.addEventListener('DOMContentLoaded', () => {
 window.ZC = { $, $$, fmtNum, fmtInt, fmtMs, fmtDur, fmtTime, fmtTimeFull, relTime,
   escapeHtml, shortId, statusBadge, getJSON, toast, pct, loading, errorCard,
   registerView, route, Chart,
-  cssVar, chartPalette, currentTheme, setTheme, toggleTheme, registerChart, destroyChart };
+  cssVar, chartPalette, currentTheme, setTheme, toggleTheme, registerChart, destroyChart,
+  notifySwitches, setNotifySwitch };

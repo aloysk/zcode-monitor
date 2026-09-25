@@ -35,6 +35,10 @@ R2 CSP 全文（`server/http-hardening.js` 为权威）：
 default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; connect-src 'self'; font-src 'self' https://fonts.gstatic.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
 ```
 
+2026-09-25 勘正（R-8 决策轮 `6d979ae`）：`style-src`/`font-src` 已撤销
+fonts.googleapis.com/fonts.gstatic.com 白名单，面板至此零外联域；CSP 权威以
+`server/http-hardening.js` 现态为准（上方 R2 全文保留为时点记录）。
+
 ## Chart.js 本地化的来源核对
 
 `public/assets/chart.umd.js` 取自官方 npm 包 `chart.js@4.4.4` 的 `dist/chart.umd.js`
@@ -61,5 +65,5 @@ console 0 errors / 0 warnings：
 
 CSP 收窄的是子资源加载与（部分）嵌入/导航面；**顶层导航本身任何 CSP 都管不住**
 ——「钉死外传面」的说法不成立：数据外传受 `connect-src 'self'` 限制，导航型外传
-需用户参与。字体两域（fonts.googleapis.com / fonts.gstatic.com）仍外联，
-本地化取舍见 `docs/acceptance/residuals.md` R-8。
+需用户参与。字体零外联（系统字体为最终形态，R-8 已销账，回归钉
+`test/frontend-contract.test.js`）；样式/字体家族名保留为本地可选。

@@ -58,13 +58,16 @@ const ERROR_LOG_INTERVAL_MS = 30 * 1000;
 // blocked node's event loop (observed: static sprite downloads stalling
 // mid-stream, /api/gen/state answering in 2.8s, pack switches rendering
 // blank). Rows are appended chronologically, and the hygiene windows above
-// mean only the newest rows can possibly qualify, so scanning the last 8000
-// rowids (MAX(rowid) is O(1)) yields identical counts in ~18ms.
+// mean only the newest rows can possibly qualify, so scanning the last
+// INFLIGHT_TAIL_ROWS rowids (MAX(rowid) is O(1)) yields identical counts in
+// ~18ms. Exported: db.js signalsInflightSessionIds embeds the same tail bound
+// in its own SQL — single source so the two cannot drift apart.
+const INFLIGHT_TAIL_ROWS = 8000;
 const SQL = `
   SELECT COUNT(*)                   AS inflight,
          COUNT(DISTINCT session_id) AS sessions
   FROM message
-  WHERE rowid > (SELECT MAX(rowid) FROM message) - 8000
+  WHERE rowid > (SELECT MAX(rowid) FROM message) - ${INFLIGHT_TAIL_ROWS}
     AND json_extract(data, '$.role') = 'assistant'
     AND json_extract(data, '$.time.completed') IS NULL
     AND time_created > ?
@@ -185,4 +188,9 @@ function createGenWatcher(dbq, { pollMs = POLL_MS } = {}) {
   };
 }
 
-module.exports = { createGenWatcher };
+// 卫生窗常量一并导出（batch2 T2）：db.js Session signals 查询族的在飞判据与
+// 本模块同窗同义，默认参数引本导出（单一来源——字面量双份定义会 drift，改窗
+// 只改这里）。导出纯 additive，零行为变更。
+module.exports = {
+  createGenWatcher, CREATED_WINDOW_MS, UPDATED_WINDOW_MS, INFLIGHT_TAIL_ROWS,
+};

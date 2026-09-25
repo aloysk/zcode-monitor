@@ -36,6 +36,18 @@
         <p style="font-size:13px;margin:0 0 10px;color:var(--fg-1)">ZCode 官方对用量三表（model_usage / turn_usage / tool_usage）执行 <b>30 天保留策略</b>（<code>USAGE_RETENTION_DAYS=30</code>——每次写入后删除早于 30 天的行，见 docs/usage-accounting.md §1）。本机实测（2026-09-25）：三表最早行均 ≈2026-08-25，prune 已生效；现有 model_usage 404,782 行（约 40.5 万）、turn_usage 13,776 行（约 1.4 万）、tool_usage 547,227 行（约 54.7 万）。本面板所有窗口级读数（含「回合与工具」页的 30d 档）上限即这 30 天保留窗——更早的年尺度数据无来源。</p>
         <p style="font-size:12.5px;margin:0;color:var(--fg-2)">口径提示：官方 <code>queryTaskUsage()</code> 的 input 是<b>会话内增量</b>口径（压缩 baseline 不回扣，详见 docs/usage-accounting.md「queryTaskUsage 增量口径（C1 增补）」小节）；本面板的窗口聚合仍以 <code>SUM(computed_total_tokens)</code> 官方预计算值为准，两者是不同口径、不可混用。</p>
         <p style="font-size:12.5px;margin:8px 0 0;color:var(--fg-2)">窗口级读数去哪看：<b>「回合与工具」</b>页按窗口看回合健康度（完成/错误/取消分布、error_type Top5、逐回合时间线）与工具分档（成功率/耗时/审批终态）；<b>「Token 归因」</b>页回答 token 和时间都去哪了——会话层火焰图（帧宽=token 份额，可下钻回合层），帧内子条按 query_source 分解；「会话 → Context」标签顶部有<b>上下文水位区</b>（占用比/逐轮增量曲线/compaction 回落摘要，随已落库请求实时推进）。</p>
+        <p style="font-size:12.5px;margin:8px 0 0;color:var(--fg-2)">数据导出：脚本/报表消费走统一机读端点 <code>GET /api/export/{overview|usage|recap}?format=json|csv</code>（overview/usage 传 <code>window</code>、recap 传 <code>period</code>，参数值域与对应源端点一致）。JSON 响应带 <code>schema_version=1</code> 包络，<code>meta</code> 携带保留窗/cap 覆盖等口径标注（与页面同源）；CSV 为 RFC 4180 转义、以 <code>=</code> <code>+</code> <code>-</code> <code>@</code> 开头的字段前置 <code>'</code> 防公式注入——Excel / Google Sheets 导入时这些单元格按文本处理（数字不受影响），需数值计算时自行去掉前导 <code>'</code>。</p>
+      </div>
+
+      <h2>active hours（活跃时长）怎么算 <span class="sub">「回顾」页读数的口径</span></h2>
+      <div class="card">
+        <p style="font-size:13px;margin:0 0 10px;color:var(--fg-1)">活跃时长不是把各会话的在线时长简单相加——并行会话同时干活时，墙钟只算一次。口径：<b>每次模型请求（model_usage 一行）是一个活动事件</b>，投到按服务器本地时区自然日界切分的 <b>5 分钟桶</b>；活跃时长＝有活动的桶数，<b>跨会话去重——并行会话落在同一个 5 分钟桶只计一次</b>（社区实践实测：一周原始 177h 去重后 64h，本仓同款口径）。</p>
+        <ul style="color:var(--fg-2);font-size:12.5px;line-height:1.8;margin:0;padding-left:18px">
+          <li><b>N× parallel</b>＝桶内并行会话数的 max / avg——「最多几个 agent 同时在干活」的派生指标，不是瞬时在飞计数（那看顶栏与挂件的 ×N）</li>
+          <li><b>年档是上界口径</b>：活动时长改用 session 表 <code>time_created→time_updated</code> 区间并集（跨 30 天窗可用），区间含挂机时间——是<b>上界</b>而非净工作时长（响应 activity.caliber 字段披露档别）</li>
+          <li><b>覆盖边界</b>：token/请求维度受官方 30 天保留与宽窗候选集钳制（cap）双约束，实际可读起点＝期首、30 天线、cap 覆盖起点三者的最大值（meta.token_coverage_from 如实披露）；覆盖之前的日期不产出日桶——数据不可读≠零活动，柱状不从左邻插值</li>
+          <li>去哪看：<b>「回顾」</b>页——Top focus（按目录聚合的 token/调用/去重活跃分钟）、本期要点、日桶走势、周环比与常驻覆盖披露卡</li>
+        </ul>
       </div>
     </div>`;
     loadConcepts();
