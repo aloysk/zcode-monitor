@@ -21,7 +21,7 @@ npm test                   # node --test test/index.js（聚合入口）
 
 1. **对 `~/.zcode/` 零写入**（只读承诺）。唯一例外：ZCode 退出且 `-wal` 静默 ≥60s 后的
    `wal_checkpoint(TRUNCATE)`；`?force=1` 也不得绕过 `wal_active` 的 409 拒绝。
-2. **性能红线**：真实库 14.6-17GB，每条 SQL 必须命中 `started_at` 索引或 rowid 尾部；
+2. **性能红线**：真实库约 18GB（2026-09-25 实测，原锚点 14.6-17GB），每条 SQL 必须命中 `started_at` 索引或 rowid 尾部；
    禁止事件循环长阻塞（better-sqlite3 是同步 API；历史事故：tasklist 同步探测 5-7s、
    message 全表扫描 2.4s、负 LIMIT 整表物化 8.8s——均已修复，同类模式视为回归）。
    行数参数一律经 `clampLimit`/`clampAtLeast`（server/http-hardening.js）钳界。
@@ -42,6 +42,19 @@ npm test                   # node --test test/index.js（聚合入口）
 
 ## 当前状态（2026-09-25）
 
+- 五席全量审查两轮（fix/batch2-five-seat，基于 4909a97）：代码/SQL/测试/安全/
+  前端视觉+文档口径五席并行 × 2 轮全量覆盖（R2 含双席独立变异复验）。R1
+  2 major + 4 minor——notify 冷却「过期再发」分支变异存活（测试席实锤：改
+  「发送过即永续」全套绿）→ nowFn 时钟注入 + 2 例钉死；c8 toast 验收帧主题
+  错位（light 帧实深色/dark 帧无 toast）→ 双主题 v2 重拍 + human-gate 勘误注；
+  另 titleOf 钳 80/presentNotify 三页消毒对称（index 补引 sanitize.js）/
+  signalsSessionTypes IN 分块/maxListeners 50/恰等边界 ×2/SQL 恰 2 条契约钉/
+  LF 毒行/R-40 主题图标 SVG hidden 不反射修复+契约钉。R2 1 major（R-40 同族：
+  checkpoint busy 态 iconSvg 同机理无效赋值）+ 文档数字同步（12→13 帧 ×3、
+  红线锚点 18GB）+ widget 副行 80 截断 + titleOf 恰 80 钉；4 READY/1 NEEDS_FIX
+  收口。测试 384→393 直列绿。R-40 当轮销账；观察级登记：notify 侧 IN 分块
+  测试对称性、IN 常量三处分立、UTF-16 代理对截断边界（详见 residuals
+  changelog）。
 - batch2 六席终审第 1 轮修复轮（feature/ecosystem-round2-batch2）：27 条逐条
   闭环——export csvCell 公式注入字符集补 TAB/CR/LF（OWASP 建议集）；notify
   冷却记忆有界化（NOTIFY_COOLDOWN_CAP=1000 键序逐出）+ signalsWindowMs 注入
@@ -52,8 +65,9 @@ npm test                   # node --test test/index.js（聚合入口）
   （waiting_timeout 维持默认关，spec §2.2 表加偏差注）；登记 R-34～R-38
   （间歇红未根因/recap 串行 5 SQL 观察项/SSE 6 连接贴满/路由无卸载钩子/
   token_threshold 单 tick 上限建议）。测试 +6 处，全套两口径绿（聚合
-  60893ms exit 0；直列 39 文件 384/384）；GX-2 恰两依赖。7399 真库补拍 12
-  帧（c8-*/c6-*/batch2-v3-*，waiting 帧真实会话直拍；AI 目检 429/400 两形态
+  60893ms exit 0；直列 39 文件 384/384）；GX-2 恰两依赖。7399 真库补拍 13
+  帧（c8-*/c6-*/batch2-v3-*，waiting 帧真实会话直拍；原记 12 系计数笔误，
+  枚举即 13——五席轮勘正；AI 目检 429/400 两形态
   故障如实记录，留人工）；gates 照录 round2-batch2-gates.md。
 - 生态采纳 batch2（feature/ecosystem-round2-batch2，T1-T8 八任务 + 实现评审
   第 1 轮 + UI 视觉验证 + 六席终审第 1 轮）：C6 会话状态信号——signals.js
@@ -78,8 +92,8 @@ npm test                   # node --test test/index.js（聚合入口）
   47.8%——needs-attention 置顶摘除、C8 waiting_timeout 落默认关（R-28 ③款
   终审落锤维持默认关，判定语义照 spec 原文保留可回翻）。评审链：规格与计划
   各经三席两轮对抗审查通过后定稿（09ec130/27b052f）；实现评审第 1 轮三席
-  合并修复（de91255）；UI 视觉验证 0 修 2 未决（de38c9f，终审轮补拍 12 帧
-  收窄）；六席终审第 1 轮 27 条闭环（33bcbb1）。测试 297→384 全绿（两种
+  合并修复（de91255）；UI 视觉验证 0 修 2 未决（de38c9f，终审轮补拍 13 帧
+  收窄，原记 12 系计数笔误——五席轮勘正）；六席终审第 1 轮 27 条闭环（33bcbb1）。测试 297→384 全绿（两种
   计数口径，39 文件；GX-2 恰两依赖）。已知边界登记 R-28～R-39（误报降级/
   导出裁剪/notify 无回放/per-rule 配置面/缺索引回退/C3 待后续/间歇红未根因/
   recap 串行 SQL/SSE 6 连接/路由无卸载钩子/单 tick 上限/三项人工评审）。

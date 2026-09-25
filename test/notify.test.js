@@ -161,6 +161,21 @@ test('C8-1 titleOf 钳 80: 会话标题超长截断为 79 字符+省略号', () 
   assert.ok(!fire[0].body.includes(long), '完整超长标题不上线');
 });
 
+// 五席第 2 轮 N-3：恰 80 边界——`> 80` 才截，恰等保原长（杀 `>=` 变异）。
+test('C8-1 titleOf 恰 80 不截断: 边界值保原长', () => {
+  const exact = '长'.repeat(80);
+  const on = { rules: { ...RULE_DEFAULTS,
+    waiting_timeout: { ...RULE_DEFAULTS.waiting_timeout, enabled: true } } };
+  const fire = evaluateRules({
+    waitingSessions: [{ session_id: 'w1', waiting_since: N - 6 * MIN }],
+    titles: new Map([['w1', exact]]),
+    now: N,
+  }, on);
+  assert.equal(fire.length, 1);
+  assert.ok(fire[0].body.includes(exact), '恰 80 保原长');
+  assert.ok(!fire[0].body.includes('…'), '恰 80 不得加省略号');
+});
+
 test('C8-1 无状态钉: 注入两次相同输入，条件评估结果一致', () => {
   const inputs = {
     errorCounts: { model: 3, tool: 0 },

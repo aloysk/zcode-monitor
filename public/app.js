@@ -465,7 +465,9 @@ document.addEventListener('DOMContentLoaded', () => {
       busy.hidden = true;
       document.getElementById('checkpoint-icon').appendChild(busy);
     }
-    iconSvg.hidden = true; busy.hidden = false;
+    // SVG 显隐走 content attribute（R-40 同族：SVGElement 无 hidden IDL 反射）；
+    // busy 是 span（HTMLElement），IDL 赋值正常反射。
+    iconSvg.setAttribute('hidden', ''); busy.hidden = false;
     ckpt.disabled = true;
     try {
       // 首部闸（防跨站 <img> 触发 force checkpoint）：面板同源 fetch 恒可携带
@@ -480,7 +482,7 @@ document.addEventListener('DOMContentLoaded', () => {
         toast('checkpoint 失败：' + (r.error || r.message || ''));
       }
     } catch (err) { toast('checkpoint 出错：' + err.message); }
-    finally { iconSvg.hidden = false; busy.hidden = true; ckpt.disabled = false; }
+    finally { iconSvg.removeAttribute('hidden'); busy.hidden = true; ckpt.disabled = false; }
   });
 
   // keyboard shortcut: press "t" to toggle theme (handy when click is flaky)

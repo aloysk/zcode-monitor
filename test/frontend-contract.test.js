@@ -91,3 +91,13 @@ test('契约: app.js syncThemeIcon 用 content attribute 翻转 SVG 显隐（R-4
   assert.ok(body.includes("sun.removeAttribute('hidden')"), '太阳显示分支须 removeAttribute');
   assert.ok(!/\.hidden\s*=/.test(body), 'SVG 显隐禁用 IDL 赋值（SVGElement 上不反射 content attribute，R-40 事故形态）');
 });
+
+// 6) R-40 同族（五席第 2 轮代码席 F-1）：checkpoint 按钮 busy 态的 iconSvg
+//    是 SVGElement，显隐同样必须 attribute 翻转；busy 是 span（HTMLElement）
+//    不受限。
+test('契约: app.js checkpoint busy 态 SVG 显隐走 attribute（R-40 同族）', () => {
+  const src = readPublic('app.js');
+  assert.ok(src.includes("iconSvg.setAttribute('hidden', '')"), 'busy 进入分支须 setAttribute');
+  assert.ok(src.includes("iconSvg.removeAttribute('hidden')"), 'busy 退出分支须 removeAttribute');
+  assert.ok(!/iconSvg\.hidden\s*=/.test(src), 'iconSvg（SVG）禁用 IDL 赋值（R-40 同族事故形态）');
+});
