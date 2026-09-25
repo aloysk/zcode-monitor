@@ -34,6 +34,7 @@
 -  **推理可视化** —— 思考型模型的推理链单独呈现，与最终回答分开，点击展开。
 - ️ **原始数据查看器** —— 直接查任意 SQLite 表（`where` / `order` / 降序，JSON 列可展开）。
 -  **数据新鲜度恒显** —— `/api/health` freshness 双源（数据落后毫秒数 + ZCode 运行态）：顶栏「数据落后 X」chip 常驻（ok/warn/err 分色），widget（胶囊页）hover 卡含当日缓存命中率副行（桌宠页气泡走速度轮询口径，无此副行）。
+-  **数据导出** —— `GET /api/export/{overview|usage|recap}?format=json|csv`：统一机读出口，JSON 带 `schema_version=1` 包络（`data`＝源端点载荷原形，`meta` 含 retention_days/scope 等口径标注）、CSV 为 RFC 4180 转义（公式注入防护：`= + - @` 开头字段前置 `'`）；与源端点同一查询族（零第二套聚合），未知 dataset/format 一律 400（机器可读面从严，不静默回退）。
 -  **双主题** —— Dark（默认）/ Light，三种切换方式。
 - 🐾 **宠物一键导入** —— Codex 格式宠物包（`pet.json + spritesheet.webp`）一键导入，导入时校验 sheet 尺寸 / 行数 / JSON 健全性并生成 NOTICE，且**按白名单复制**（只带走 pet.json / 精灵图 / NOTICE / README·LICENSE 文本，`.html`/`.svg` 等一律跳过并告警）；许可证缺失、或自报值不在已知 SPDX/惯用写法白名单的包**缺省拒绝导入**，需显式确认（CLI `--ack-unlicensed`、图鉴页确认弹窗、API `ackUnknownLicense: true`；确认后照 NOTICE 记录自报值并放行）；CLI（`node tools/import-pet.js <包目录>`）、API（`POST /api/pets/import`）与图鉴页（`pets-preview.html`）三个入口共用同一校验模块。
 - ⚡ **fs.watch 实时增强** —— 日志目录 `fs.watch` 监听 + 字节偏移增量解析，JSONL 追加即触发、大幅降低日志尾部发现延迟；watch 失败自动降级短轮询，周期偏移对账兜底，事件不丢不重。
@@ -242,6 +243,7 @@ zcode-monitor/
 │   ├── health-route.js       # /api/health 工厂（连接自愈探测 + 数据新鲜度 freshness）
 │   ├── models-meta.js        # 静态模型窗口表（上下文水位的数据面，resolve 精确匹配）
 │   ├── signals.js            # C6 会话状态信号纯分类器（working/waiting/idle/broken）
+│   ├── notify.js             # C8 本地提醒规则引擎（四规则+冷却，自有 30s tick，SSE notify 事件总线）
 │   └── routes/
 │       ├── overview.js       # 实时监控
 │       ├── sessions.js       # 会话列表 + 详情 7 端点（+ context-gauge 水位种子）
@@ -252,7 +254,9 @@ zcode-monitor/
 │       ├── raw.js            # 原始表查看器
 │       ├── usage.js          # /api/usage 三端点（turns/tools/attribution）
 │       ├── signals.js        # /api/signals/summary（C6 会话状态信号汇总）
-│       └── recap.js          # /api/recap 周/月/年回顾（C7 active hours 去重口径）
+│       ├── recap.js          # /api/recap 周/月/年回顾（C7 active hours 去重口径）
+│       ├── usage-window.js   # usage 族窗口解析/宽窗 scope 共享 helper（usage 与 export 同源消费）
+│       └── export.js         # /api/export/:dataset json|csv 导出（C12，schema_version 包络）
 ├── public/
 │   ├── index.html            # 单页 shell
 │   ├── app.js                # 路由 + 辅助函数

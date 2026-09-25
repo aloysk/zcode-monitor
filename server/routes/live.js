@@ -17,6 +17,7 @@
 const express = require('express');
 const dbq = require('../db');
 const log = require('../log-tail');
+const { sharedNotifyBus } = require('../notify');
 
 const router = express.Router();
 
@@ -58,9 +59,20 @@ router.get('/events', (req, res) => {
     }
   }, 1500);
 
+  // C8 notify 转发：订阅 process 级共享 bus，规则引擎（server/notify.js 的
+  // 自有 tick，非本路由 poll——评估调用点不在 live.js）触发的提醒以
+  // `event: notify` 帧推给本连接。具名 listener 引用是裸 EventEmitter 的退订
+  // 前提（.on 返回 emitter 本身、非退订闭包——index.js /api/gen/events 的
+  // livegen onEvent()→off() 是不同形态，仅语义同源）。notify 即发即失、不
+  // 回放（R-30）：本连接建立前触发的提醒不补发，兜底＝waiting chip 轮询。
+  const onNotify = (payload) =>
+    res.write(`event: notify\ndata: ${JSON.stringify(payload)}\n\n`);
+  sharedNotifyBus().on('notify', onNotify);
+
   req.on('close', () => {
     clearInterval(heartbeat);
     clearInterval(poll);
+    sharedNotifyBus().off('notify', onNotify);
   });
 });
 

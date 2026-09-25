@@ -180,3 +180,62 @@ interactive 且最新行 status='completed' → waiting 候选。后续判定＝
   （#3）同在线内。margin 偏窄（month 档 ~80% 线位），列入 R-22 复测观察面
   （既有「7d warm >450ms 或行数 model >150k 重测」触发线继续生效）。
 
+
+---
+
+## 3. T4 / C8-7：notify 引擎取数 SQL 真实库 EXPLAIN + 计时（2026-09-25）
+
+探针脚本留 `os.tmpdir()`（`zcmon-c8-7-probe.js`，只读连接 + busy_timeout
+5000ms）；SQL 与 `server/notify.js` 取数层运行时形态逐字一致（参数内联）；
+计时＝预热/二次单次执行墙钟。waiting 判定复用 C6 查询族与分类器
+（sessionsWithSignals，C6-7 判据、无独立时长 SQL），不重复照录。IN 探针
+取近 15min 活跃域前 10 会话（引擎真实域 ≤SIGNALS_MAX_ROWS=2000 有界）。
+
+| # | 查询 | 行数/值 | 计时（warm/second，ms） | EQP（照录） |
+|---|---|---|---|---|
+| 1 | error_burst model 窗计数（5min） | c=0 | 0.168 / 0.022 | `SEARCH model_usage USING INDEX model_usage_started_model_idx (started_at>?)` |
+| 2 | error_burst tool 窗计数（5min） | c=7 | 1.734 / 0.017 | `SEARCH tool_usage USING INDEX tool_usage_started_tool_idx (started_at>?)` |
+| 3 | token 会话内 SUM（IN(10) + 30d 下界） | 1 会话 s=1619033 | 0.160 / 0.017 | `SEARCH model_usage USING INDEX model_usage_session_turn_idx (session_id=?)` |
+| 3b | 同上对照（去掉 30d 下界） | 同值 1619033 | 0.076 / 0.015 | 同上（计划不变；30d prune 下两形同值——保留窗谓词是口径诚实项，不付计划代价） |
+| 4 | inactive 最新行时间戳（rowid=MAX(rowid)） | started_at=…099243 | 0.014 / 0.004 | `SEARCH model_usage USING INTEGER PRIMARY KEY (rowid=?)` \| `SCALAR SUBQUERY 1` \| `SEARCH model_usage` |
+| 5 | inactive 24h 存在性探测 | hit=1 | 0.020 / 0.004 | `SEARCH model_usage USING COVERING INDEX model_usage_started_model_idx (started_at>?)` |
+
+判据逐条：**无 SCAN**（#4 的 `SCALAR SUBQUERY 1` 内 `SEARCH model_usage`
+是 MAX(rowid) 的 O(1) 尾点寻址，非独立扫描）；窗计数走 started_at 索引
+（#1/#2/#5）、会话内 SUM 走 `model_usage_session_turn_idx`（#3，spec 钉）
+、rowid 尾点寻址（#4）。
+
+**单次评估 tick 总耗时**（全四规则开启的最重形态——默认形态仅
+error_burst+waiting_timeout 两规则开启，取数更少）：经
+`ZCODE_DB=<真库> node -e` 起 makeNotifyEngine 后计时 `evaluate()`＝
+**warm 35.1ms / second 15.7ms**（含 sessionsWithSignals 三路 + 窗计数两路
++ IN SUM + 标题补齐 + inactive 两路）——30s tick 节奏下事件循环占用可忽略
+（红线 2）。真实评估出的候选：error_burst×1（5min 窗 tool 7 行）+
+token_threshold 多会话（近窗 dwf actor 30d 累计 1M-5M+ 档，验证了同 tick
+跨档形态——引擎已加发送侧档位收敛，见 test/notify.test.js 收敛用例）。
+
+**源码契约**：notify.js 无全表 GROUP BY session 的无界聚合（唯一 GROUP BY
+session_id 语句在 `session_id IN (有界)` 寻址内，test/notify.test.js 源码
+契约钉）；`text/event-stream` 写头点全 server/ 仍 2 处（live.js/index.js）。
+
+**waiting_timeout 默认关（R-28 处置，与本节 SQL 无关的实施约束照录）**：
+T3 的 C6-8 误报回放抽样 39.8% 超 20% 线（§1.5），spec §2.1 需求 7 降级条款
+生效——C8 waiting_timeout 提醒面摘除。本任务按处置决策落「默认关」臂
+（`RULE_DEFAULTS.waiting_timeout.enabled=false`，判定/冷却/强度语义照
+spec §2.2 原文实现并保留，测试用显式开启钉；收口/终审裁决摘除或维持
+默认关）。spec §2.2 需求 2 表与交付默认的偏差即此一处，其余三规则与表
+逐项相等（test/notify.test.js 默认值钉）。
+
+**7396 冒烟（真库只读，2026-09-25）**：`PORT=7396 OPEN_BROWSER=0
+HOST=127.0.0.1` 起服 → `/api/health` 200（ok/freshness ok）→ SSE
+`/api/live/events` 客户端挂 38s，**首个引擎 tick（boot+30s）即收到
+`event: notify` 帧**（真库实况：error_burst，5min 窗 7 行 tool 错误——
+并行波工作流的真实数据）：
+
+```
+data: {"id":"error_burst:all:1790326289715","rule":"error_burst","title":"错误爆发","body":"近 5 分钟内错误 7 行（model 0 + tool 7）","severity":"err","intensity":"sound","at":1790326289715}
+```
+
+全链路（boot→单例装配→30s tick→真库评估→共享 bus→live.js per-connection
+转发→客户端帧）实测打通；服务端日志零 `[notify]` 错误；进程 SIGKILL 回收、
+端口复查无 LISTENING。

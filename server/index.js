@@ -9,6 +9,7 @@ const express = require('express');
 
 const dbq = require('./db');
 const { createGenWatcher } = require('./livegen');
+const { makeNotifyEngine } = require('./notify');
 const { createSnapshotWatcher, makeSnapshotRoute } = require('./snapshot-watch');
 const runtime = require('./zcode-runtime');
 const { loopbackHostGate, securityHeaders, petsStaticOptions, makeErrorTranslator } = require('./http-hardening');
@@ -25,6 +26,7 @@ const agents = require('./routes/agents');
 const { makeUsageRouter } = require('./routes/usage');
 const { makeSignalsRouter } = require('./routes/signals');
 const { makeRecapRouter } = require('./routes/recap');
+const { makeExportRouter } = require('./routes/export');
 const petImport = require('./pet-import');
 
 const PORT = +process.env.PORT || 7331;
@@ -188,6 +190,10 @@ app.use('/api/signals', makeSignalsRouter());
 // 桶跨会话去重/覆盖披露三元 max 的口径与装配见 server/routes/recap.js 头注；
 // buildRecapPayload 为模块级导出，T8 /api/export 的 recap 数据集同源消费）。
 app.use('/api/recap', makeRecapRouter());
+// /api/export（C12 导出夹带——GET /api/export/:dataset?format=json|csv；白名单
+// 400 / 同源钉 / CSV RFC 4180 转义与 schema_version 包络见 server/routes/
+// export.js 头注；挂 /api 路由区即被 Host 闸/securityHeaders/错误翻译层罩住）。
+app.use('/api/export', makeExportRouter());
 
 // /pets 静态服务收紧（须挂在与下面通用的 express.static 之前，注册顺序即命中
 // 顺序；构成见 server/http-hardening.js petsStaticOptions）：非图片一律
@@ -219,6 +225,13 @@ if (process.env.ZCODE_WIDGET_CHILD === '1') {
 // One watcher for the whole process; drives the token-speed pill's breathing
 // animation while official tps is frozen between request completions.
 const genWatcher = createGenWatcher(dbq);
+
+// ── notify engine (C8 本地提醒) ────────────────────────────────
+// process 级单例（livegen 先例）：四规则（错误爆发/等待超时/Token 阈值/不活跃）
+// 在自有 30s unref'd tick 内评估——不在任何请求路径，live.js 只订阅共享 bus
+// 转发 `event: notify` 帧。规则默认值/冷却维度/取数 SQL 契约见 server/notify.js
+// 头注；waiting_timeout 消费 C6 分类器（sessionsWithSignals 全库近窗域）。
+const notifyEngine = makeNotifyEngine({ dbq });
 
 app.get('/api/gen/state', (_req, res) => res.json(genWatcher.state()));
 
@@ -259,8 +272,8 @@ app.get('/api/gen/events', (req, res) => {
 
 // Stop the watchers on shutdown signals (their timers are already unref'd and
 // never block exit; this makes the teardown explicit and immediate).
-process.on('SIGINT', () => { genWatcher.stop(); snapshotWatcher.stop(); process.exit(0); });
-process.on('SIGTERM', () => { genWatcher.stop(); snapshotWatcher.stop(); process.exit(0); });
+process.on('SIGINT', () => { genWatcher.stop(); snapshotWatcher.stop(); notifyEngine.stop(); process.exit(0); });
+process.on('SIGTERM', () => { genWatcher.stop(); snapshotWatcher.stop(); notifyEngine.stop(); process.exit(0); });
 
 // token-speed floating widget page (loaded by the frameless WebView2 shell)
 app.get('/widget', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'widget.html')));
