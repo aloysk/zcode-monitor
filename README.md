@@ -24,7 +24,7 @@
 
 ## 特性
 
--  **实时监控** —— 模型调用数、token（输入/输出/推理/缓存）、工具调用、错误率、活跃会话；按小时趋势图；按模型 / 请求来源 / 工具的算力分布；SSE 实时推送。
+-  **实时监控** —— 模型调用数、token（输入/输出/推理/缓存）、工具调用、错误率、活跃会话；按小时趋势图；按模型 / 请求来源 / 工具的算力分布；SSE 实时推送；KPI/速度卡（含「主/子agent(含工作流)」计数）5s 自动刷新（7d 宽窗 30s 分频，数据未变的段跳过重渲染防闪）。
 -  **会话深挖** —— 左栏会话列表（搜索 / 筛选 / 排序，列表项带上下文水位 mini 条与会话状态徽标——waiting 虚线低置信、broken 红），右栏 7 个标签：Timeline / Context / Turns / Agents / Tasks / Usage / State。
 -  **上下文水位** —— 会话详情 Context 标签顶部水位区：占用比水位条、逐轮增量曲线（上=增长/下=回落）、compaction 边界与回落摘要，复用既有 SSE 通道随已落库请求实时推进；窗口值来自静态整理表（UI 恒标「非官方权威」，未收录模型不显百分比）。
 -  **回合与工具** —— 窗口级（24h/7d/30d，上限 30 天保留窗）回合健康度：完成/错误/取消分布、error_type Top5、逐回合时间线（TTFT/重试/context 超限）；工具分档表（成功率/成功行耗时/最大耗时/输出字节/read_only/destructive/审批终态分布）。
@@ -106,7 +106,7 @@ PORT=8000 ZCODE_DB=/path/to/db.sqlite npm start
   映射成 wire 风格行，按分类色编码。**推理流式输出折叠成 `◆ think` 行**，点击展开。
 - **Context** — 完整对话历史（SQLite message+part）。**推理思考(reasoning)用紫色侧边块单独呈现**，与最终回答分开，点击展开看全文。顶部为**上下文水位区**（占用比水位条 / 逐轮增量曲线 / compaction 回落摘要，SSE 实时推进）。
 - **Turns** — 每个 turn 的耗时横条 + token/工具统计。
-- **Agents** — 该会话派生的子 agent（profile、token、prompt）。
+- **Agents** — 该会话派生的子 agent（profile、状态、token、prompt）。计数为**会话全程累计派生**（每次 Agent 调用一个子会话，多轮并行评审跑几十个是常态），标题拆「活跃 N / 等待 K」（C6 逐子代理信号——working=模型请求在生成中，挂着不动超卫生窗自动归 idle），列表 5s 自动刷新。
 - **Tasks** — TodoWrite 写入的任务清单。
 - **Usage** — 每个 turn 的 token/工具明细表。
 - **State** — 会话元数据（cwd、parent、trace_id、时间）。

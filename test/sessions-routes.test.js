@@ -152,5 +152,54 @@ test('children: ZCODE_AGENTS_DIR 注入生效——metadata.json 富化 profile/
     assert.equal(children[0].profile, 'Explore');
     assert.equal(children[0].prompt, '找到内存泄漏');
     assert.equal(children[0].parentToolUseId, 'toolu_1');
+    // C6 信号同源合并（2026-09-27 用户「多少在工作」诉求）：四字段形状在；
+    // 无活动 fixture → idle（idleSignal 缺省，与列表路由同款）。
+    const sig = children[0].signal;
+    assert.ok(sig && sig.state === 'idle', `signal 形状须在且无活动为 idle（实测 ${JSON.stringify(sig)}）`);
+    assert.ok('confidence' in sig && 'waiting_since' in sig && 'reason' in sig, 'signal 四字段形状');
   } finally { server.close(); }
+});
+
+test('children enrich: O(N) 单遍 + mtime 缓存命中（性能席 CRITICAL 回归钉）', async () => {
+  // 旧形态对每个 child 内层重扫整个 agents/<parent>/ 目录——6 children ×
+  // 30 子目录 = 180 次 metadata 读；单遍索引 = 30 次（每子目录恰一次）。
+  // 缓存命中后第二次请求零 metadata 读（readdir/stat 不经 readFileSync）。
+  for (let i = 1; i <= 5; i++) {
+    fx.conn.prepare(`INSERT INTO session (id, parent_id, task_type, title, time_created, time_updated)
+                     VALUES (?, 's1', 'subagent_child', ?, ?, ?)`)
+      .run('sc' + i, 'child' + i, 1758900000000 + i, 1758900000000 + i);
+    const sub = path.join(agentsDir, 's1', 'agent_sub' + i);
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(sub, 'metadata.json'),
+      JSON.stringify({ childSessionId: 'sc' + i, profileId: 'Explore', prompt: 'p' + i }));
+    for (let j = 1; j <= 5; j++) { // 不匹配的干扰子目录（旧形态的重复扫描面）
+      const noise = path.join(agentsDir, 's1', 'noise' + i + '_' + j);
+      fs.mkdirSync(noise, { recursive: true });
+      fs.writeFileSync(path.join(noise, 'metadata.json'),
+        JSON.stringify({ childSessionId: 'none' + j }));
+    }
+  }
+  const orig = fs.readFileSync;
+  let reads = 0;
+  fs.readFileSync = function (...a) { reads++; return orig.apply(this, a); };
+  const app = express();
+  app.use('/api/sessions', sessions);
+  const server = await listen(app);
+  try {
+    let r = await get(server.address().port, '/api/sessions/s1/children');
+    const children = JSON.parse(r.body).children;
+    assert.equal(children.length, 6, 's2 + sc1..5');
+    const firstPass = reads;
+    assert.ok(firstPass <= 36, `单遍 enrich：metadata 读次数 O(子目录数)=30（实测 ${firstPass}；旧 O(N²) 形态=180）`);
+    reads = 0;
+    r = await get(server.address().port, '/api/sessions/s1/children');
+    assert.equal(JSON.parse(r.body).children.length, 6);
+    assert.equal(reads, 0, `缓存命中零 metadata 读（实测 ${reads}）`);
+    // 富化语义仍正确（干扰目录不劫持匹配）
+    const byId = Object.fromEntries(JSON.parse(r.body).children.map(c => [c.id, c]));
+    for (let i = 1; i <= 5; i++) assert.equal(byId['sc' + i].prompt, 'p' + i);
+  } finally {
+    fs.readFileSync = orig;
+    server.close();
+  }
 });

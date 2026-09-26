@@ -139,6 +139,37 @@ router.get('/:id/reasoning', (req, res) => {
 });
 
 // GET /api/sessions/:id/children — subagent tree
+// enrich 索引缓存（性能席 CRITICAL 修复）：原实现对每个 child 内层重扫整个
+// agents/<parent>/ 目录找 metadata.json——O(N²) 次 readFileSync，最重真实
+// 会话（298 子代理）单请求 44,619 次读、39-45s 同步阻塞（真库实测 2026-09-27）。
+// 单遍建 Map 后降为 O(N)（~299 次读 ≈0.3s）；再按「父目录 mtime + 60s TTL」
+// 缓存——mtime 捕获新子目录出现（子代理新派生即父目录变化），TTL 兜住
+// 「已有子目录内 metadata.json 被改写不触发父 mtime」的陈旧面（最坏 60s）。
+// 会话详情 Agents tab 5s 轮询（前端）叠加下，缓存使命中轮询只付 readdir+stat。
+// 缓存有界（CHILD_META_CACHE_MAX 键序逐出，notify 冷却 NOTIFY_COOLDOWN_CAP
+// 同款纪律）；本服务对 ~/.zcode 只读，缓存纯内存。
+const CHILD_META_CACHE_MAX = 200;
+const CHILD_META_TTL_MS = 60_000;
+const childMetaCache = new Map();
+function childMetaIndex(parentDir) {
+  const st = fs.statSync(parentDir);
+  const hit = childMetaCache.get(parentDir);
+  if (hit && hit.mtimeMs === st.mtimeMs && Date.now() - hit.at < CHILD_META_TTL_MS) {
+    return hit.byChild;
+  }
+  const byChild = new Map();
+  for (const sub of fs.readdirSync(parentDir)) {
+    let m = null;
+    try { m = JSON.parse(fs.readFileSync(path.join(parentDir, sub, 'metadata.json'), 'utf8')); }
+    catch { continue; } // 无 metadata.json / 畸形 JSON：跳过该子目录（原形态同义）
+    if (m && typeof m.childSessionId === 'string') byChild.set(m.childSessionId, m);
+  }
+  childMetaCache.set(parentDir, { mtimeMs: st.mtimeMs, at: Date.now(), byChild });
+  if (childMetaCache.size > CHILD_META_CACHE_MAX) {
+    childMetaCache.delete(childMetaCache.keys().next().value); // Map 插入序＝最旧键
+  }
+  return byChild;
+}
 router.get('/:id/children', (req, res) => {
   const parentDir = resolveSubdir(AGENTS_DIR, req.params.id);
   if (!parentDir) {
@@ -146,20 +177,21 @@ router.get('/:id/children', (req, res) => {
   }
   const children = dbq.sessionChildren(req.params.id);
   // enrich with metadata.json (profile, prompt, spawn tool call)
+  const byChild = fs.existsSync(parentDir) ? childMetaIndex(parentDir) : new Map();
+  // C6 信号同源合并（用户实锤「20 多个怎么可能」——账号并发上限 15，直觉
+  // 读数是「当前在工作的数量」）：逐子代理附四态信号（working/waiting/
+  // idle/broken），前端拆「活跃/等待/已结束」。与列表路由同款消费形态；
+  // sessionsWithSignals 三路取数与 children 数无关，5s 轮询下成本恒定毫秒级。
+  let sigs = null;
+  if (children.length) {
+    sigs = dbq.sessionsWithSignals({
+      sinceMs: Date.now() - SIGNALS_WINDOW_MS,
+      sessionIds: children.map(c => c.id),
+    });
+  }
   const enriched = children.map(c => {
-    let meta = null;
-    // find agents/<parentSessionId>/agent_<short>/metadata.json where childSessionId == c.id
-    if (fs.existsSync(parentDir)) {
-      for (const sub of fs.readdirSync(parentDir)) {
-        const metaPath = path.join(parentDir, sub, 'metadata.json');
-        if (fs.existsSync(metaPath)) {
-          try {
-            const m = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-            if (m.childSessionId === c.id) { meta = m; break; }
-          } catch {}
-        }
-      }
-    }
+    const meta = byChild.get(c.id) || null;
+    const sig = sigs ? (sigs.get(c.id) || idleSignal()) : null;
     return {
       id: c.id,
       title: c.title,
@@ -171,6 +203,12 @@ router.get('/:id/children', (req, res) => {
       profileSnapshot: meta?.profileSnapshot || null,
       prompt: meta?.prompt || null,
       parentToolUseId: meta?.parentToolUseId || null,
+      signal: sig ? {
+        state: sig.state,
+        confidence: sig.confidence,
+        waiting_since: sig.waiting_since,
+        reason: sig.reason,
+      } : null,
     };
   });
   res.json({ children: enriched });

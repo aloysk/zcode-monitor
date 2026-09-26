@@ -42,7 +42,34 @@ npm test                   # node --test test/index.js（聚合入口）
 - 遗留项唯一登记处：`docs/acceptance/residuals.md`（新遗留入册、解决销账、不删条目）。
 - 推送目标：`origin` = fork（aloysk/zcode-monitor）；`upstream` = yiyanwannian 原仓库（只读参考）。
 
-## 当前状态（2026-09-25）
+## 当前状态（2026-09-27）
+
+- 计数自动刷新轮（fix/counter-autorefresh）：用户实锤 overview 计数不
+  刷新（加载后冻结、SSE 只喂 feed）与 Agents tab「子 Agent 20+」被误读为
+  并发（实为累计派生，一审查会话 23 个 children 逐条对应五席/三席/实施
+  席真实工作流；官方/社区口径查证一致——每次 Agent 调用一个子会话，
+  一回合几十个是社区周知常态）。修复：overview 5s 自动重拉（段级 JSON
+  防闪——kpis 段须剔 since+window_ms 墙钟字段；viewGen/autoTimer 自停/
+  在途/窗一致守卫；7d 宽窗 30s 分频——性能席实测 7d 全量 1.4-2s/请求、
+  27-40% 占空比越红线，24h 档 293ms 保持 5s）；Agents tab 5s 轮询+
+  agentsGen 代际+alive 双查+在途守卫；children 路由附逐子代理 C6 信号
+  （标题「累计派生 N · 活跃 M · 等待 K」+行内状态徽标——「多少在工作」
+  可读）；children enrich O(N²)→O(N) 单遍 Map+mtime/TTL 有界缓存 200 键
+  （性能席 CRITICAL：原形态最重会话 298 子代理=单请求 44,619 次
+  readFileSync/39-45s 事件循环阻塞，预存缺陷被轮询放大，一并根治）。
+  三席评审（代码/测试质量/性能安全）全闭环：代码席 MAJOR window_ms 漏剔
+  （防闪恒失效实测钉）+切窗乱序守卫；测试席 recap 间歇红两窗根因
+  （午夜后 00:10-00:20 db2 混入 + 23:55-00:05 tf4 跨日——C7-2 双抬升、
+  阶段 6 预移 6min+当日下限，全天 1440 分钟模拟零失败）+V1-V6 存活
+  变异补钉（autoRefresh 不得带 force/lastPayload.window 同步/基线更新/
+  置位行/双路渲染）。契约钉 test/counter-autorefresh.test.js 15 例
+  （变异抽杀验证）+ sessions-routes enrich O(N)/缓存/signal 形状 2 例；
+  7399 冒烟实测：计数 43s 内自动变化（主 2490→2493、子agent 窗尾滑出）、
+  /api/overview 严格 5s 单序列、Agents 新 UI 截图 agents-tab-signal-smoke
+  入 acceptance。直列 41 文件 410/410 绿（394 既有 + counter-autorefresh 15 例 + sessions-routes enrich 1 例）。无新增登记
+  （recap 间歇红族已根因，见 residuals changelog；R-34 export 形态维持）。
+
+## 历史状态（2026-09-25）
 
 - 三席收尾轮（fix/three-seat-followup）：代码/测试质量/文档口径三席并行全量
   审查一轮，3×READY 零必修——代码席：互斥三元组全路径枚举（可达终态恰三、

@@ -11,6 +11,28 @@
   let lastWindow = '24h';
   let themeHandler = null;
   let snapTimer = null;
+  // ── 计数自动刷新（2026-09-27 用户实锤：速度卡「主/子agent(含工作流)」等
+  // 计数只在加载时查询一次，SSE 只喂活动 feed——页面挂着时计数完全冻结，
+  // 与实时滚动的 feed 形成强反差，观感即「延时非常久/不准」）。
+  // 定时全量重拉 /api/overview（pet 页 5s 轮询 /api/widget/recent 同款节奏）。
+  // 频率分档（性能席实测钉）：24h/today 档六查询热态合计 ~293ms/请求
+  //（≈6% 占空比）保持 5s；7d 档要扫 ~31.5 万索引行、热态 1.4-2s（27-40%
+  // 占空比，冷态 ~3s 越红线锚点）——固定 5s 心跳下每 6 拍才执行一次重拉
+  //（30s 数据陈旧上限，对趋势图语义无损）。
+  // 段级 JSON 比较防闪：数据没变的段跳过重渲染——否则每次图表
+  // destroy/rebuild 会闪烁，KPI/表格会打断 hover 与文本选择。
+  const OV_REFRESH_MS = 5000;
+  const OV_WIDE_SKIP_TICKS = 6; // 7d 档：每 6 个 5s 心跳执行一次（30s）
+  let wideTick = 0;
+  let autoTimer = null;
+  let refreshInFlight = false;
+  let lastPayload = {};
+  // 代际 token（sessions.js gaugeGen 同款）：view() 的 autoTimer/snapTimer/
+  // themeHandler 都在 await 取数之后才装配——两次交叠 route 重入会让后者的
+  // 入口清理扑空（前者尚未装配），两个实例都装配后 autoTimer 槽位只留一个
+  // 句柄，另一个成孤儿定时器（无法停、双倍轮询）。入口 ++、await 后比对：
+  // 旧实例整批自弃，定时器恒由最新实例装配。
+  let viewGen = 0;
 
   function destroyCharts() {
     Object.values(charts).forEach(c => { try { c.destroy(); } catch {} });
@@ -18,13 +40,16 @@
   }
 
   async function view() {
+    const gen = ++viewGen;
     if (liveEs) { liveEs.close(); liveEs = null; }
     // remove any prior theme listener so re-entry doesn't stack handlers
     if (themeHandler) window.removeEventListener('zc-theme-changed', themeHandler);
     if (snapTimer) { clearInterval(snapTimer); snapTimer = null; }
+    stopAutoRefresh();
     destroyCharts();
     liveRows = [];
     lastWindow = '24h';
+    lastPayload = {};
 
     $('#root').innerHTML = `
       <div class="view max">
@@ -100,17 +125,20 @@
       </div>
     `;
 
-    $('#ov-refresh').onclick = loadOverview;
-    $('#ov-window').onchange = loadOverview;
+    $('#ov-refresh').onclick = () => loadOverview(true);
+    $('#ov-window').onchange = () => loadOverview(true);
     bindNotifySettings();
-    await loadOverview();
+    await loadOverview(true);
+    if (gen !== viewGen) return; // 交叠重入：被更新代际超越，本实例不再装配任何定时器/监听
     startLive();
     refreshSnapshot();
     // 绊线卡轮询：view 存续期间低频刷新（顶栏告警由 app.js snapshotLoop 负责）
     snapTimer = setInterval(refreshSnapshot, 15 * 1000);
+    // 计数自动刷新：5s 全量重拉（防闪比较在 renderOverview 内做）
+    autoTimer = setInterval(autoRefresh, OV_REFRESH_MS);
 
     // re-fetch + re-render charts when the theme flips (palette changes)
-    themeHandler = async () => { await loadOverview(); };
+    themeHandler = async () => { await loadOverview(true); };
     window.addEventListener('zc-theme-changed', themeHandler);
   }
 
@@ -263,16 +291,66 @@
 
   function shortHash(h) { return h ? String(h).slice(0, 12) + '…' : '—'; }
 
-  async function loadOverview() {
+  async function loadOverview(force) {
     const w = $('#ov-window') ? $('#ov-window').value : lastWindow;
     lastWindow = w;
     const data = await getJSON(`/api/overview?window=${w}`);
-    renderKpis(data.kpis, w);
-    renderSpeedKpi(data.speed);
-    renderSeries(data.series, w);
-    renderBreakdown(data.by_model, data.by_tool);
-    renderSpeedChart(data.recent_speed || []);
-    renderSpeedTable(data.recent_speed || []);
+    // 窗一致性守卫（代码席评审 MINOR）：在途期间用户切窗（select 已变）时，
+    // 本响应属旧窗——渲染会以旧窗数据覆写新窗已渲染的页面（select 显 7d、
+    // 页面显 24h），丢弃，下一轮自动刷新按新窗自愈。
+    if ($('#ov-window') && $('#ov-window').value !== w) return;
+    renderOverview(data, w, force);
+  }
+
+  // 段级渲染分发 + 防闪比较：数据未变的段跳过重渲染（图表 destroy/rebuild
+  // 闪烁、KPI/表格打断 hover 均由此抑制）。force=true（首次进入/手动刷新/
+  // 切窗/主题翻转）跳过比较，保证用户操作有即时反馈。kpis 段比较须剔除
+  // since 与 window_ms 两个墙钟衍生字段——since 是每轮重算的时间戳、
+  // window_ms 是 Date.now()−sinceMs 的窗长抖动（today 档随毫秒增长），
+  // 任一不剔除则该段比较恒失效、KPI 每 5s 必重渲染（代码席评审 MAJOR
+  // 实锤：剔 since 后 fixture 连跑两轮仍不等，再剔 window_ms 才恒等）。
+  function renderOverview(data, w, force) {
+    const same = (key, val) => {
+      const j = JSON.stringify(val);
+      if (!force && lastPayload.window === w && lastPayload[key] === j) return true;
+      lastPayload[key] = j;
+      return false;
+    };
+    if (!lastPayload.window || lastPayload.window !== w) lastPayload.window = w;
+    const kpisCore = { ...data.kpis };
+    delete kpisCore.since;
+    delete kpisCore.window_ms;
+    if (!same('kpis', kpisCore)) renderKpis(data.kpis, w);
+    if (!same('speed', data.speed)) renderSpeedKpi(data.speed);
+    if (!same('series', data.series)) renderSeries(data.series, w);
+    if (!same('breakdown', [data.by_model, data.by_tool])) renderBreakdown(data.by_model, data.by_tool);
+    if (!same('recent', data.recent_speed || [])) {
+      renderSpeedChart(data.recent_speed || []);
+      renderSpeedTable(data.recent_speed || []);
+    }
+  }
+
+  // 5s 心跳自动刷新回调（7d 宽窗每 OV_WIDE_SKIP_TICKS 拍执行一次重拉）。
+  // 守卫族：
+  // 1) 自停——视图已切走（#kpis 不在 DOM）：view() 入口的 stopAutoRefresh
+  //    之外的第二道防线（refreshSnapshot 同款形态；防回调存活期间持续打库）；
+  // 2) 在途跳过——上一轮 fetch 未返回时本轮直接放弃，不堆叠请求；
+  // 3) 失败静默——保留上次渲染、console.warn 留痕，下一轮自愈；绝不弹
+  //    errorCard 覆写已有数据（瞬时 503/断网不该清空监控页）。
+  async function autoRefresh() {
+    if (!$('#kpis')) { stopAutoRefresh(); return; }
+    const w = $('#ov-window') ? $('#ov-window').value : lastWindow;
+    if (w === '7d' && ++wideTick < OV_WIDE_SKIP_TICKS) return; // 宽窗分频：跳过本拍
+    wideTick = 0;
+    if (refreshInFlight) return;
+    refreshInFlight = true;
+    try { await loadOverview(); }
+    catch (e) { console.warn('[overview] 自动刷新失败（保留上次渲染，下一轮重试）', e); }
+    finally { refreshInFlight = false; }
+  }
+
+  function stopAutoRefresh() {
+    if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
   }
 
   function renderKpis(k, w) {
