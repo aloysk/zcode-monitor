@@ -71,7 +71,7 @@
       const concepts = [
         {
           h: 'Session（会话）',
-          p: `一次独立的对话。分四类：<code>interactive</code>（你直接聊的主会话）、<code>subagent_child</code>（主 agent 派生的子 agent，做搜索/调研等只读活）、<code>workflow_child</code>（动态工作流派生的 actor 会话，同样挂在 parent 会话下，会话列表里以紫色 workflow 徽标区分）、<code>selection_side_chat</code>（选中代码的侧边提问）。你的库里有 <b>${fmtInt(agents.total)}</b> 个会话，其中 ${fmtInt(agents.roots.length)} 个主会话派生了大量子 agent。`,
+          p: `一次独立的对话。分四类：<code>interactive</code>（你直接聊的主会话）、<code>subagent_child</code>（主 agent 派生的子 agent，做搜索/调研等只读活）、<code>workflow_child</code>（动态工作流派生的 actor 会话，同样挂在 parent 会话下，会话列表里以紫色 workflow 徽标区分）、<code>selection_side_chat</code>（选中代码的侧边提问）。你的库里有 <b>${fmtInt(agents.total)}</b> 个会话，其中 ${fmtInt(agents.roots.length)} 个主会话派生了大量子 agent。会话详情 Agents 标签的「子 Agent N 个」是<b>累计派生</b>口径——每次 Agent 调用一个子会话，一轮任务跑几十个是常态（并发上限约束的是同时在飞，不是累计）；「活跃/等待」拆分走逐子代理信号，回答「此刻多少在工作」。`,
           ex: `例：最近的主会话 "查看和观测 zcode agent" 派生了 4 个 Explore 子 agent（在「子 Agent」页可见调用树）`,
         },
         {

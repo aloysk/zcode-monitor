@@ -131,13 +131,24 @@ test('C7-1 跨日界钉: 23:50/次日 00:10 分属不同日桶、桶键与注入
 
 // ── 阶段 2：C7-2 activeMinutes 跨会话去重（5min 桶构造，窗内只含本组行）──
 test('C7-2 去重钉: 同桶两会话只计一次（3 行 3 会话 → 2 桶）、桶键相邻、桶内并行数与构造一致', () => {
-  const base = Math.floor((now + TZ_MS) / 300000) * 300000 - TZ_MS; // 5min 桶边界对齐
+  // 时刻鲁棒双抬升（2026-09-27 00:15 实锤间歇红根因）：阶段 1 的 db1/db2 是
+  // 「昨日 23:50 / 今日 00:10」绝对时刻，而本用例的行与窗口都相对 now——
+  // 午夜后短窗内跑会交叠：00:10-00:20 段 now−10min 回溯跨过 db2（actual 3 桶，
+  // db2 自成一桶）；00:00-00:10 段则把昨日 db1 混进窗。把 pb/pc 桶与窗口
+  // 下界都抬到 db2 之后，任何时刻窗内恒只含 pb/pc 三行；白天跑两者均取
+  // 原 now 相对值（语义不变）。db2At+5min 恰落 5min 网格点，抬升不破坏
+  // 桶边界对齐。锚点预移 6 分钟（测试席 R1）：23:55-00:00 段跑时 now 桶的
+  // +6min 行会跨日进次日桶、今日桶累计断言（阶段 3）红——预移后 pc1 恒不
+  // 越 now 所在日。阶段 6/8 的 tf4 同族锚点同法预移（测试席 R2）。
+  const db2At = dayKeyOf(now) * DAY - TZ_MS + 10 * MIN;
+  const base = Math.max(Math.floor((now - 6 * MIN + TZ_MS) / 300000) * 300000 - TZ_MS, db2At + 5 * MIN); // 5min 桶边界对齐
   buildModelUsage(fx.conn, [
     modelRow({ id: 'pb1', session_id: 'pA', started_at: base + MIN, computed_total_tokens: 5 }),
     modelRow({ id: 'pb2', session_id: 'pB', started_at: base + 2 * MIN, computed_total_tokens: 7 }),
     modelRow({ id: 'pc1', session_id: 'pC', started_at: base + 6 * MIN, computed_total_tokens: 9 }),
   ]);
-  const buckets = dbq.recapActivityBuckets(now - 10 * MIN, { tzMs: TZ_MS });
+  const since = Math.max(now - 10 * MIN, db2At + MIN);
+  const buckets = dbq.recapActivityBuckets(since, { tzMs: TZ_MS });
   assert.equal(buckets.length, 2, '同桶跨会话去重：activeMinutes＝2');
   assert.equal(buckets[0].bucket + 1, buckets[1].bucket, '相邻桶');
   assert.deepEqual(buckets.map(b => b.sessions), [2, 1], '桶内并行会话数：[pA,pB]=2、[pC]=1');
@@ -233,7 +244,14 @@ test('区间并集: 重叠合并/脏行（逆序+NULL）防御，合并区间与
 
 // ── 阶段 6：C7-5 top_focus 行级桶聚合 + JS 归并（含跨会话同桶对照）──
 test('C7-5 归并钉: by-directory tokens/calls/sessions/activeMinutes 逐项相等；空窗空数组；Top N 在归并后', () => {
-  const base = Math.floor((now - 3 * DAY + TZ_MS) / 300000) * 300000 - TZ_MS;
+  // 时刻鲁棒（测试席 R2）：tf4=base+6min 在 (now−3d) 本地落 [23:55,24:00) 时
+  // 跨日、阶段 8 的 byDate[wallDate(now−3d)] 断言红（实证）。同 R1 预移 6 分钟
+  // 使 tf4 ≤ now−3d 恒不越日；再加当日 00:00 下限——纯预移在 now−3d 落
+  // [00:00,00:05) 时 base 仍会取到昨日尾桶（tf4 跨日回昨日），max 下限兜住。
+  // 白天跑 base=原 now−3d 对齐值（语义不变），桶结构（tf3 同桶/tf4 相邻桶）
+  // 与阶段 8 期望值均不动。
+  const dayStart3 = dayKeyOf(now - 3 * DAY) * DAY - TZ_MS;
+  const base = Math.max(Math.floor((now - 3 * DAY - 6 * MIN + TZ_MS) / 300000) * 300000 - TZ_MS, dayStart3);
   // 零长度 span（time_created==time_updated）：会话存在但不影响区间并集口径
   buildSession(fx.conn, [
     { id: 'tfA1', title: 'A1', task_type: 'interactive', directory: 'F:/projA',

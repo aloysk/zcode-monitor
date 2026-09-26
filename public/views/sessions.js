@@ -33,6 +33,25 @@
     if (gaugeEs) { gaugeEs.close(); gaugeEs = null; }
   }
 
+  // Agents tab 子代理计数轮询（overview.js autoTimer 同款生命周期纪律）：
+  // 深挖页停留期间新派生的子代理此前永不出现（renderAgents 只在切 tab 时
+  // 查询一次）。sessionChildren SQL 走 session_parent_idx + model_usage 的
+  // (session_id,turn_id) 索引毫秒级；路由侧 metadata enrich 已索引化+缓存
+  //（server/routes/sessions.js childMetaIndex，O(N) 单遍 + mtime/TTL 缓存）。
+  // 数据相同跳过重渲染（不打断 hover/文本选择）；tab/会话切换由 loadTab/
+  // view 入口统一停。5s 一轮。
+  const AGENTS_POLL_MS = 5000;
+  let agentsTimer = null;
+  // 代际 token（gaugeGen 同款）：renderAgents 的 setInterval 在 await 取数
+  // 之后才执行——两次交叠调用（route 重入）会让后者的 stopAgentsPoll 扑空
+  // （前者尚未 set），两个都 set 后槽位只留一个句柄，另一个成孤儿定时器
+  // （无法停、双倍轮询）。入口 ++、await 后比对：旧实例整批自弃，定时器
+  // 恒由最新实例创建，槽位一致。
+  let agentsGen = 0;
+  function stopAgentsPoll() {
+    if (agentsTimer) { clearInterval(agentsTimer); agentsTimer = null; }
+  }
+
   const TABS = [
     { id: 'timeline', label: 'Timeline' },
     { id: 'context',  label: 'Context' },
@@ -52,6 +71,7 @@
     currentId = args[0] || null;
     currentTab = args[1] && TABS.some(t => t.id === args[1]) ? args[1] : 'timeline';
     closeGaugeLive(); // 会话视图重入（含会话内 hash 跳转）：摘掉上一实例的 live 订阅
+    stopAgentsPoll(); // 同上：摘掉 Agents tab 可能存续的轮询定时器
 
     $('#root').innerHTML = `
       <div class="work">
@@ -216,6 +236,7 @@
 
   async function loadTab() {
     if (!currentId) return;
+    stopAgentsPoll(); // 切 tab 统一先停旧轮询（Agents 分支按需重启）
     const body = $('#tab-body');
     body.innerHTML = loading();
     try {
@@ -601,21 +622,57 @@
   }
 
   async function renderAgents(id, body) {
+    stopAgentsPoll();
+    // 渲染统一路径（空态/表格同门）：轮询期间「未派生 → 派生了」也要能翻页，
+    // 空态分支不得 early return 后不再刷新。
+    const render = (children) => {
+      if (!children.length) { body.innerHTML = '<div class="empty">该会话未派生子 agent</div>'; return; }
+      // children 按 parent_id 查询，天然同时含 Task 子代理与工作流 actor——
+      // 计数拆开展示，避免把工作流 actor 混记进 Task 子代理数。
+      // 口径澄清（用户实锤「怎么可能 20 多个」）：总数是会话全生命周期的
+      // **累计派生数**——每次 Agent 调用一个子会话，多轮并行评审/实施
+      // 跑几十个是常态；并发上限约束的是同时在飞，不是累计。活跃/等待拆分
+      // 走 C6 逐子代理信号（与列表徽标同源），回答「此刻多少在工作」。
+      // 直系一级（子代理再派的不含，全谱见「子 Agent 关系树」页）。
+      const wfs = children.filter(c => c.task_type === 'workflow_child').length;
+      const working = children.filter(c => c.signal && c.signal.state === 'working').length;
+      const waiting = children.filter(c => c.signal && c.signal.state === 'waiting').length;
+      const broken = children.filter(c => c.signal && c.signal.state === 'broken').length;
+      body.innerHTML = `<h2>子 Agent <span class="sub">累计派生 ${children.length} 个${wfs ? ` · 工作流 actor ${wfs}` : ''}${working ? ` · <span style="color:var(--accent)">活跃 ${working}</span>` : ''}${waiting ? ` · 等待 ${waiting}` : ''}${broken ? ` · 异常 ${broken}` : ''}</span></h2>
+        <div class="card tight" style="overflow-x:auto"><table>
+          <thead><tr><th>profile</th><th>状态</th><th>描述</th><th class="num">token</th><th>创建</th><th></th></tr></thead>
+          <tbody>${children.map(c => `<tr data-id="${escapeHtml(c.id)}">
+            <td>${childBadge(c)}</td>
+            <td>${signalBadgesHtml(c.signal)}</td>
+            <td>${escapeHtml((c.prompt||'').slice(0,80))}${c.prompt&&c.prompt.length>80?'…':''}</td>
+            <td class="num">${fmtNum(c.total_tokens)}</td>
+            <td><span class="mono faint">${relTime(c.time_created)}</span></td>
+            <td><a href="#sessions/${encodeURIComponent(c.id)}/timeline">打开 →</a></td>
+          </tr>`).join('')}</tbody></table></div>`;
+    };
+    const gen = ++agentsGen;
+    const alive = () => currentTab === 'agents' && currentId === id && gen === agentsGen;
     const data = await getJSON(`/api/sessions/${id}/children`);
-    if (!data.children.length) { body.innerHTML = '<div class="empty">该会话未派生子 agent</div>'; return; }
-    // children 按 parent_id 查询，天然同时含 Task 子代理与工作流 actor——
-    // 计数拆开展示，避免把工作流 actor 混记进 Task 子代理数。
-    const wfs = data.children.filter(c => c.task_type === 'workflow_child').length;
-    body.innerHTML = `<h2>子 Agent <span class="sub">${data.children.length} 个${wfs ? ` · 工作流 actor ${wfs}` : ''}</span></h2>
-      <div class="card tight" style="overflow-x:auto"><table>
-        <thead><tr><th>profile</th><th>描述</th><th class="num">token</th><th>创建</th><th></th></tr></thead>
-        <tbody>${data.children.map(c => `<tr data-id="${escapeHtml(c.id)}">
-          <td>${childBadge(c)}</td>
-          <td>${escapeHtml((c.prompt||'').slice(0,80))}${c.prompt&&c.prompt.length>80?'…':''}</td>
-          <td class="num">${fmtNum(c.total_tokens)}</td>
-          <td><span class="mono faint">${relTime(c.time_created)}</span></td>
-          <td><a href="#sessions/${encodeURIComponent(c.id)}/timeline">打开 →</a></td>
-        </tr>`).join('')}</tbody></table></div>`;
+    if (!alive()) return; // 取数在途期间已切走/被更新代际超越：自弃（gaugeGen 同款语义）
+    render(data.children);
+    let lastJson = JSON.stringify(data.children);
+    // 在途守卫（性能席发现：重会话 enrich 慢时，无守卫的轮询会每 5s 堆一个
+    // 在途请求排队串行处理）——overview refreshInFlight 同款。
+    let pollInFlight = false;
+    agentsTimer = setInterval(async () => {
+      if (!alive()) { stopAgentsPoll(); return; }
+      if (pollInFlight) return;
+      pollInFlight = true;
+      try {
+        const d = await getJSON(`/api/sessions/${id}/children`);
+        if (!alive()) { stopAgentsPoll(); return; } // await 后复查：等待期间可能已切走
+        const j = JSON.stringify(d.children);
+        if (j === lastJson) return; // 数据相同跳过：不打断 hover/文本选择
+        lastJson = j;
+        render(d.children);
+      } catch (e) { console.warn('[sessions] 子 agent 列表轮询失败（保留上次渲染）', e); }
+      finally { pollInFlight = false; }
+    }, AGENTS_POLL_MS);
   }
 
   // ── Tasks tab (todo) ──
